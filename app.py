@@ -92,7 +92,8 @@ def get_template_image():
 initialize_demo_data()
 
 # Create Gradio interface
-with gr.Blocks(title="🧩 Jigsaw Puzzle Solver", theme=gr.themes.Soft()) as demo:
+app_theme = gr.themes.Soft()
+with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
     gr.Markdown("""
     # 🧩 Jigsaw Puzzle Solver
     
@@ -143,4 +144,4 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver", theme=gr.themes.Soft()) as dem
     """)
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(theme=app_theme)
