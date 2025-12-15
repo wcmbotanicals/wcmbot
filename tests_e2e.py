@@ -10,13 +10,16 @@ import os
 @pytest.fixture(scope="module")
 def django_server():
     """Start Django development server for E2E tests"""
+    # Get the project directory
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    
     # Make sure migrations are run
-    subprocess.run(["python", "manage.py", "migrate"], cwd="/home/runner/work/wcmbot/wcmbot", check=True)
+    subprocess.run(["python", "manage.py", "migrate"], cwd=project_dir, check=True)
     
     # Start the server
     process = subprocess.Popen(
         ["python", "manage.py", "runserver", "8000"],
-        cwd="/home/runner/work/wcmbot/wcmbot",
+        cwd=project_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
@@ -85,8 +88,9 @@ def test_upload_piece_functionality(page: Page, django_server):
     """Test uploading a puzzle piece"""
     page.goto(f"{django_server}/puzzle/1/")
     
-    # Upload a piece
-    piece_path = "/home/runner/work/wcmbot/wcmbot/media/pieces/piece_1.png"
+    # Upload a piece - use relative path from project root
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    piece_path = os.path.join(project_dir, "media", "pieces", "piece_1.png")
     
     if os.path.exists(piece_path):
         # Set up file input

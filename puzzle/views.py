@@ -1,7 +1,5 @@
-from django.shortcuts import render, get_object_or_404, redirect
+from django.shortcuts import render, get_object_or_404
 from django.http import JsonResponse
-from django.core.files.base import ContentFile
-from django.views.decorators.csrf import csrf_exempt
 from .models import PuzzleTemplate, PuzzlePiece
 from .matcher import find_piece_in_template, highlight_position
 import io
