@@ -38,19 +38,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+          cache: 'pip'
 
       # Step 3: Install Python dependencies
       # Install all packages listed in requirements.txt
+      # Caching is enabled to speed up subsequent workflow runs
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       # Step 4: Run pytest tests
-      # Execute all tests with verbose output for detailed results
+      # Execute all tests with verbose output (configured in pytest.ini)
+      # Using short traceback format for cleaner output
       - name: Run tests with pytest
         run: |
-          pytest -v --tb=short
+          pytest --tb=short
 
       # Step 5: Generate test summary
       # Display a summary of test results in the workflow logs
