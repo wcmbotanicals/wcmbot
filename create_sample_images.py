@@ -1,11 +1,13 @@
 """Create sample puzzle template and piece images for testing"""
 import os
 import sys
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
-# Add project to path
-sys.path.insert(0, '/home/runner/work/wcmbot/wcmbot')
+# Dynamically add the project root so the script works on any machine
+BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR))
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'jigsaw_project.settings')
 
 import django
@@ -68,7 +70,10 @@ def create_puzzle_piece(template_img, x, y, width=100, height=100):
 def main():
     print("Creating sample puzzle template...")
     template_img = create_puzzle_template()
-    template_path = '/home/runner/work/wcmbot/wcmbot/media/templates/sample_puzzle.png'
+    media_root = BASE_DIR / 'media'
+    template_dir = media_root / 'templates'
+    template_dir.mkdir(parents=True, exist_ok=True)
+    template_path = template_dir / 'sample_puzzle.png'
     template_img.save(template_path)
     print(f"Saved template to {template_path}")
     
@@ -94,7 +99,9 @@ def main():
     
     for x, y, filename in pieces_info:
         piece_img = create_puzzle_piece(template_img, x, y)
-        piece_path = f'/home/runner/work/wcmbot/wcmbot/media/pieces/{filename}'
+        piece_dir = media_root / 'pieces'
+        piece_dir.mkdir(parents=True, exist_ok=True)
+        piece_path = piece_dir / filename
         piece_img.save(piece_path)
         print(f"Saved piece to {piece_path}")
     
