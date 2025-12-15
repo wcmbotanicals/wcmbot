@@ -27,7 +27,7 @@ The application uses OpenCV-based computer vision algorithms to match puzzle pie
 - Python 3.8 or higher
 - pip package manager
 
-### Setup
+### Quick Setup
 
 1. Clone the repository:
 ```bash
@@ -35,27 +35,27 @@ git clone https://github.com/wcmbotanicals/wcmbot.git
 cd wcmbot
 ```
 
-2. Install dependencies:
+2. Run the setup script:
 ```bash
-pip install -r requirements.txt
+./setup.sh
 ```
 
-3. Run migrations:
-```bash
-python manage.py migrate
-```
-
-4. Create sample puzzle data (optional):
-```bash
-python create_sample_images.py
-```
-
-5. Run the development server:
+3. Run the development server:
 ```bash
 python manage.py runserver
 ```
 
-6. Access the application at `http://127.0.0.1:8000/`
+4. Access the application at `http://127.0.0.1:8000/`
+
+### Manual Setup
+
+If you prefer to set up manually:
+
+1. Clone the repository
+2. Install dependencies: `pip install -r requirements.txt`
+3. Run migrations: `python manage.py migrate`
+4. Create sample data: `python create_sample_images.py`
+5. Run the server: `python manage.py runserver`
 
 ## Usage
 
