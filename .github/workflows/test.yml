@@ -1,0 +1,71 @@
+# GitHub Actions Workflow for Automated Testing
+# This workflow runs pytest tests to ensure code quality and functionality
+#
+# Triggers:
+# - Push events to the main branch
+# - Pull request events (opened, synchronized, reopened)
+# - Manual workflow dispatch through GitHub UI
+
+name: Run Tests
+
+on:
+  # Trigger on push to main branch
+  push:
+    branches:
+      - main
+
+  # Trigger on pull requests
+  pull_request:
+    branches:
+      - main
+
+  # Allow manual triggering from GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Use the latest Ubuntu runner provided by GitHub
+    runs-on: ubuntu-latest
+
+    # Explicitly set minimal permissions for security
+    # Only read access to repository contents is needed for running tests
+    permissions:
+      contents: read
+
+    steps:
+      # Step 1: Check out the repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python environment
+      # Using Python 3.9 as the default version (repo minimum is 3.8)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          cache: 'pip'
+
+      # Step 3: Install Python dependencies
+      # Install all packages listed in requirements.txt
+      # Caching is enabled to speed up subsequent workflow runs
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: Run pytest tests
+      # Execute all tests with verbose output (configured in pytest.ini)
+      # Using short traceback format for cleaner output
+      - name: Run tests with pytest
+        run: |
+          pytest --tb=short
+
+      # Step 5: Generate test summary
+      # Display a summary of test results in the workflow logs
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "==================================="
+          echo "Test execution completed"
+          echo "==================================="
+          echo "Check the logs above for detailed test results"

@@ -1,0 +1,284 @@
+{% extends "puzzle/base.html" %}
+
+{% block title %}{{ template.name }} - Jigsaw Puzzle Solver{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 20px;">
+    <a href="{% url 'puzzle:index' %}" class="btn btn-secondary">← Back to Puzzles</a>
+</div>
+
+<h1>{{ template.name }}</h1>
+
+<div class="puzzle-layout">
+    <div class="template-section">
+        <h2>Puzzle Template</h2>
+        <div class="template-display">
+            <img id="templateImage" src="{{ template.template_image.url }}" alt="{{ template.name }}">
+        </div>
+    </div>
+    
+    <div class="upload-section">
+        <h2>Upload Puzzle Piece</h2>
+        <form id="uploadForm" enctype="multipart/form-data">
+            {% csrf_token %}
+            <div class="upload-area" id="uploadArea">
+                <input type="file" id="pieceImage" name="piece_image" accept="image/*" required>
+                <label for="pieceImage">
+                    <div class="upload-icon">📁</div>
+                    <p>Click to select or drag and drop a puzzle piece image</p>
+                </label>
+            </div>
+            <button type="submit" class="btn" style="width: 100%; margin-top: 15px;">
+                Find Piece Location
+            </button>
+        </form>
+        
+        <div id="result" style="display: none;">
+            <h3>Match Result</h3>
+            <div id="resultContent"></div>
+        </div>
+    </div>
+</div>
+
+{% if pieces %}
+<div class="history-section">
+    <h2>Upload History</h2>
+    <div class="pieces-grid">
+        {% for piece in pieces %}
+        <div class="piece-card">
+            <img src="{{ piece.piece_image.url }}" alt="Piece {{ piece.id }}">
+            <div class="piece-info">
+                <p><strong>Position:</strong> ({{ piece.matched_x }}, {{ piece.matched_y }})</p>
+                <p><strong>Confidence:</strong> {{ piece.confidence_score|floatformat:2 }}</p>
+                <p><strong>Uploaded:</strong> {{ piece.uploaded_at|date:"M d, Y H:i" }}</p>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    .puzzle-layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 30px;
+        margin: 30px 0;
+    }
+    
+    @media (max-width: 768px) {
+        .puzzle-layout {
+            grid-template-columns: 1fr;
+        }
+    }
+    
+    .template-section, .upload-section {
+        background: #f8f9fa;
+        padding: 20px;
+        border-radius: 8px;
+    }
+    
+    .template-display {
+        background: white;
+        padding: 20px;
+        border-radius: 5px;
+        text-align: center;
+    }
+    
+    .template-display img {
+        max-width: 100%;
+        height: auto;
+        border: 2px solid #ddd;
+        border-radius: 5px;
+    }
+    
+    .upload-area {
+        position: relative;
+        border: 3px dashed #667eea;
+        border-radius: 8px;
+        padding: 40px;
+        text-align: center;
+        background: white;
+        transition: background 0.3s;
+    }
+    
+    .upload-area:hover {
+        background: #f0f4ff;
+    }
+    
+    .upload-area input[type="file"] {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        top: 0;
+        left: 0;
+        opacity: 0;
+        cursor: pointer;
+    }
+    
+    .upload-area label {
+        cursor: pointer;
+    }
+    
+    .upload-icon {
+        font-size: 48px;
+        margin-bottom: 10px;
+    }
+    
+    .upload-area p {
+        color: #666;
+        margin: 0;
+    }
+    
+    #result {
+        margin-top: 20px;
+        padding: 20px;
+        background: white;
+        border-radius: 8px;
+    }
+    
+    #result h3 {
+        color: #333;
+        margin-bottom: 15px;
+    }
+    
+    #result img {
+        max-width: 100%;
+        height: auto;
+        border: 2px solid #28a745;
+        border-radius: 5px;
+    }
+    
+    .result-info {
+        margin-top: 15px;
+        padding: 15px;
+        background: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 5px;
+    }
+    
+    .result-info p {
+        margin: 5px 0;
+        color: #155724;
+    }
+    
+    .pieces-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 15px;
+        margin-top: 20px;
+    }
+    
+    .piece-card {
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        padding: 10px;
+        background: #f8f9fa;
+    }
+    
+    .piece-card img {
+        max-width: 100%;
+        height: 150px;
+        object-fit: contain;
+        border-radius: 3px;
+        margin-bottom: 10px;
+    }
+    
+    .piece-info p {
+        font-size: 0.9em;
+        color: #666;
+        margin: 3px 0;
+    }
+    
+    .loading {
+        display: none;
+        text-align: center;
+        padding: 20px;
+    }
+    
+    .loading.active {
+        display: block;
+    }
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const formData = new FormData(e.target);
+        const resultDiv = document.getElementById('result');
+        const resultContent = document.getElementById('resultContent');
+        
+        // Show loading
+        resultContent.innerHTML = '<div class="loading active">🔄 Analyzing puzzle piece...</div>';
+        resultDiv.style.display = 'block';
+        
+        try {
+            const response = await fetch('{% url "puzzle:upload" template.id %}', {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+                }
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                resultContent.innerHTML = `
+                    <img src="${data.highlighted_image}" alt="Highlighted Template">
+                    <div class="result-info">
+                        <p><strong>✓ Match found!</strong></p>
+                        <p><strong>Position:</strong> (${data.x}, ${data.y})</p>
+                        <p><strong>Confidence:</strong> ${(data.confidence * 100).toFixed(1)}%</p>
+                    </div>
+                `;
+                
+                // Update template display with highlighted version
+                document.getElementById('templateImage').src = data.highlighted_image;
+                
+                // Reset form
+                e.target.reset();
+                
+                // Reload page after 3 seconds to show in history
+                setTimeout(() => {
+                    location.reload();
+                }, 3000);
+            } else {
+                resultContent.innerHTML = `
+                    <div class="error">
+                        <strong>Error:</strong> ${data.error || 'Failed to match piece'}
+                    </div>
+                `;
+            }
+        } catch (error) {
+            resultContent.innerHTML = `
+                <div class="error">
+                    <strong>Error:</strong> Failed to upload image. Please try again.
+                </div>
+            `;
+        }
+    });
+    
+    // Preview uploaded image
+    document.getElementById('pieceImage').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const uploadArea = document.getElementById('uploadArea');
+                uploadArea.style.backgroundImage = `url(${e.target.result})`;
+                uploadArea.style.backgroundSize = 'contain';
+                uploadArea.style.backgroundPosition = 'center';
+                uploadArea.style.backgroundRepeat = 'no-repeat';
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+</script>
+{% endblock %}

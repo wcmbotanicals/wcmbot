@@ -1,0 +1,74 @@
+{% extends "puzzle/base.html" %}
+
+{% block title %}Available Puzzles - Jigsaw Puzzle Solver{% endblock %}
+
+{% block content %}
+<h1>🧩 Jigsaw Puzzle Solver</h1>
+<p style="text-align: center; color: #666; margin-bottom: 30px;">
+    Upload a puzzle piece and find where it fits in the template!
+</p>
+
+{% if templates %}
+    <div class="puzzle-grid">
+        {% for template in templates %}
+        <div class="puzzle-card">
+            <img src="{{ template.template_image.url }}" alt="{{ template.name }}">
+            <h3>{{ template.name }}</h3>
+            <p>{{ template.pieces.count }} piece(s) uploaded</p>
+            <a href="{% url 'puzzle:detail' template.id %}" class="btn">Solve Puzzle</a>
+        </div>
+        {% endfor %}
+    </div>
+{% else %}
+    <div class="message">
+        No puzzle templates available yet. Please add templates through the admin interface.
+    </div>
+    <p style="margin-top: 20px;">
+        <a href="/admin/" class="btn">Go to Admin</a>
+    </p>
+{% endif %}
+
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    .puzzle-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 20px;
+        margin-top: 30px;
+    }
+    
+    .puzzle-card {
+        border: 2px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 20px;
+        text-align: center;
+        transition: transform 0.3s, box-shadow 0.3s;
+    }
+    
+    .puzzle-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+    }
+    
+    .puzzle-card img {
+        max-width: 100%;
+        height: 200px;
+        object-fit: contain;
+        border-radius: 5px;
+        margin-bottom: 15px;
+    }
+    
+    .puzzle-card h3 {
+        color: #333;
+        margin-bottom: 10px;
+        font-size: 1.2em;
+    }
+    
+    .puzzle-card p {
+        color: #666;
+        margin-bottom: 15px;
+    }
+</style>
+{% endblock %}
