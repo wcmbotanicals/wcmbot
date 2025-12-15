@@ -27,6 +27,11 @@ jobs:
     # Use the latest Ubuntu runner provided by GitHub
     runs-on: ubuntu-latest
 
+    # Explicitly set minimal permissions for security
+    # Only read access to repository contents is needed for running tests
+    permissions:
+      contents: read
+
     steps:
       # Step 1: Check out the repository code
       - name: Checkout code
