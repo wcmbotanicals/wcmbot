@@ -412,8 +412,8 @@ def _render_zoom_image(
 def find_piece_in_template(
     piece_image_path: str,
     template_image_path: str,
-    knobs_x: int = 2,
-    knobs_y: int = 2,
+    knobs_x: int,
+    knobs_y: int,
 ) -> MatchPayload:
     template = _load_image(template_image_path)
     piece = _load_image(piece_image_path)

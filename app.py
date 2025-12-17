@@ -1,6 +1,6 @@
 """Gradio interface for the jigsaw puzzle solver"""
+
 import os
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -82,27 +82,24 @@ def _change_match(step: int, payload, current_index: int):
     return _views_to_outputs(views, summary, payload, idx)
 
 
-def solve_puzzle(piece_image):
+def solve_puzzle(piece_path, knobs_x, knobs_y):
     """Run the high-performance matcher and return visualization slices"""
-    if piece_image is None:
+    if not piece_path or not os.path.exists(piece_path):
         return _blank_outputs("Please upload a puzzle piece image.")
+    if knobs_x is None or knobs_y is None:
+        return _blank_outputs(
+            "Please select the tab counts before running the matcher."
+        )
 
-    tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp_path = tmp.name
-            piece_img = Image.fromarray(piece_image.astype(np.uint8))
-            piece_img.save(tmp_path)
-
-        payload = find_piece_in_template(tmp_path, str(TEMPLATE_PATH))
+        payload = find_piece_in_template(
+            piece_path, str(TEMPLATE_PATH), knobs_x, knobs_y
+        )
         views = render_primary_views(payload, 0)
         summary = format_match_summary(payload, 0)
         return _views_to_outputs(views, summary, payload, 0)
     except Exception as exc:  # pylint: disable=broad-except
         return _blank_outputs(f"Error: {exc}")
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
 
 def goto_previous_match(state, current_index):
@@ -134,18 +131,34 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
             gr.Markdown("### Upload Puzzle Piece")
             piece_input = gr.Image(
                 label="Puzzle Piece",
-                type="numpy",
+                type="filepath",
                 sources=["upload", "clipboard"],
                 height=300,
+            )
+            with gr.Row():
+                knobs_x_input = gr.Number(
+                    label="Horizontal tabs",
+                    value=0,
+                    precision=0,
+                    minimum=0,
+                    maximum=2,
+                )
+                knobs_y_input = gr.Number(
+                    label="Vertical tabs",
+                    value=0,
+                    precision=0,
+                    minimum=0,
+                    maximum=2,
+                )
+            gr.Markdown(
+                "Tabs are the protruding connectors on each side of the piece. "
+                "Set how many tabs this piece has horizontally and vertically."
             )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
             )
         with gr.Column(scale=1):
-            gr.Markdown(
-                "### Visualizations\n"
-                "Each pane below mirrors the first debug figure from the CLI tool."
-            )
+            gr.Markdown("### Visualizations")
 
     gr.Markdown("### Match visualizations")
 
@@ -181,7 +194,7 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
 
     solve_button.click(
         fn=solve_puzzle,
-        inputs=[piece_input],
+        inputs=[piece_input, knobs_x_input, knobs_y_input],
         outputs=[*image_components, match_summary, match_state, match_index],
     )
     prev_button.click(
@@ -199,9 +212,8 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
         """
     ---
     ### About
-    This app now uses the multi-scale binary matcher from `1.py` and exposes all
-    diagnostic plots directly in the UI. Use the navigation buttons to inspect
-    alternative placements when multiple candidates score highly.
+    Use the navigation buttons to inspect alternative placements when multiple
+    candidates score highly.
     """
     )
 
