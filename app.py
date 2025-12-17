@@ -1,7 +1,7 @@
 """Gradio interface for the jigsaw puzzle solver"""
 import os
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image
 import numpy as np
 import gradio as gr
 
@@ -12,57 +12,13 @@ BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BASE_DIR / "media" / "templates" / "sample_puzzle.png"
 
 
-def create_default_template():
-    """Create a default puzzle template if none exists"""
-    # Create a colorful grid pattern similar to create_sample_images.py
-    width = 800
-    height = 600
-    img = Image.new('RGB', (width, height), 'white')
-    draw = ImageDraw.Draw(img)
-    
-    # Draw a colorful grid pattern
-    piece_width = 100
-    piece_height = 100
-    
-    colors = [
-        (255, 200, 200),  # Light red
-        (200, 255, 200),  # Light green
-        (200, 200, 255),  # Light blue
-        (255, 255, 200),  # Light yellow
-        (255, 200, 255),  # Light magenta
-        (200, 255, 255),  # Light cyan
-    ]
-    
-    # Fill pieces with colors
-    for row in range(0, height, piece_height):
-        for col in range(0, width, piece_width):
-            color_idx = ((row // piece_height) + (col // piece_width)) % len(colors)
-            draw.rectangle(
-                [col, row, col + piece_width, row + piece_height],
-                fill=colors[color_idx],
-                outline='black',
-                width=3
-            )
-            
-            # Add piece number
-            piece_num = (row // piece_height) * (width // piece_width) + (col // piece_width) + 1
-            text = str(piece_num)
-            # Use default font
-            bbox = draw.textbbox((0, 0), text)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            text_x = col + (piece_width - text_width) // 2
-            text_y = row + (piece_height - text_height) // 2
-            draw.text((text_x, text_y), text, fill='black')
-    
-    img.save(TEMPLATE_PATH)
-
-
-def ensure_template_exists():
-    """Ensure template file exists, create if needed"""
-    TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+def check_template_exists():
+    """Check that the required template file exists"""
     if not TEMPLATE_PATH.exists():
-        create_default_template()
+        raise FileNotFoundError(
+            f"Template file not found at {TEMPLATE_PATH}. "
+            "Please ensure the puzzle template image exists before running the app."
+        )
 
 
 def solve_puzzle(piece_image):
@@ -110,8 +66,8 @@ def get_template_image():
     return None
 
 
-# Initialize
-ensure_template_exists()
+# Check template exists on startup
+check_template_exists()
 
 # Create Gradio interface
 app_theme = gr.themes.Soft()
