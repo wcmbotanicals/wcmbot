@@ -158,7 +158,7 @@ app_theme = gr.themes.Soft()
 with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
     gr.Markdown(
         """
-    # 🧩 Jigsaw Puzzle Solver
+    # 🧩 WCMBot
 
     Upload a puzzle piece and view the same diagnostic plots that the offline
     pipeline renders. Navigate across the top matches to inspect alternatives.
