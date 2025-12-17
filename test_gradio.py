@@ -96,16 +96,18 @@ def test_template_displays(page, gradio_app):
     """Test that the template image displays"""
     page.goto(gradio_app, wait_until="networkidle", timeout=30000)
     
-    # Wait for the template section
-    page.wait_for_selector("h3:has-text('Puzzle Template')", timeout=10000)
+    # Wait for the best match section (replaces "Puzzle Template")
+    page.wait_for_selector("h3:has-text('Best match (template view)')", timeout=10000)
     
     # Check that template heading is visible
-    template_heading = page.locator("h3:has-text('Puzzle Template')")
+    template_heading = page.locator("h3:has-text('Best match (template view)')")
     assert template_heading.is_visible()
     
-    # Check that template image container exists
-    # Gradio images are within specific components
-    time.sleep(2)  # Give time for image to load
+    # Check that the Plotly plot container exists
+    # The plot has elem_id="primary-template-view"
+    time.sleep(2)  # Give time for plot to load
+    plot_container = page.locator("#primary-template-view")
+    assert plot_container.is_visible()
 
 
 @pytest.mark.e2e
@@ -155,6 +157,11 @@ def test_piece_upload_and_match(page, gradio_app):
         
         # Wait for upload to complete
         time.sleep(2)
+        
+        # Set tab counts (required parameters)
+        # Find the number inputs for horizontal and vertical tabs
+        page.locator('label:has-text("Horizontal tabs")').locator('..').locator('input').fill("0")
+        page.locator('label:has-text("Vertical tabs")').locator('..').locator('input').fill("0")
         
         # Click the solve button
         solve_button = page.locator("button:has-text('Find Piece Location')")
