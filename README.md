@@ -36,7 +36,7 @@ The application uses OpenCV-based computer vision algorithms to match puzzle pie
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.12 or higher
 - pip package manager
 
 ### Setup
