@@ -45,6 +45,12 @@ def gradio_app():
     max_wait = 30
     start_time = time.time()
     while time.time() - start_time < max_wait:
+        # Check if process has terminated with an error
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            error_msg = f"Gradio app process terminated unexpectedly.\nStdout: {stdout.decode()}\nStderr: {stderr.decode()}"
+            raise RuntimeError(error_msg)
+        
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(1)
@@ -57,8 +63,10 @@ def gradio_app():
             pass
         time.sleep(0.5)
     else:
+        stdout, stderr = process.communicate(timeout=2)
+        error_msg = f"Gradio app failed to start within timeout.\nStdout: {stdout.decode()}\nStderr: {stderr.decode()}"
         process.terminate()
-        raise RuntimeError("Gradio app failed to start within timeout")
+        raise RuntimeError(error_msg)
     
     app_url = f"http://127.0.0.1:{port}"
     yield app_url
