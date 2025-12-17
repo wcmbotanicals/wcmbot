@@ -1,3 +1,16 @@
+---
+title: Wcmbot
+emoji: 🌖
+colorFrom: gray
+colorTo: red
+sdk: gradio
+sdk_version: 6.1.0
+app_file: app.py
+pinned: false
+license: gpl-3.0
+short_description: It's the WCMBot
+---
+
 # 🧩 Jigsaw Puzzle Solver
 
 A Gradio web application that helps solve jigsaw puzzles by identifying where individual pieces fit in a template image using computer vision techniques.
