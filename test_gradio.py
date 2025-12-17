@@ -105,7 +105,7 @@ def test_template_displays(page, gradio_app):
     
     # Check that the Plotly plot container exists
     # The plot has elem_id="primary-template-view"
-    time.sleep(2)  # Give time for plot to load
+    page.wait_for_selector("#primary-template-view", timeout=10000)
     plot_container = page.locator("#primary-template-view")
     assert plot_container.is_visible()
 
@@ -159,9 +159,11 @@ def test_piece_upload_and_match(page, gradio_app):
         time.sleep(2)
         
         # Set tab counts (required parameters)
-        # Find the number inputs for horizontal and vertical tabs
-        page.locator('label:has-text("Horizontal tabs")').locator('..').locator('input').fill("0")
-        page.locator('label:has-text("Vertical tabs")').locator('..').locator('input').fill("0")
+        # Find the number inputs - they appear in order: horizontal, then vertical
+        number_inputs = page.locator('input[type="number"]').all()
+        if len(number_inputs) >= 2:
+            number_inputs[0].fill("0")  # Horizontal tabs
+            number_inputs[1].fill("0")  # Vertical tabs
         
         # Click the solve button
         solve_button = page.locator("button:has-text('Find Piece Location')")
@@ -170,8 +172,8 @@ def test_piece_upload_and_match(page, gradio_app):
         # Wait for result (this may take a few seconds for CV processing)
         time.sleep(5)
         
-        # Check for result text (should contain "Match #" or error message)
+        # Check for result text (should contain "Match #" followed by a number)
         # The result is displayed in a markdown component
-        page.wait_for_selector("text=/Match #/", timeout=15000)
-        result = page.locator("text=/Match #/")
+        page.wait_for_selector("text=/Match #\\d+/", timeout=15000)
+        result = page.locator("text=/Match #\\d+/")
         assert result.is_visible()
