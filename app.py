@@ -155,13 +155,24 @@ DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_IMAGE)
 
 # Create Gradio interface
 app_theme = gr.themes.Soft()
-with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
+with gr.Blocks(title="🧩 WCMBot") as demo:
     gr.Markdown(
         """
     # 🧩 WCMBot
 
-    Upload a puzzle piece and view the same diagnostic plots that the offline
-    pipeline renders. Navigate across the top matches to inspect alternatives.
+    Upload a picture of a jigsaw puzzle piece, specify its tab counts, and let
+    WCMBot find its location in the full puzzle template!
+
+    Notes:
+    - Pictures must show a single puzzle piece on a plain (not blue) background.
+    - The piece should be aligned nearly upright in the picture for best results
+      (rotations of multiples of 90° are automatically evaluated).
+    - Currently, tab counts must be specified so that the size of the piece relative
+      to the template can be estimated.
+    
+    This app is almost entirely vibe-coded. If you and/or your AI agents would like to
+    contribute to its development, proposals and PRs are very welcome at
+    https://github.com/wcmbotanicals/wcmbot.
     """
     )
 
@@ -213,9 +224,9 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
                 value=DEFAULT_TEMPLATE_PLOT,
                 elem_id="primary-template-view",
             )
-            gr.Markdown("Click the image to open the zoom/pan viewer.")
+            gr.Markdown("Use the controls to zoom and pan the image.")
 
-    gr.Markdown("### Match visualizations")
+    gr.Markdown("### Match visualizations/diagnostics")
 
     other_keys = [key for key in VIEW_KEYS if key != "zoom_template"]
     with gr.Row():
