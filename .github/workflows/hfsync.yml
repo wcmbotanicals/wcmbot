@@ -1,0 +1,80 @@
+name: Sync to Hugging Face Hub (git-xet)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  sync-to-hf:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Prepare clean working copy
+        run: |
+          set -euo pipefail
+          CLEAN_DIR=$(mktemp -d)
+          echo "COPY -> $CLEAN_DIR"
+          # copy everything (including media) but exclude the runner's workspace .git (we'll init a fresh one)
+          rsync -a --delete --exclude='.git' ./ "$CLEAN_DIR/"
+          cd "$CLEAN_DIR"
+
+          # init fresh git (so we don't push upstream history accidentally)
+          git init
+          git checkout -b main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install git-lfs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install --skip-repo
+
+      - name: Install git-xet (official install script) and enable it
+        run: |
+          # install git-xet using the official install script (fetches prebuilt binaries)
+          curl -sSf https://raw.githubusercontent.com/huggingface/xet-core/refs/heads/main/git_xet/install.sh | sh
+          # ensure the binary is on PATH (install.sh puts it under ~/.local/bin or /usr/local/bin depending on the script)
+          export PATH="$HOME/.local/bin:$PATH"
+          command -v git-xet || command -v git-xet || { echo "git-xet not found"; exit 1; }
+          # register xet as transfer agent for this fresh repo
+          git xet install
+
+      - name: Tell git-xet which paths to track (media/**)
+        run: |
+          # mark the media folder for xet (creates .gitattributes entries)
+          git xet track "media/**"
+          # show the .gitattributes so you can review it in logs (optional)
+          echo "--- .gitattributes ---"
+          cat .gitattributes || true
+          echo "----------------------"
+
+      - name: Commit cleaned repo and push to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Add everything and commit
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to push to HF space"
+            exit 0
+          fi
+          git commit -m "Sync to HF Space (xet-tracked binaries)"
+
+          # Push to HF using token in URL (username can be your HF username)
+          # Note: use the HF token stored in repo secrets. The remote URL format embeds token as password.
+          HF_USER="wcmbotanicals"
+          HF_REPO="spaces/wcmbotanicals/wcmbot"
+          git remote add hf "https://${HF_USER}:${HF_TOKEN}@huggingface.co/${HF_REPO}.git"
+
+          # Force push main and tags (if you want tags, push them too)
+          git push --force hf main
+
+      # runner workspace will be discarded automatically
