@@ -18,7 +18,9 @@ A Gradio web application that helps solve jigsaw puzzles by identifying where in
 ## Features
 
 - **Upload puzzle piece images** and automatically find their position in the template
+- **Tab count configuration** with horizontal and vertical tab inputs for accurate scale estimation
 - **Multi-match visualization** with the same diagnostic subplots as the CLI workflow
+- **Zoomable/pannable plots** using Plotly for interactive exploration of match results
 - **Confidence scoring** for match quality
 - **Interactive Gradio interface** with modern UI/UX
 - **HuggingFace Spaces ready**
@@ -76,8 +78,10 @@ The app will:
 
 1. **View the template** - The puzzle template is displayed on the right side
 2. **Upload a piece** - Click the upload area or drag and drop a puzzle piece image
-3. **Find the match** - Click "Find Piece Location" button
-4. **View results** - See the highlighted position on the template with confidence score
+3. **Set tab counts** - Enter the number of horizontal and vertical tabs (0-2) on your puzzle piece for accurate scale estimation
+4. **Find the match** - Click "Find Piece Location" button
+5. **View results** - See the highlighted position on the template with confidence score
+6. **Explore matches** - Use zoomable/pannable Plotly views to inspect match details and navigate between top matches
 
 ### HuggingFace Spaces
 
@@ -128,6 +132,7 @@ wcmbot/
 - **OpenCV**: Computer vision and image matching
 - **Pillow**: Image processing
 - **NumPy**: Numerical operations
+- **Plotly**: Interactive zoomable/pannable visualizations
 - **pytest**: Testing framework
 - **Playwright**: Browser automation for E2E tests
 
