@@ -83,7 +83,7 @@ def gradio_app():
 @pytest.mark.e2e
 def test_app_loads(page, gradio_app):
     """Test that the Gradio app loads successfully"""
-    page.goto(gradio_app, wait_until="networkidle", timeout=30000)
+    page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
     # Check for main heading
     page.wait_for_selector("text=Jigsaw Puzzle Solver", timeout=10000)
@@ -94,7 +94,7 @@ def test_app_loads(page, gradio_app):
 @pytest.mark.e2e
 def test_template_displays(page, gradio_app):
     """Test that the template image displays"""
-    page.goto(gradio_app, wait_until="networkidle", timeout=30000)
+    page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
     # Wait for the best match section (replaces "Puzzle Template")
     page.wait_for_selector("h3:has-text('Best match (template view)')", timeout=10000)
@@ -113,7 +113,7 @@ def test_template_displays(page, gradio_app):
 @pytest.mark.e2e
 def test_upload_interface_exists(page, gradio_app):
     """Test that file upload interface exists"""
-    page.goto(gradio_app, wait_until="networkidle", timeout=30000)
+    page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
     # Check for upload section
     page.wait_for_selector("text=Upload Puzzle Piece", timeout=10000)
@@ -128,7 +128,7 @@ def test_upload_interface_exists(page, gradio_app):
 @pytest.mark.e2e
 def test_piece_upload_and_match(page, gradio_app):
     """Test uploading a piece and getting a match result"""
-    page.goto(gradio_app, wait_until="networkidle", timeout=30000)
+    page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
     # Wait for page to be ready
     page.wait_for_selector("text=Upload Puzzle Piece", timeout=10000)
@@ -170,8 +170,8 @@ def test_piece_upload_and_match(page, gradio_app):
         # Wait for result (this may take a few seconds for CV processing)
         time.sleep(5)
         
-        # Check for result text (should contain "Match Found" or error message)
+        # Check for result text (should contain "Match #" or error message)
         # The result is displayed in a markdown component
-        page.wait_for_selector("text=Match Found", timeout=15000)
-        result = page.locator("text=Match Found")
+        page.wait_for_selector("text=/Match #/", timeout=15000)
+        result = page.locator("text=/Match #/")
         assert result.is_visible()
