@@ -9,7 +9,7 @@ echo "🧩 Setting up Jigsaw Puzzle Solver..."
 echo "📦 Installing dependencies..."
 pip install -q -r requirements.txt
 
-# Install Playwright browsers
+# Install Playwright browsers (chromium only for E2E tests)
 echo "🎭 Installing Playwright browsers..."
 playwright install chromium
 

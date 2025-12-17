@@ -1,13 +1,14 @@
 """End-to-end tests for Gradio puzzle solver interface"""
 import pytest
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageDraw
 import numpy as np
 import time
 import subprocess
 import socket
 import sys
 import os
+import tempfile
 
 
 def find_free_port():
@@ -129,12 +130,12 @@ def test_piece_upload_and_match(page, gradio_app):
     
     if not test_piece_path.exists():
         # If piece_1.jpg doesn't exist, create a temporary test piece
-        test_piece_path = Path("/tmp/test_piece.png")
-        img = Image.new('RGB', (100, 100), (200, 200, 255))
-        from PIL import ImageDraw
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([0, 0, 100, 100], outline='black', width=2)
-        img.save(test_piece_path)
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.png', delete=False) as f:
+            test_piece_path = Path(f.name)
+            img = Image.new('RGB', (100, 100), (200, 200, 255))
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([0, 0, 100, 100], outline='black', width=2)
+            img.save(test_piece_path)
     
     # Find and use the file upload - Gradio uses input[type=file]
     # The upload button in Gradio typically has a file input

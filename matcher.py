@@ -1,4 +1,4 @@
-# puzzle/matcher.py
+# matcher.py
 """
 Template matching-based puzzle matcher using edge detection.
 Main features:
