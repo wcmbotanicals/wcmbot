@@ -6,16 +6,19 @@ A Gradio web application that uses computer vision to automatically identify whe
 ## Core Features
 
 ### 1. Image Matching Algorithm
-- **Edge-Based Template Matching**: Uses Canny edge detection and normalized cross-correlation
+- **Blue Mask Segmentation**: Uses HSV thresholds and morphological cleanup to extract the piece
+- **Knob-Aware Scale Estimation**: Estimates scale using puzzle grid cell sizes and user-specified tab counts
 - **Multi-Scale Matching**: Tests multiple scale factors to handle size variations
 - **Multi-Rotation Matching**: Tests 0°, 90°, 180°, and 270° rotations
-- **Background Removal**: Uses HSV saturation to segment puzzle pieces from background
+- **Binary Template Matching**: Runs multi-scale, multi-rotation correlation on binary patterns with top-N ranking
 - **Confidence Scoring**: Provides match quality metrics (0-1 scale)
 
 ### 2. Gradio Web Interface
 - **HuggingFace Ready**: Deployable to HuggingFace Spaces
 - **Side-by-Side View**: Template and upload area in one screen
 - **Drag & Drop Upload**: Modern file upload with preview
+- **Tab Count Configuration**: Horizontal and vertical tab inputs (0-2) for accurate scale estimation
+- **Zoomable Visualizations**: Interactive Plotly plots with zoom and pan controls
 - **Visual Highlighting**: Shows matched position with colored circles
 - **Real-time Processing**: Instant results with highlighted template
 - **Simple API**: Easy to integrate and customize
@@ -30,12 +33,12 @@ A Gradio web application that uses computer vision to automatically identify whe
 - **Grid Configuration**: 36x28 cells by default
 
 ### Matching Algorithm Details
-1. **Background Segmentation**: HSV saturation thresholding (>40)
-2. **Edge Detection**: Canny with thresholds 50/150
-3. **Morphological Operations**: Opening and closing with 7x7 elliptical kernel
-4. **Template Matching**: Masked normalized cross-correlation
-5. **Scale Estimation**: Based on grid cell size and piece dimensions
-6. **Rotation Testing**: 4 cardinal directions
+1. **Blue Mask Segmentation**: Two HSV ranges isolate blue plastic, followed by morphological cleanup
+2. **Knob-Aware Scaling**: Estimates correct template scale from grid cell dimensions and user-specified tab counts (required)
+3. **Binary Correlation**: Multi-scale, multi-rotation normalized cross-correlation on blurred binary masks
+4. **Top-N Ranking**: Keeps several high-confidence candidates for review
+5. **Rotation Testing**: 4 cardinal directions (0°, 90°, 180°, 270°)
+6. **Interactive Visualization**: Zoomable Plotly plots for detailed match inspection
 
 ### Matching Accuracy
 - **Perfect Matches**: 90-100% confidence for exact extracts
@@ -88,11 +91,11 @@ Debug images saved to `media/debug/`:
 Key parameters in `matcher.py`:
 - `COLS = 36`: Grid columns
 - `ROWS = 28`: Grid rows
-- `PIECE_CELLS_APPROX = (1, 1)`: Expected piece size in cells
-- `EST_SCALE_WINDOW = [0.9, 0.95, 1.0, 1.05, 1.1]`: Scale factors to test
+- `EST_SCALE_WINDOW`: Scale factors to test around the knob-aware estimate
 - `ROTATIONS = [0, 90, 180, 270]`: Rotation angles to test
-- `CANNY_LOW = 50`: Lower Canny threshold
-- `CANNY_HIGH = 150`: Upper Canny threshold
+- `TOP_MATCH_COUNT`: Number of best matches to keep for review
+- `KNOB_WIDTH_FRAC`: Contribution of each knob to the estimated full width/height
+- **Required parameters**: `knobs_x` and `knobs_y` must be specified (0-2) for accurate scale estimation
 
 ## Testing Coverage
 
