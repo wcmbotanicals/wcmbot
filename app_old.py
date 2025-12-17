@@ -1,68 +1,42 @@
-"""Gradio interface for the jigsaw puzzle solver"""
+"""HuggingFace Gradio interface for the jigsaw puzzle solver"""
 import os
-from pathlib import Path
-from PIL import Image, ImageDraw
-import numpy as np
+import sys
 import gradio as gr
+from PIL import Image
+import numpy as np
 
-from matcher import find_piece_in_template, highlight_position
+# Set up Django
+sys.path.insert(0, os.path.dirname(__file__))
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'jigsaw_project.settings')
 
-# Hardcoded paths
-BASE_DIR = Path(__file__).resolve().parent
-TEMPLATE_PATH = BASE_DIR / "media" / "templates" / "sample_puzzle.png"
+import django
+django.setup()
+
+from puzzle.models import PuzzleTemplate
+from puzzle.matcher import find_piece_in_template, highlight_position
+from django.core.files.uploadedfile import SimpleUploadedFile
 
 
-def create_default_template():
-    """Create a default puzzle template if none exists"""
-    # Create a colorful grid pattern similar to create_sample_images.py
-    width = 800
-    height = 600
-    img = Image.new('RGB', (width, height), 'white')
-    draw = ImageDraw.Draw(img)
-    
-    # Draw a colorful grid pattern
-    piece_width = 100
-    piece_height = 100
-    
-    colors = [
-        (255, 200, 200),  # Light red
-        (200, 255, 200),  # Light green
-        (200, 200, 255),  # Light blue
-        (255, 255, 200),  # Light yellow
-        (255, 200, 255),  # Light magenta
-        (200, 255, 255),  # Light cyan
-    ]
-    
-    # Fill pieces with colors
-    for row in range(0, height, piece_height):
-        for col in range(0, width, piece_width):
-            color_idx = ((row // piece_height) + (col // piece_width)) % len(colors)
-            draw.rectangle(
-                [col, row, col + piece_width, row + piece_height],
-                fill=colors[color_idx],
-                outline='black',
-                width=3
+def initialize_demo_data():
+    """Initialize demo puzzle template if none exists"""
+    if PuzzleTemplate.objects.count() == 0:
+        # Create sample template
+        from create_sample_images import create_puzzle_template
+        template_img = create_puzzle_template()
+        
+        # Save to temp file
+        temp_path = "/tmp/sample_puzzle.png"
+        template_img.save(temp_path)
+        
+        # Create database entry
+        with open(temp_path, 'rb') as f:
+            template = PuzzleTemplate.objects.create(
+                name="Demo Puzzle",
+                template_image=SimpleUploadedFile("template.png", f.read(), content_type="image/png")
             )
-            
-            # Add piece number
-            piece_num = (row // piece_height) * (width // piece_width) + (col // piece_width) + 1
-            text = str(piece_num)
-            # Use default font
-            bbox = draw.textbbox((0, 0), text)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            text_x = col + (piece_width - text_width) // 2
-            text_y = row + (piece_height - text_height) // 2
-            draw.text((text_x, text_y), text, fill='black')
-    
-    img.save(TEMPLATE_PATH)
-
-
-def ensure_template_exists():
-    """Ensure template file exists, create if needed"""
-    TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not TEMPLATE_PATH.exists():
-        create_default_template()
+        
+        return template
+    return PuzzleTemplate.objects.first()
 
 
 def solve_puzzle(piece_image):
@@ -70,7 +44,9 @@ def solve_puzzle(piece_image):
     if piece_image is None:
         return None, "Please upload a puzzle piece image"
     
-    if not TEMPLATE_PATH.exists():
+    # Get the template
+    template = PuzzleTemplate.objects.first()
+    if template is None:
         return None, "No puzzle template available"
     
     try:
@@ -82,11 +58,11 @@ def solve_puzzle(piece_image):
         # Find the piece location
         x, y, confidence = find_piece_in_template(
             piece_path,
-            str(TEMPLATE_PATH)
+            template.template_image.path
         )
         
         # Generate highlighted template
-        highlighted_img = highlight_position(str(TEMPLATE_PATH), x, y)
+        highlighted_img = highlight_position(template.template_image.path, x, y)
         
         result_text = f"""
 **Match Found!** ✓
@@ -104,14 +80,16 @@ The green circle shows where your piece fits in the puzzle.
 
 
 def get_template_image():
-    """Get the template image"""
-    if TEMPLATE_PATH.exists():
-        return np.array(Image.open(TEMPLATE_PATH))
+    """Get the current template image"""
+    template = PuzzleTemplate.objects.first()
+    if template:
+        img = Image.open(template.template_image.path)
+        return np.array(img)
     return None
 
 
-# Initialize
-ensure_template_exists()
+# Initialize demo data
+initialize_demo_data()
 
 # Create Gradio interface
 app_theme = gr.themes.Soft()
