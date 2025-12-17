@@ -86,8 +86,8 @@ def test_app_loads(page, gradio_app):
     page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
     # Check for main heading
-    page.wait_for_selector("text=Jigsaw Puzzle Solver", timeout=10000)
-    heading = page.locator("text=Jigsaw Puzzle Solver").first
+    page.wait_for_selector("text=WCMBot", timeout=10000)
+    heading = page.locator("text=WCMBot").first
     assert heading.is_visible()
 
 
