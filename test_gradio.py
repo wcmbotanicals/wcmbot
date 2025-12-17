@@ -88,11 +88,11 @@ def test_template_displays(page, gradio_app):
     page.goto(gradio_app, wait_until="networkidle", timeout=30000)
     
     # Wait for the template section
-    page.wait_for_selector("text=Puzzle Template", timeout=10000)
+    page.wait_for_selector("h3:has-text('Puzzle Template')", timeout=10000)
     
-    # Check that template label is visible
-    template_label = page.locator("text=Puzzle Template")
-    assert template_label.is_visible()
+    # Check that template heading is visible
+    template_heading = page.locator("h3:has-text('Puzzle Template')")
+    assert template_heading.is_visible()
     
     # Check that template image container exists
     # Gradio images are within specific components
