@@ -83,35 +83,37 @@ def gradio_app():
 @pytest.mark.e2e
 def test_app_loads(page, gradio_app):
     """Test that the Gradio app loads successfully"""
-    page.goto(gradio_app, wait_until="networkidle", timeout=30000)
+    page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
     # Check for main heading
-    page.wait_for_selector("text=Jigsaw Puzzle Solver", timeout=10000)
-    heading = page.locator("text=Jigsaw Puzzle Solver").first
+    page.wait_for_selector("text=WCMBot", timeout=10000)
+    heading = page.locator("text=WCMBot").first
     assert heading.is_visible()
 
 
 @pytest.mark.e2e
 def test_template_displays(page, gradio_app):
     """Test that the template image displays"""
-    page.goto(gradio_app, wait_until="networkidle", timeout=30000)
+    page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
-    # Wait for the template section
-    page.wait_for_selector("h3:has-text('Puzzle Template')", timeout=10000)
+    # Wait for the best match section (replaces "Puzzle Template")
+    page.wait_for_selector("h3:has-text('Best match (template view)')", timeout=10000)
     
     # Check that template heading is visible
-    template_heading = page.locator("h3:has-text('Puzzle Template')")
+    template_heading = page.locator("h3:has-text('Best match (template view)')")
     assert template_heading.is_visible()
     
-    # Check that template image container exists
-    # Gradio images are within specific components
-    time.sleep(2)  # Give time for image to load
+    # Check that the Plotly plot container exists
+    # The plot has elem_id="primary-template-view"
+    page.wait_for_selector("#primary-template-view", timeout=10000)
+    plot_container = page.locator("#primary-template-view")
+    assert plot_container.is_visible()
 
 
 @pytest.mark.e2e
 def test_upload_interface_exists(page, gradio_app):
     """Test that file upload interface exists"""
-    page.goto(gradio_app, wait_until="networkidle", timeout=30000)
+    page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
     # Check for upload section
     page.wait_for_selector("text=Upload Puzzle Piece", timeout=10000)
@@ -126,7 +128,7 @@ def test_upload_interface_exists(page, gradio_app):
 @pytest.mark.e2e
 def test_piece_upload_and_match(page, gradio_app):
     """Test uploading a piece and getting a match result"""
-    page.goto(gradio_app, wait_until="networkidle", timeout=30000)
+    page.goto(gradio_app, wait_until="domcontentloaded", timeout=30000)
     
     # Wait for page to be ready
     page.wait_for_selector("text=Upload Puzzle Piece", timeout=10000)
@@ -156,6 +158,13 @@ def test_piece_upload_and_match(page, gradio_app):
         # Wait for upload to complete
         time.sleep(2)
         
+        # Set tab counts (required parameters)
+        # Find the number inputs - they appear in order: horizontal, then vertical
+        number_inputs = page.locator('input[type="number"]').all()
+        if len(number_inputs) >= 2:
+            number_inputs[0].fill("0")  # Horizontal tabs
+            number_inputs[1].fill("0")  # Vertical tabs
+        
         # Click the solve button
         solve_button = page.locator("button:has-text('Find Piece Location')")
         solve_button.click()
@@ -163,8 +172,8 @@ def test_piece_upload_and_match(page, gradio_app):
         # Wait for result (this may take a few seconds for CV processing)
         time.sleep(5)
         
-        # Check for result text (should contain "Match Found" or error message)
+        # Check for result text (should contain "Match #" followed by a number)
         # The result is displayed in a markdown component
-        page.wait_for_selector("text=Match Found", timeout=15000)
-        result = page.locator("text=Match Found")
+        page.wait_for_selector("text=/Match #\\d+/", timeout=15000)
+        result = page.locator("text=/Match #\\d+/")
         assert result.is_visible()

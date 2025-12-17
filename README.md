@@ -18,7 +18,9 @@ A Gradio web application that helps solve jigsaw puzzles by identifying where in
 ## Features
 
 - **Upload puzzle piece images** and automatically find their position in the template
-- **Visual highlighting** of the matched position on the template
+- **Tab count configuration** with horizontal and vertical tab inputs for accurate scale estimation
+- **Multi-match visualization** with the same diagnostic subplots as the CLI workflow
+- **Zoomable/pannable plots** using Plotly for interactive exploration of match results
 - **Confidence scoring** for match quality
 - **Interactive Gradio interface** with modern UI/UX
 - **HuggingFace Spaces ready**
@@ -26,11 +28,12 @@ A Gradio web application that helps solve jigsaw puzzles by identifying where in
 
 ## How It Works
 
-The application uses OpenCV-based computer vision algorithms to match puzzle pieces:
+The application uses an improved pipeline inspired by `1.py`:
 
-1. **Edge Detection**: Converts template and pieces to edge maps using Canny edge detection
-2. **Template Matching**: Uses normalized cross-correlation with multi-scale and multi-rotation matching
-3. **Position Highlighting**: Marks the matched location with visual indicators
+1. **Blue mask segmentation**: Uses HSV thresholds and morphological cleanup to extract the piece
+2. **Knob-aware scaling**: Estimates scale using puzzle grid cell sizes and knob counts
+3. **Binary template matching**: Runs multi-scale, multi-rotation correlation on binary patterns with top-N ranking
+4. **Interactive diagnostics**: Displays the multi-panel plots from `show_debug_all()` directly in the web UI with next/previous navigation
 
 ## Installation
 
@@ -75,8 +78,10 @@ The app will:
 
 1. **View the template** - The puzzle template is displayed on the right side
 2. **Upload a piece** - Click the upload area or drag and drop a puzzle piece image
-3. **Find the match** - Click "Find Piece Location" button
-4. **View results** - See the highlighted position on the template with confidence score
+3. **Set tab counts** - Enter the number of horizontal and vertical tabs (0-2) on your puzzle piece for accurate scale estimation
+4. **Find the match** - Click "Find Piece Location" button
+5. **View results** - See the highlighted position on the template with confidence score
+6. **Explore matches** - Use zoomable/pannable Plotly views to inspect match details and navigate between top matches
 
 ### HuggingFace Spaces
 
@@ -127,41 +132,31 @@ wcmbot/
 - **OpenCV**: Computer vision and image matching
 - **Pillow**: Image processing
 - **NumPy**: Numerical operations
+- **Plotly**: Interactive zoomable/pannable visualizations
 - **pytest**: Testing framework
 - **Playwright**: Browser automation for E2E tests
 
 ## How the Matching Works
 
-The matcher uses a sophisticated edge-based template matching approach:
+The matcher mirrors the performant notebook script:
 
-1. **Background Removal**: Uses HSV saturation to segment the puzzle piece from background
-2. **Edge Detection**: Applies Canny edge detection to both template and piece
-3. **Multi-Scale Matching**: Tests multiple scales to account for size variations
-4. **Multi-Rotation Matching**: Tests rotations (0°, 90°, 180°, 270°)
-5. **Normalized Cross-Correlation**: Uses OpenCV's matchTemplate with masks
-6. **Best Match Selection**: Returns the position with highest confidence score
+1. **Color segmentation**: Two HSV ranges isolate blue plastic, followed by morphological cleanup and largest-component filtering
+2. **Knob-aware scaling**: Estimates the correct template scale from grid cell dimensions and knob counts
+3. **Binary correlation**: Runs multi-scale, multi-rotation normalized cross-correlation on blurred binary masks with aggressive duplicate suppression
+4. **Top-N ranking**: Keeps several high-confidence candidates, attaches contours, and prepares data for plotting
 
 ### Configuration
 
 The matcher can be configured via these constants in `matcher.py`:
 - `COLS`, `ROWS`: Grid dimensions (36x28)
-- `EST_SCALE_WINDOW`: Scale factors to test
+- `EST_SCALE_WINDOW`: Scale factors to test around the knob-aware estimate
 - `ROTATIONS`: Rotation angles to test
-- `CANNY_LOW`, `CANNY_HIGH`: Edge detection thresholds
+- `TOP_MATCH_COUNT`: How many best matches to keep for review
+- `KNOB_WIDTH_FRAC`: Contribution of each knob to the estimated full width/height
 
-### Debug Mode
+### Built-In Visual Debugging
 
-Enable debug mode to save intermediate images:
-```bash
-export PUZZLE_MATCHER_DEBUG=1
-python app.py
-```
-
-Debug images will be saved to `media/debug/` showing:
-- Raw input images
-- Edge detection results
-- Match heatmaps
-- Final highlighted results
+The Gradio app renders the same diagnostic panels that the offline script produced (template, masks, zoom views, etc.) and lets you cycle through the ranked matches. There's no environment toggle needed—just upload a piece and use the on-screen arrows.
 
 ## Deployment
 
