@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 import gradio as gr
 import numpy as np
+import plotly.express as px
 from PIL import Image
 
 from matcher import find_piece_in_template, format_match_summary, render_primary_views
@@ -37,6 +38,31 @@ VIEW_LABELS = {
 }
 
 
+def make_zoomable_plot(image: Optional[np.ndarray]):
+    """Create a Plotly figure with zoom/pan for a numpy RGB image."""
+    if image is None:
+        base = np.zeros((10, 10, 3), dtype=np.uint8)
+    else:
+        base = image
+    if base.dtype != np.uint8:
+        base = np.clip(base, 0, 255).astype(np.uint8)
+    fig = px.imshow(base)
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        dragmode="pan",
+        coloraxis_showscale=False,
+    )
+    fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
+    fig.update_yaxes(
+        showticklabels=False,
+        showgrid=False,
+        zeroline=False,
+        scaleanchor="x",
+        scaleratio=1,
+    )
+    return fig
+
+
 def check_template_exists():
     """Check that the required template file exists"""
     if not TEMPLATE_PATH.exists():
@@ -66,6 +92,7 @@ def _views_to_outputs(
 def _blank_outputs(message: str):
     blank_views = {key: None for key in VIEW_KEYS}
     blank_views["template_color"] = DEFAULT_TEMPLATE_IMAGE
+    blank_views["zoom_template"] = DEFAULT_TEMPLATE_PLOT
     return _views_to_outputs(blank_views, message, None, 0)
 
 
@@ -78,6 +105,7 @@ def _change_match(step: int, payload, current_index: int):
     idx = (current_index or 0) + step
     idx %= total
     views = render_primary_views(payload, idx)
+    views["zoom_template"] = make_zoomable_plot(views.get("zoom_template"))
     summary = format_match_summary(payload, idx)
     return _views_to_outputs(views, summary, payload, idx)
 
@@ -92,10 +120,20 @@ def solve_puzzle(piece_path, knobs_x, knobs_y):
         )
 
     try:
+        knobs_x = int(knobs_x)
+        knobs_y = int(knobs_y)
+    except (TypeError, ValueError):
+        return _blank_outputs("Tab counts must be whole numbers.")
+
+    if knobs_x < 0 or knobs_y < 0:
+        return _blank_outputs("Tab counts cannot be negative.")
+
+    try:
         payload = find_piece_in_template(
             piece_path, str(TEMPLATE_PATH), knobs_x, knobs_y
         )
         views = render_primary_views(payload, 0)
+        views["zoom_template"] = make_zoomable_plot(views.get("zoom_template"))
         summary = format_match_summary(payload, 0)
         return _views_to_outputs(views, summary, payload, 0)
     except Exception as exc:  # pylint: disable=broad-except
@@ -113,6 +151,7 @@ def goto_next_match(state, current_index):
 # Check template exists on startup and pre-load the static preview
 check_template_exists()
 DEFAULT_TEMPLATE_IMAGE = get_template_image()
+DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_IMAGE)
 
 # Create Gradio interface
 app_theme = gr.themes.Soft()
@@ -123,6 +162,16 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
 
     Upload a puzzle piece and view the same diagnostic plots that the offline
     pipeline renders. Navigate across the top matches to inspect alternatives.
+    """
+    )
+
+    gr.HTML(
+        """
+    <style>
+    #primary-template-view img {
+        cursor: zoom-in;
+    }
+    </style>
     """
     )
 
@@ -158,13 +207,19 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
                 "🔍 Find Piece Location", variant="primary", size="lg"
             )
         with gr.Column(scale=1):
-            gr.Markdown("### Visualizations")
+            gr.Markdown("### Best match (template view)")
+            image_components = {}
+            image_components["zoom_template"] = gr.Plot(
+                value=DEFAULT_TEMPLATE_PLOT,
+                elem_id="primary-template-view",
+            )
+            gr.Markdown("Click the image to open the zoom/pan viewer.")
 
     gr.Markdown("### Match visualizations")
 
-    image_components: List[gr.Image] = []
+    other_keys = [key for key in VIEW_KEYS if key != "zoom_template"]
     with gr.Row():
-        for key in VIEW_KEYS[:4]:
+        for key in other_keys[:4]:
             comp = gr.Image(
                 label=VIEW_LABELS[key],
                 type="numpy",
@@ -172,17 +227,17 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
                 interactive=False,
                 height=260,
             )
-            image_components.append(comp)
+            image_components[key] = comp
 
     with gr.Row():
-        for key in VIEW_KEYS[4:]:
+        for key in other_keys[4:]:
             comp = gr.Image(
                 label=VIEW_LABELS[key],
                 type="numpy",
                 interactive=False,
                 height=260,
             )
-            image_components.append(comp)
+            image_components[key] = comp
 
     with gr.Row():
         prev_button = gr.Button("⬅️ Previous match")
@@ -192,20 +247,22 @@ with gr.Blocks(title="🧩 Jigsaw Puzzle Solver") as demo:
     match_state = gr.State()
     match_index = gr.State(0)
 
+    ordered_components = [image_components[key] for key in VIEW_KEYS]
+
     solve_button.click(
         fn=solve_puzzle,
         inputs=[piece_input, knobs_x_input, knobs_y_input],
-        outputs=[*image_components, match_summary, match_state, match_index],
+        outputs=[*ordered_components, match_summary, match_state, match_index],
     )
     prev_button.click(
         fn=goto_previous_match,
         inputs=[match_state, match_index],
-        outputs=[*image_components, match_summary, match_state, match_index],
+        outputs=[*ordered_components, match_summary, match_state, match_index],
     )
     next_button.click(
         fn=goto_next_match,
         inputs=[match_state, match_index],
-        outputs=[*image_components, match_summary, match_state, match_index],
+        outputs=[*ordered_components, match_summary, match_state, match_index],
     )
 
     gr.Markdown(
