@@ -1,4 +1,4 @@
-# puzzle/matcher.py
+# matcher.py
 """
 Template matching-based puzzle matcher using edge detection.
 Main features:
@@ -20,11 +20,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-# Optional Django MEDIA_ROOT
-try:
-    from django.conf import settings
-except Exception:
-    settings = None
+# No Django imports needed
 
 # Configuration
 COLS = 36
@@ -66,9 +62,7 @@ def _debug_log(msg):
 
 
 def _debug_base_dir():
-    if settings and getattr(settings, "MEDIA_ROOT", None):
-        return Path(settings.MEDIA_ROOT)
-    return Path(__file__).resolve().parents[1] / "media"
+    return Path(__file__).resolve().parent / "media"
 
 
 def _debug_dir():

@@ -38,11 +38,11 @@ jobs:
         uses: actions/checkout@v4
 
       # Step 2: Set up Python environment
-      # Using Python 3.9 as the default version (repo minimum is 3.8)
+      # Using Python 3.12 as the minimum version
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.12'
           cache: 'pip'
 
       # Step 3: Install Python dependencies
@@ -53,14 +53,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Step 4: Run pytest tests
+      # Step 4: Install Playwright browsers
+      # Required for E2E tests
+      - name: Install Playwright browsers
+        run: |
+          playwright install chromium
+
+      # Step 5: Run pytest tests
       # Execute all tests with verbose output (configured in pytest.ini)
       # Using short traceback format for cleaner output
       - name: Run tests with pytest
         run: |
           pytest --tb=short
 
-      # Step 5: Generate test summary
+      # Step 6: Generate test summary
       # Display a summary of test results in the workflow logs
       - name: Test Summary
         if: always()

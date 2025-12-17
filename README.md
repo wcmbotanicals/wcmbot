@@ -1,33 +1,45 @@
+---
+title: Wcmbot
+emoji: 🌖
+colorFrom: gray
+colorTo: red
+sdk: gradio
+sdk_version: 6.1.0
+app_file: app.py
+pinned: false
+license: gpl-3.0
+short_description: It's the WCMBot
+---
+
 # 🧩 Jigsaw Puzzle Solver
 
-A Django web application that helps solve jigsaw puzzles by identifying where individual pieces fit in a template image using computer vision techniques.
+A Gradio web application that helps solve jigsaw puzzles by identifying where individual pieces fit in a template image using computer vision techniques.
 
 ## Features
 
 - **Upload puzzle piece images** and automatically find their position in the template
 - **Visual highlighting** of the matched position on the template
 - **Confidence scoring** for match quality
-- **Upload history** tracking all previously matched pieces
-- **Responsive web interface** with modern UI/UX
-- **HuggingFace Spaces ready** with Gradio interface
-- **Fully tested** with pytest and Playwright
+- **Interactive Gradio interface** with modern UI/UX
+- **HuggingFace Spaces ready**
+- **Fully tested** with Playwright E2E tests
 
 ## How It Works
 
 The application uses OpenCV-based computer vision algorithms to match puzzle pieces:
 
-1. **Template Matching**: Uses normalized cross-correlation to find similar regions
-2. **Feature Detection**: Uses ORB (Oriented FAST and Rotated BRIEF) for more robust matching
+1. **Edge Detection**: Converts template and pieces to edge maps using Canny edge detection
+2. **Template Matching**: Uses normalized cross-correlation with multi-scale and multi-rotation matching
 3. **Position Highlighting**: Marks the matched location with visual indicators
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.12 or higher
 - pip package manager
 
-### Quick Setup
+### Setup
 
 1. Clone the repository:
 ```bash
@@ -35,75 +47,53 @@ git clone https://github.com/wcmbotanicals/wcmbot.git
 cd wcmbot
 ```
 
-2. Run the setup script:
+2. Install dependencies:
 ```bash
-./setup.sh
+pip install -r requirements.txt
 ```
 
-3. Run the development server:
+3. Install Playwright browsers (for testing):
 ```bash
-python manage.py runserver
+playwright install
 ```
-
-4. Access the application at `http://127.0.0.1:8000/`
-
-### Manual Setup
-
-If you prefer to set up manually:
-
-1. Clone the repository
-2. Install dependencies: `pip install -r requirements.txt`
-3. Run migrations: `python manage.py migrate`
-4. Create sample data: `python create_sample_images.py`
-5. Run the server: `python manage.py runserver`
 
 ## Usage
 
-### Django Web Interface
+### Running the Gradio App
 
-1. Navigate to the home page to see available puzzles
-2. Click on a puzzle to open the detail page
-3. Upload a puzzle piece image using the upload interface
-4. The app will automatically find and highlight the piece location
-5. View confidence score and exact coordinates of the match
-
-### Gradio Interface (HuggingFace Spaces)
-
-Run the Gradio app:
+Simply run:
 ```bash
 python app.py
 ```
 
-Or deploy directly to HuggingFace Spaces by pushing this repository.
+The app will:
+- Automatically create a default puzzle template if none exists
+- Launch the Gradio interface in your browser
+- Display the puzzle template and allow you to upload piece images
 
-### Admin Interface
+### Using the Interface
 
-Access the Django admin at `http://127.0.0.1:8000/admin/` to:
-- Add new puzzle templates
-- View all uploaded pieces and their matches
-- Manage puzzle data
+1. **View the template** - The puzzle template is displayed on the right side
+2. **Upload a piece** - Click the upload area or drag and drop a puzzle piece image
+3. **Find the match** - Click "Find Piece Location" button
+4. **View results** - See the highlighted position on the template with confidence score
 
-Create a superuser first:
-```bash
-python manage.py createsuperuser
-```
+### HuggingFace Spaces
+
+To deploy to HuggingFace Spaces:
+
+1. Create a new Space on HuggingFace
+2. Push this repository to the Space
+3. The `app.py` file will automatically be detected and run
 
 ## Testing
 
-The project includes comprehensive test coverage:
+The project includes comprehensive E2E test coverage using Playwright:
 
-### Unit Tests
+### Run E2E Tests
 
-Run pytest tests for models, views, and matching logic:
 ```bash
-pytest puzzle/tests.py -v
-```
-
-### End-to-End Tests
-
-Run Playwright tests for full UI workflow:
-```bash
-pytest tests_e2e.py -v
+pytest test_gradio.py -v
 ```
 
 ### Run All Tests
@@ -116,53 +106,70 @@ pytest -v
 
 ```
 wcmbot/
-├── jigsaw_project/          # Django project settings
-│   ├── settings.py          # Configuration
-│   ├── urls.py              # URL routing
-│   └── wsgi.py              # WSGI application
-├── puzzle/                  # Main Django app
-│   ├── models.py            # Database models
-│   ├── views.py             # View controllers
-│   ├── matcher.py           # Image matching algorithms
-│   ├── urls.py              # App URL patterns
-│   ├── admin.py             # Admin configuration
-│   ├── templates/           # HTML templates
-│   └── tests.py             # Unit tests
-├── media/                   # Uploaded images
+├── app.py                   # Gradio interface
+├── matcher.py               # Image matching algorithms
+├── media/                   # Puzzle templates and pieces
 │   ├── templates/           # Puzzle templates
-│   └── pieces/              # Uploaded pieces
-├── app.py                   # Gradio/HuggingFace interface
-├── create_sample_images.py  # Sample data generator
-├── tests_e2e.py             # Playwright E2E tests
-├── conftest.py              # Pytest configuration
-├── pytest.ini               # Pytest settings
+│   │   └── sample_puzzle.png
+│   └── pieces/              # Sample puzzle pieces
+│       ├── piece_1.jpg
+│       ├── piece_2.jpg
+│       └── piece_3.jpg
+├── test_gradio.py           # Playwright E2E tests
+├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 └── README.md                # This file
 ```
 
 ## Technology Stack
 
-- **Django 4.2**: Web framework
+- **Gradio**: Web interface framework
 - **OpenCV**: Computer vision and image matching
 - **Pillow**: Image processing
-- **Gradio**: Alternative UI for HuggingFace
+- **NumPy**: Numerical operations
 - **pytest**: Testing framework
 - **Playwright**: Browser automation for E2E tests
 
-## API Endpoints
+## How the Matching Works
 
-- `GET /` - List all puzzle templates
-- `GET /puzzle/<id>/` - Puzzle detail page with upload interface
-- `POST /puzzle/<id>/upload/` - Upload and match a puzzle piece
-- `GET /admin/` - Django admin interface
+The matcher uses a sophisticated edge-based template matching approach:
+
+1. **Background Removal**: Uses HSV saturation to segment the puzzle piece from background
+2. **Edge Detection**: Applies Canny edge detection to both template and piece
+3. **Multi-Scale Matching**: Tests multiple scales to account for size variations
+4. **Multi-Rotation Matching**: Tests rotations (0°, 90°, 180°, 270°)
+5. **Normalized Cross-Correlation**: Uses OpenCV's matchTemplate with masks
+6. **Best Match Selection**: Returns the position with highest confidence score
+
+### Configuration
+
+The matcher can be configured via these constants in `matcher.py`:
+- `COLS`, `ROWS`: Grid dimensions (36x28)
+- `EST_SCALE_WINDOW`: Scale factors to test
+- `ROTATIONS`: Rotation angles to test
+- `CANNY_LOW`, `CANNY_HIGH`: Edge detection thresholds
+
+### Debug Mode
+
+Enable debug mode to save intermediate images:
+```bash
+export PUZZLE_MATCHER_DEBUG=1
+python app.py
+```
+
+Debug images will be saved to `media/debug/` showing:
+- Raw input images
+- Edge detection results
+- Match heatmaps
+- Final highlighted results
 
 ## Deployment
 
-### HuggingFace Spaces
+### Local Deployment
 
-1. Create a new Space on HuggingFace
-2. Push this repository to the Space
-3. The `app.py` file will automatically be detected and run
+```bash
+python app.py
+```
 
 ### Docker (Optional)
 
@@ -175,7 +182,6 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY . .
-RUN python manage.py migrate
 
 CMD ["python", "app.py"]
 ```
@@ -203,6 +209,5 @@ See LICENSE file for details.
 ## Acknowledgments
 
 - OpenCV for computer vision capabilities
-- Django for the web framework
 - Gradio for the interactive interface
 - HuggingFace for deployment platform

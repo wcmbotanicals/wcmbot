@@ -1,42 +1,24 @@
-"""HuggingFace Gradio interface for the jigsaw puzzle solver"""
+"""Gradio interface for the jigsaw puzzle solver"""
 import os
-import sys
-import gradio as gr
+from pathlib import Path
 from PIL import Image
 import numpy as np
+import gradio as gr
 
-# Set up Django
-sys.path.insert(0, os.path.dirname(__file__))
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'jigsaw_project.settings')
+from matcher import find_piece_in_template, highlight_position
 
-import django
-django.setup()
-
-from puzzle.models import PuzzleTemplate
-from puzzle.matcher import find_piece_in_template, highlight_position
-from django.core.files.uploadedfile import SimpleUploadedFile
+# Hardcoded paths
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATE_PATH = BASE_DIR / "media" / "templates" / "sample_puzzle.png"
 
 
-def initialize_demo_data():
-    """Initialize demo puzzle template if none exists"""
-    if PuzzleTemplate.objects.count() == 0:
-        # Create sample template
-        from create_sample_images import create_puzzle_template
-        template_img = create_puzzle_template()
-        
-        # Save to temp file
-        temp_path = "/tmp/sample_puzzle.png"
-        template_img.save(temp_path)
-        
-        # Create database entry
-        with open(temp_path, 'rb') as f:
-            template = PuzzleTemplate.objects.create(
-                name="Demo Puzzle",
-                template_image=SimpleUploadedFile("template.png", f.read(), content_type="image/png")
-            )
-        
-        return template
-    return PuzzleTemplate.objects.first()
+def check_template_exists():
+    """Check that the required template file exists"""
+    if not TEMPLATE_PATH.exists():
+        raise FileNotFoundError(
+            f"Template file not found at {TEMPLATE_PATH}. "
+            "Please ensure the puzzle template image exists before running the app."
+        )
 
 
 def solve_puzzle(piece_image):
@@ -44,9 +26,7 @@ def solve_puzzle(piece_image):
     if piece_image is None:
         return None, "Please upload a puzzle piece image"
     
-    # Get the template
-    template = PuzzleTemplate.objects.first()
-    if template is None:
+    if not TEMPLATE_PATH.exists():
         return None, "No puzzle template available"
     
     try:
@@ -58,11 +38,11 @@ def solve_puzzle(piece_image):
         # Find the piece location
         x, y, confidence = find_piece_in_template(
             piece_path,
-            template.template_image.path
+            str(TEMPLATE_PATH)
         )
         
         # Generate highlighted template
-        highlighted_img = highlight_position(template.template_image.path, x, y)
+        highlighted_img = highlight_position(str(TEMPLATE_PATH), x, y)
         
         result_text = f"""
 **Match Found!** ✓
@@ -80,16 +60,14 @@ The green circle shows where your piece fits in the puzzle.
 
 
 def get_template_image():
-    """Get the current template image"""
-    template = PuzzleTemplate.objects.first()
-    if template:
-        img = Image.open(template.template_image.path)
-        return np.array(img)
+    """Get the template image"""
+    if TEMPLATE_PATH.exists():
+        return np.array(Image.open(TEMPLATE_PATH))
     return None
 
 
-# Initialize demo data
-initialize_demo_data()
+# Check template exists on startup
+check_template_exists()
 
 # Create Gradio interface
 app_theme = gr.themes.Soft()
