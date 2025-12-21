@@ -7,7 +7,7 @@ import statistics
 import time
 from typing import Dict, List, Tuple
 
-from matcher import find_piece_in_template
+import matcher
 
 CASE_MATRIX: List[Tuple[str, int, int]] = [
     ("piece_1.jpg", 0, 0),
@@ -57,7 +57,7 @@ def _run_benchmark(
     for _ in range(warmup):
         for name, knobs_x, knobs_y in cases:
             piece_path = os.path.join(pieces_dir, name)
-            find_piece_in_template(
+            matcher.find_piece_in_template(
                 piece_image_path=piece_path,
                 template_image_path=template_path,
                 knobs_x=knobs_x,
@@ -69,7 +69,7 @@ def _run_benchmark(
             for name, knobs_x, knobs_y in cases:
                 piece_path = os.path.join(pieces_dir, name)
                 start = time.perf_counter()
-                find_piece_in_template(
+                matcher.find_piece_in_template(
                     piece_image_path=piece_path,
                     template_image_path=template_path,
                     knobs_x=knobs_x,
@@ -106,11 +106,51 @@ def main() -> None:
         default=[],
         help="Case filename to benchmark (repeatable).",
     )
+    parser.add_argument(
+        "--coarse-factor",
+        type=float,
+        default=None,
+        help="Override matcher.COARSE_FACTOR.",
+    )
+    parser.add_argument(
+        "--coarse-top-k",
+        type=int,
+        default=None,
+        help="Override matcher.COARSE_TOP_K.",
+    )
+    parser.add_argument(
+        "--coarse-pad",
+        type=int,
+        default=None,
+        help="Override matcher.COARSE_PAD_PX.",
+    )
+    parser.add_argument(
+        "--coarse-min-side",
+        type=int,
+        default=None,
+        help="Override matcher.COARSE_MIN_SIDE.",
+    )
+    parser.add_argument(
+        "--coarse-off",
+        action="store_true",
+        help="Disable coarse matching pass.",
+    )
     args = parser.parse_args()
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     template_path = os.path.join(base_dir, "media", "templates", "sample_puzzle.png")
     pieces_dir = os.path.join(base_dir, "media", "pieces")
+
+    if args.coarse_off:
+        matcher.COARSE_FACTOR = 0.0
+    if args.coarse_factor is not None:
+        matcher.COARSE_FACTOR = args.coarse_factor
+    if args.coarse_top_k is not None:
+        matcher.COARSE_TOP_K = args.coarse_top_k
+    if args.coarse_pad is not None:
+        matcher.COARSE_PAD_PX = args.coarse_pad
+    if args.coarse_min_side is not None:
+        matcher.COARSE_MIN_SIDE = args.coarse_min_side
 
     cases = _resolve_cases(args.case)
     for name, _, _ in cases:
@@ -133,6 +173,13 @@ def main() -> None:
     print(
         f"Runs: {total_runs} | cases: {len(cases)} | "
         f"iterations: {args.iterations} | repeats: {args.repeats} | warmup: {args.warmup}"
+    )
+    print(
+        "coarse:",
+        f"factor={matcher.COARSE_FACTOR}",
+        f"top_k={matcher.COARSE_TOP_K}",
+        f"pad={matcher.COARSE_PAD_PX}",
+        f"min_side={matcher.COARSE_MIN_SIDE}",
     )
 
     combined = []
