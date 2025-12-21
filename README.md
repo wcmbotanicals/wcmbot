@@ -11,9 +11,11 @@ license: gpl-3.0
 short_description: It's the WCMBot
 ---
 
-# 🧩 Jigsaw Puzzle Solver
+# 🧩 WCMBot
 
 A Gradio web application that helps solve jigsaw puzzles by identifying where individual pieces fit in a template image using computer vision techniques.
+
+Version: 0.1.0
 
 ## Features
 
