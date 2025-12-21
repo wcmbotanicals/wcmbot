@@ -1,6 +1,7 @@
 """Gradio interface for the jigsaw puzzle solver"""
 
 import os
+import random
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -62,6 +63,41 @@ def make_zoomable_plot(image: Optional[np.ndarray]):
         scaleratio=1,
     )
     return fig
+
+
+def get_random_ad():
+    """Get a random advertisement banner HTML"""
+    ads = [
+        """
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    padding: 15px 20px; 
+                    border-radius: 10px; 
+                    border: 3px solid #5a67d8; 
+                    margin: 15px 0; 
+                    text-align: center; 
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            <p style="color: white; font-size: 16px; margin: 0; font-weight: 500;">
+                🔧 Solve YOUR mathematical problems with <strong>Muspan</strong> - the ultimate toolbox for parameter estimation! 
+                Visit <a href="https://www.muspan.co.uk/" target="_blank" style="color: #ffd700; text-decoration: underline;">www.muspan.co.uk</a>
+            </p>
+        </div>
+        """,
+        """
+        <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); 
+                    padding: 15px 20px; 
+                    border-radius: 10px; 
+                    border: 3px dashed #e91e63; 
+                    margin: 15px 0; 
+                    text-align: center; 
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            <p style="color: white; font-size: 16px; margin: 0; font-weight: 500;">
+                🧬 Mathematical biologists HATE him! One simple trick to solve the inverse problem. 
+                <a href="https://github.com/wcmbotanicals/wcmbot" target="_blank" style="color: #ffeb3b; text-decoration: underline;">Click here to learn more...</a>
+            </p>
+        </div>
+        """
+    ]
+    return random.choice(ads)
 
 
 def check_template_exists():
@@ -176,6 +212,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     https://github.com/wcmbotanicals/wcmbot.
     """
     )
+
+    # Display random advertisement banner
+    gr.HTML(get_random_ad())
 
     gr.HTML(
         """
