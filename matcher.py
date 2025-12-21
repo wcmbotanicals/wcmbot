@@ -19,6 +19,7 @@ PIECE_CELLS_APPROX = (1, 1)
 EST_SCALE_WINDOW = np.linspace(0.8, 1.2, num=11).tolist()
 ROTATIONS = [0, 90, 180, 270]
 TOP_MATCH_COUNT = 5
+TOP_MATCH_SCAN_MULT = 50
 
 KNOB_WIDTH_FRAC = 1.0 / 3.0
 CANNY_LOW = 50
@@ -202,6 +203,7 @@ def _match_template_multiscale_binary(
         T_blur = cv2.GaussianBlur(T, blur_ksz, 0)
     else:
         T_blur = T.copy()
+    T_blur_f32 = T_blur.astype(np.float32)
 
     th, tw = T_blur.shape[:2]
     cell_w = tw / cols
@@ -209,6 +211,34 @@ def _match_template_multiscale_binary(
 
     combo_candidates: List[Dict] = []
     dilate_ker = MATCH_DILATE_KERNEL
+
+    def _scan_candidates(order: np.ndarray, res_w: int, ws: int, hs: int) -> List[Dict]:
+        combo_best_local: List[Dict] = []
+        for idx in order:
+            if len(combo_best_local) >= TOP_MATCH_COUNT:
+                break
+            y, x = divmod(int(idx), res_w)
+            cx = x + ws / 2
+            cy = y + hs / 2
+            tl = (int(x), int(y))
+            br = (int(x + ws), int(y + hs))
+            candidate = {
+                "score": float(res[y, x]),
+                "rot": rot,
+                "scale": scale,
+                "col": int(cx / cell_w) + 1,
+                "row": int(cy / cell_h) + 1,
+                "tl": tl,
+                "br": br,
+                "center": (float(cx), float(cy)),
+            }
+            if any(
+                _candidate_is_close(candidate, existing)
+                for existing in combo_best_local
+            ):
+                continue
+            combo_best_local.append(candidate)
+        return combo_best_local
 
     for rot in rotations:
         P_r = _rotate_img(P, rot)
@@ -225,17 +255,17 @@ def _match_template_multiscale_binary(
 
             patt_s = cv2.resize(P_r, (ws, hs), interpolation=cv2.INTER_NEAREST)
             mask_s = cv2.resize(M_r, (ws, hs), interpolation=cv2.INTER_NEAREST)
-            mask01 = (mask_s > 127).astype(np.uint8)
+            mask01 = (mask_s > 127).astype(np.float32)
 
             if blur_ksz is not None:
                 patt_s_blur = cv2.GaussianBlur(patt_s, blur_ksz, 0).astype(np.float32)
             else:
                 patt_s_blur = patt_s.astype(np.float32)
 
-            patt_masked = (patt_s_blur * (mask01)).astype(np.float32)
+            patt_masked = patt_s_blur * mask01
 
             res = cv2.matchTemplate(
-                T_blur.astype(np.float32), patt_masked.astype(np.float32), corr_method
+                T_blur_f32, patt_masked, corr_method
             )
 
             if res.size == 0:
@@ -243,32 +273,22 @@ def _match_template_multiscale_binary(
 
             res_h, res_w = res.shape
             flat = res.ravel()
-            order = np.argsort(flat)[::-1]
+            if flat.size <= TOP_MATCH_COUNT:
+                order = np.argsort(flat)[::-1]
+            else:
+                top_k = min(
+                    flat.size,
+                    max(TOP_MATCH_COUNT * TOP_MATCH_SCAN_MULT, TOP_MATCH_COUNT),
+                )
+                order = np.argpartition(flat, -top_k)[-top_k:]
+                order = order[np.argsort(flat[order])[::-1]]
 
-            combo_best: List[Dict] = []
-            for idx in order:
-                if len(combo_best) >= TOP_MATCH_COUNT:
-                    break
-                y, x = divmod(int(idx), res_w)
-                cx = x + ws / 2
-                cy = y + hs / 2
-                tl = (int(x), int(y))
-                br = (int(x + ws), int(y + hs))
-                candidate = {
-                    "score": float(res[y, x]),
-                    "rot": rot,
-                    "scale": scale,
-                    "col": int(cx / cell_w) + 1,
-                    "row": int(cy / cell_h) + 1,
-                    "tl": tl,
-                    "br": br,
-                    "center": (float(cx), float(cy)),
-                }
-                if any(
-                    _candidate_is_close(candidate, existing) for existing in combo_best
-                ):
-                    continue
-                combo_best.append(candidate)
+            combo_best = _scan_candidates(order, res_w, ws, hs)
+            if len(combo_best) < TOP_MATCH_COUNT and order.size < flat.size:
+                # Fallback to full ordering only if partial scan could not yield
+                # enough distinct matches.
+                order = np.argsort(flat)[::-1]
+                combo_best = _scan_candidates(order, res_w, ws, hs)
             combo_candidates.extend(combo_best)
 
     if not combo_candidates:
