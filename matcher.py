@@ -7,6 +7,7 @@ needing to reproduce image-processing logic.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
@@ -21,6 +22,11 @@ EST_SCALE_WINDOW = np.linspace(0.8, 1.2, num=11).tolist()
 ROTATIONS = [0, 90, 180, 270]
 TOP_MATCH_COUNT = 5
 TOP_MATCH_SCAN_MULT = 50
+PROFILE_ENV = "WCMBOT_PROFILE"
+COARSE_FACTOR = 0.5
+COARSE_TOP_K = 5
+COARSE_PAD_PX = 24
+COARSE_MIN_SIDE = 240
 
 KNOB_WIDTH_FRAC = 1.0 / 3.0
 CANNY_LOW = 50
@@ -111,6 +117,13 @@ def _get_template_blur_f32(
     T_blur_f32 = T_blur.astype(np.float32)
     blur_cache[blur_ksz] = T_blur_f32
     return T_blur_f32
+
+
+def preload_template_cache(
+    template_image_path: str, blur_ksz: Optional[Tuple[int, int]] = (3, 3)
+) -> None:
+    entry = _load_template_cached(template_image_path)
+    _get_template_blur_f32(entry.template_bin, blur_ksz, entry.blur_cache)
 
 
 def _binarize_two_color(img_bgr: np.ndarray) -> np.ndarray:
@@ -284,16 +297,51 @@ def _match_template_multiscale_binary(
     combo_candidates: List[Dict] = []
     dilate_ker = MATCH_DILATE_KERNEL
 
-    def _scan_candidates(order: np.ndarray, res_w: int, ws: int, hs: int) -> List[Dict]:
+    use_coarse = (
+        0.0 < COARSE_FACTOR < 1.0 and min(tw, th) >= COARSE_MIN_SIDE
+    )
+    if use_coarse:
+        tw_c = max(1, int(round(tw * COARSE_FACTOR)))
+        th_c = max(1, int(round(th * COARSE_FACTOR)))
+        if tw_c < 2 or th_c < 2:
+            use_coarse = False
+            T_blur_coarse = None
+        else:
+            T_blur_coarse = cv2.resize(
+                T_blur_f32, (tw_c, th_c), interpolation=cv2.INTER_AREA
+            )
+    else:
+        T_blur_coarse = None
+
+    def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
+        if flat.size <= max_len:
+            return np.argsort(flat)[::-1]
+        scan_count = min(
+            flat.size, max(max_len * TOP_MATCH_SCAN_MULT, max_len)
+        )
+        order = np.argpartition(flat, -scan_count)[-scan_count:]
+        return order[np.argsort(flat[order])[::-1]]
+
+    def _scan_candidates(
+        res: np.ndarray,
+        order: np.ndarray,
+        res_w: int,
+        ws: int,
+        hs: int,
+        offset_x: int = 0,
+        offset_y: int = 0,
+    ) -> List[Dict]:
         combo_best_local: List[Dict] = []
         for idx in order:
             if len(combo_best_local) >= TOP_MATCH_COUNT:
                 break
             y, x = divmod(int(idx), res_w)
-            cx = x + ws / 2
-            cy = y + hs / 2
-            tl = (int(x), int(y))
-            br = (int(x + ws), int(y + hs))
+            x0 = x + offset_x
+            y0 = y + offset_y
+            cx = x0 + ws / 2
+            cy = y0 + hs / 2
+            tl = (int(x0), int(y0))
+            br = (int(x0 + ws), int(y0 + hs))
             candidate = {
                 "score": float(res[y, x]),
                 "rot": rot,
@@ -311,6 +359,50 @@ def _match_template_multiscale_binary(
                 continue
             combo_best_local.append(candidate)
         return combo_best_local
+
+    def _collect_matches(
+        res: np.ndarray,
+        ws: int,
+        hs: int,
+        offset_x: int = 0,
+        offset_y: int = 0,
+    ) -> List[Dict]:
+        flat = res.ravel()
+        order = _candidate_order(flat, TOP_MATCH_COUNT)
+        res_w = res.shape[1]
+        combo_best = _scan_candidates(
+            res, order, res_w, ws, hs, offset_x=offset_x, offset_y=offset_y
+        )
+        if len(combo_best) < TOP_MATCH_COUNT and order.size < flat.size:
+            order = np.argsort(flat)[::-1]
+            combo_best = _scan_candidates(
+                res, order, res_w, ws, hs, offset_x=offset_x, offset_y=offset_y
+            )
+        return combo_best
+
+    def _collect_coarse_positions(
+        res: np.ndarray, ws: int, hs: int, top_k: int
+    ) -> List[Dict]:
+        flat = res.ravel()
+        order = _candidate_order(flat, top_k)
+        res_w = res.shape[1]
+        positions: List[Dict] = []
+        for idx in order:
+            if len(positions) >= top_k:
+                break
+            y, x = divmod(int(idx), res_w)
+            candidate = {
+                "score": float(res[y, x]),
+                "tl": (int(x), int(y)),
+                "br": (int(x + ws), int(y + hs)),
+                "center": (float(x + ws / 2), float(y + hs / 2)),
+            }
+            if any(
+                _candidate_is_close(candidate, existing) for existing in positions
+            ):
+                continue
+            positions.append(candidate)
+        return positions
 
     for rot in rotations:
         P_r = _rotate_img(P, rot)
@@ -334,33 +426,64 @@ def _match_template_multiscale_binary(
                 patt_s_blur = patt_s.astype(np.float32)
 
             patt_masked = patt_s_blur * mask_s
+            combo_added = False
 
-            res = cv2.matchTemplate(
-                T_blur_f32, patt_masked, corr_method
-            )
+            if use_coarse and T_blur_coarse is not None:
+                ws_c = max(1, int(round(ws * COARSE_FACTOR)))
+                hs_c = max(1, int(round(hs * COARSE_FACTOR)))
+                if 1 < ws_c < T_blur_coarse.shape[1] and 1 < hs_c < T_blur_coarse.shape[0]:
+                    patt_c = cv2.resize(
+                        patt_s_blur, (ws_c, hs_c), interpolation=cv2.INTER_AREA
+                    )
+                    mask_c = cv2.resize(
+                        mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST
+                    )
+                    patt_masked_c = patt_c * mask_c
+                    res_c = cv2.matchTemplate(
+                        T_blur_coarse, patt_masked_c, corr_method
+                    )
+                    if res_c.size:
+                        coarse_positions = _collect_coarse_positions(
+                            res_c, ws_c, hs_c, COARSE_TOP_K
+                        )
+                        seen_rois = set()
+                        for coarse in coarse_positions:
+                            x_c, y_c = coarse["tl"]
+                            x_full = int(round(x_c / COARSE_FACTOR))
+                            y_full = int(round(y_c / COARSE_FACTOR))
+                            x_full = max(0, min(x_full, tw - ws))
+                            y_full = max(0, min(y_full, th - hs))
+                            x0 = max(0, x_full - COARSE_PAD_PX)
+                            y0 = max(0, y_full - COARSE_PAD_PX)
+                            x1 = min(tw, x_full + ws + COARSE_PAD_PX)
+                            y1 = min(th, y_full + hs + COARSE_PAD_PX)
+                            roi_key = (x0, y0, x1, y1)
+                            if roi_key in seen_rois:
+                                continue
+                            seen_rois.add(roi_key)
+                            roi = T_blur_f32[y0:y1, x0:x1]
+                            if roi.shape[0] < hs or roi.shape[1] < ws:
+                                continue
+                            res = cv2.matchTemplate(roi, patt_masked, corr_method)
+                            if res.size == 0:
+                                continue
+                            combo_best = _collect_matches(
+                                res, ws, hs, offset_x=x0, offset_y=y0
+                            )
+                            if combo_best:
+                                combo_candidates.extend(combo_best)
+                                combo_added = True
 
-            if res.size == 0:
-                continue
-
-            res_h, res_w = res.shape
-            flat = res.ravel()
-            if flat.size <= TOP_MATCH_COUNT:
-                order = np.argsort(flat)[::-1]
-            else:
-                top_k = min(
-                    flat.size,
-                    max(TOP_MATCH_COUNT * TOP_MATCH_SCAN_MULT, TOP_MATCH_COUNT),
+            if not combo_added:
+                res = cv2.matchTemplate(
+                    T_blur_f32, patt_masked, corr_method
                 )
-                order = np.argpartition(flat, -top_k)[-top_k:]
-                order = order[np.argsort(flat[order])[::-1]]
 
-            combo_best = _scan_candidates(order, res_w, ws, hs)
-            if len(combo_best) < TOP_MATCH_COUNT and order.size < flat.size:
-                # Fallback to full ordering only if partial scan could not yield
-                # enough distinct matches.
-                order = np.argsort(flat)[::-1]
-                combo_best = _scan_candidates(order, res_w, ws, hs)
-            combo_candidates.extend(combo_best)
+                if res.size == 0:
+                    continue
+
+                combo_best = _collect_matches(res, ws, hs)
+                combo_candidates.extend(combo_best)
 
     if not combo_candidates:
         raise RuntimeError("No match found (binary matcher)")
@@ -506,18 +629,35 @@ def find_piece_in_template(
     knobs_x: int,
     knobs_y: int,
 ) -> MatchPayload:
+    profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
+    profile = profile_value not in ("", "0", "false", "no")
+    if profile:
+        t0 = time.perf_counter()
+        marks: List[Tuple[str, float]] = []
+
     template_entry = _load_template_cached(template_image_path)
+    if profile:
+        marks.append(("template", time.perf_counter()))
+
     piece = _load_image(piece_image_path)
+    if profile:
+        marks.append(("piece", time.perf_counter()))
 
     template_rgb = template_entry.template_rgb
     template_bin = template_entry.template_bin
 
     piece_mask = _mask_by_blue(piece)
+    if profile:
+        marks.append(("mask", time.perf_counter()))
     y0, y1, x0, x1 = _mask_bbox(piece_mask)
     piece_crop = piece[y0:y1, x0:x1].copy()
     piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
+    if profile:
+        marks.append(("crop", time.perf_counter()))
     piece_bin = _binarize_two_color(piece_crop) * piece_mask_crop
     piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
+    if profile:
+        marks.append(("binarize", time.perf_counter()))
 
     th, tw = template_bin.shape
     cell_w = tw / COLS
@@ -545,6 +685,8 @@ def find_piece_in_template(
             f"Estimated scale {est_scale:.3f} is implausible - check PIECE_CELLS_APPROX and image sizes"
         )
     scales = [est_scale * f for f in EST_SCALE_WINDOW]
+    if profile:
+        marks.append(("scale", time.perf_counter()))
 
     template_blur_f32 = _get_template_blur_f32(
         template_bin, (3, 3), template_entry.blur_cache
@@ -561,16 +703,30 @@ def find_piece_in_template(
         corr_method=cv2.TM_CCORR_NORMED,
         template_blur_f32=template_blur_f32,
     )
+    if profile:
+        marks.append(("match", time.perf_counter()))
 
     top_matches = _attach_contours_to_matches(
         top_matches, piece_mask_crop, MATCH_DILATE_KERNEL
     )
+    if profile:
+        marks.append(("contours", time.perf_counter()))
     for idx, match in enumerate(top_matches):
         match["index"] = idx
         match["cx"] = int(round(match["center"][0]))
         match["cy"] = int(round(match["center"][1]))
         match["width"] = match["br"][0] - match["tl"][0]
         match["height"] = match["br"][1] - match["tl"][1]
+
+    if profile:
+        t_end = time.perf_counter()
+        prev = t0
+        parts = []
+        for label, ts in marks:
+            parts.append(f"{label}={((ts - prev) * 1000.0):.2f}ms")
+            prev = ts
+        parts.append(f"total={((t_end - t0) * 1000.0):.2f}ms")
+        print("matcher profile:", " ".join(parts))
 
     return MatchPayload(
         template_rgb=template_rgb,

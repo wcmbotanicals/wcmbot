@@ -9,7 +9,12 @@ import numpy as np
 import plotly.express as px
 from PIL import Image
 
-from matcher import find_piece_in_template, format_match_summary, render_primary_views
+from matcher import (
+    find_piece_in_template,
+    format_match_summary,
+    preload_template_cache,
+    render_primary_views,
+)
 from version import __version__
 
 # Hardcoded paths
@@ -151,6 +156,7 @@ def goto_next_match(state, current_index):
 
 # Check template exists on startup and pre-load the static preview
 check_template_exists()
+preload_template_cache(str(TEMPLATE_PATH))
 DEFAULT_TEMPLATE_IMAGE = get_template_image()
 DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_IMAGE)
 
