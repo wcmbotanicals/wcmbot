@@ -10,6 +10,7 @@ import plotly.express as px
 from PIL import Image
 
 from matcher import find_piece_in_template, format_match_summary, render_primary_views
+from version import __version__
 
 # Hardcoded paths
 BASE_DIR = Path(__file__).resolve().parent
@@ -155,10 +156,10 @@ DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_IMAGE)
 
 # Create Gradio interface
 app_theme = gr.themes.Soft()
-with gr.Blocks(title="🧩 WCMBot") as demo:
+with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     gr.Markdown(
-        """
-    # 🧩 WCMBot
+        f"""
+    # 🧩 WCMBot v{__version__}
 
     Upload a picture of a jigsaw puzzle piece, specify its tab counts, and let
     WCMBot find its location in the full puzzle template!
