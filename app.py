@@ -75,11 +75,16 @@ def get_random_ad():
                     border: 3px solid #5a67d8; 
                     margin: 15px 0; 
                     text-align: center; 
-                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-            <p style="color: white; font-size: 16px; margin: 0; font-weight: 500;">
-                🔧 Solve YOUR mathematical problems with <strong>Muspan</strong> - the ultimate toolbox for parameter estimation! 
-                Visit <a href="https://www.muspan.co.uk/" target="_blank" style="color: #ffd700; text-decoration: underline;">www.muspan.co.uk</a>
-            </p>
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    position: relative;">
+            <span style="position: absolute; top: 5px; right: 10px; color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: bold;">Ad</span>
+            <div style="display: flex; align-items: center; justify-content: center; gap: 15px;">
+                <img src="https://github.com/user-attachments/assets/6d9a3a6b-b54f-4bb6-aafe-23af7e754561" alt="Muspan" style="height: 60px; width: auto;">
+                <p style="color: white; font-size: 16px; margin: 0; font-weight: 500;">
+                    🔧 Solve YOUR mathematical problems with <strong>Muspan</strong> - the ultimate toolbox for spatial analysis! 
+                    Visit <a href="https://www.muspan.co.uk/" target="_blank" style="color: #ffd700; text-decoration: underline;">www.muspan.co.uk</a>
+                </p>
+            </div>
         </div>
         """,
         """
@@ -89,10 +94,12 @@ def get_random_ad():
                     border: 3px dashed #e91e63; 
                     margin: 15px 0; 
                     text-align: center; 
-                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    position: relative;">
+            <span style="position: absolute; top: 5px; right: 10px; color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: bold;">Ad</span>
             <p style="color: white; font-size: 16px; margin: 0; font-weight: 500;">
-                🧬 Mathematical biologists HATE him! One simple trick to solve the inverse problem. 
-                <a href="https://github.com/wcmbotanicals/wcmbot" target="_blank" style="color: #ffeb3b; text-decoration: underline;">Click here to learn more...</a>
+                🧬 Mathematical biologists HATE him! One simple trick to invoke Schnakenberg kinetics. 
+                <a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" target="_blank" style="color: #ffeb3b; text-decoration: underline;">Click here to learn more...</a>
             </p>
         </div>
         """
