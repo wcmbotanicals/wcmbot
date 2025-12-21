@@ -78,9 +78,9 @@ def get_random_ad():
                     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
                     position: relative;">
             <span style="position: absolute; top: 5px; right: 10px; color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: bold;">Ad</span>
-            <div style="display: flex; align-items: center; justify-content: center; gap: 15px;">
-                <img src="https://github.com/user-attachments/assets/6d9a3a6b-b54f-4bb6-aafe-23af7e754561" alt="Muspan" style="height: 60px; width: auto;">
-                <p style="color: white; font-size: 16px; margin: 0; font-weight: 500;">
+            <div style="display: flex; align-items: center; justify-content: center; gap: 20px; flex-wrap: wrap;">
+                <img src="https://github.com/user-attachments/assets/6d9a3a6b-b54f-4bb6-aafe-23af7e754561" alt="Muspan" style="height: 80px; width: auto; max-width: 200px; object-fit: contain;">
+                <p style="color: white; font-size: 16px; margin: 0; font-weight: 500; flex: 1; min-width: 300px;">
                     🔧 Solve YOUR mathematical problems with <strong>Muspan</strong> - the ultimate toolbox for spatial analysis! 
                     Visit <a href="https://www.muspan.co.uk/" target="_blank" style="color: #ffd700; text-decoration: underline;">www.muspan.co.uk</a>
                 </p>
