@@ -15,8 +15,6 @@ short_description: It's the WCMBot
 
 A Gradio web application that helps solve jigsaw puzzles by identifying where individual pieces fit in a template image using computer vision techniques.
 
-Version: 0.1.0
-
 ## Features
 
 - **Upload puzzle piece images** and automatically find their position in the template
