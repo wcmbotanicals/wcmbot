@@ -1,5 +1,6 @@
 """Gradio interface for the jigsaw puzzle solver"""
 
+import base64
 import os
 import random
 from pathlib import Path
@@ -73,8 +74,12 @@ def make_zoomable_plot(image: Optional[np.ndarray]):
 
 def get_random_ad():
     """Get a random advertisement banner HTML"""
-    # Use relative path for the logo that Gradio can serve
-    logo_path = "media/muspan_logo.png"
+    logo_html = ""
+    if MUSPAN_LOGO_DATA_URI:
+        logo_html = (
+            f'<img src="{MUSPAN_LOGO_DATA_URI}" alt="Muspan" '
+            'style="height: 80px; width: auto; max-width: 200px; object-fit: contain;">'
+        )
     ads = [
         f"""
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
@@ -87,7 +92,7 @@ def get_random_ad():
                     position: relative;">
             <span style="position: absolute; top: 5px; right: 10px; color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: bold;">Ad</span>
             <div style="display: flex; align-items: center; justify-content: center; gap: 20px; flex-wrap: wrap;">
-                <img src="/file={MUSPAN_LOGO_PATH}" alt="Muspan" style="height: 80px; width: auto; max-width: 200px; object-fit: contain;">
+                {logo_html}
                 <p style="color: white; font-size: 16px; margin: 0; font-weight: 500; flex: 1; min-width: 300px;">
                     🔧 Solve YOUR mathematical problems with <strong>Muspan</strong> - the ultimate toolbox for spatial analysis! 
                     Visit <a href="https://www.muspan.co.uk/" target="_blank" style="color: #ffd700; text-decoration: underline;">www.muspan.co.uk</a>
@@ -113,6 +118,16 @@ def get_random_ad():
         """
     ]
     return random.choice(ads)
+
+
+def _build_muspan_logo_data_uri() -> str:
+    if not MUSPAN_LOGO_PATH.exists():
+        return ""
+    encoded = base64.b64encode(MUSPAN_LOGO_PATH.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+MUSPAN_LOGO_DATA_URI = _build_muspan_logo_data_uri()
 
 
 def check_template_exists():
@@ -230,8 +245,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     """
     )
 
-    # Display random advertisement banner
-    gr.HTML(get_random_ad())
+    # Display random advertisement banner per session
+    ad_banner = gr.HTML()
+    demo.load(fn=get_random_ad, outputs=ad_banner)
 
     gr.HTML(
         """
