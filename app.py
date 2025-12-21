@@ -16,6 +16,7 @@ from version import __version__
 # Hardcoded paths
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BASE_DIR / "media" / "templates" / "sample_puzzle.png"
+MUSPAN_LOGO_PATH = BASE_DIR / "media" / "muspan_logo.png"
 
 VIEW_KEYS = [
     "template_color",
@@ -67,8 +68,10 @@ def make_zoomable_plot(image: Optional[np.ndarray]):
 
 def get_random_ad():
     """Get a random advertisement banner HTML"""
+    # Use relative path for the logo that Gradio can serve
+    logo_path = "media/muspan_logo.png"
     ads = [
-        """
+        f"""
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     padding: 15px 20px; 
                     border-radius: 10px; 
@@ -79,7 +82,7 @@ def get_random_ad():
                     position: relative;">
             <span style="position: absolute; top: 5px; right: 10px; color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: bold;">Ad</span>
             <div style="display: flex; align-items: center; justify-content: center; gap: 20px; flex-wrap: wrap;">
-                <img src="https://github.com/user-attachments/assets/6d9a3a6b-b54f-4bb6-aafe-23af7e754561" alt="Muspan" style="height: 80px; width: auto; max-width: 200px; object-fit: contain;">
+                <img src="/file={MUSPAN_LOGO_PATH}" alt="Muspan" style="height: 80px; width: auto; max-width: 200px; object-fit: contain;">
                 <p style="color: white; font-size: 16px; margin: 0; font-weight: 500; flex: 1; min-width: 300px;">
                     🔧 Solve YOUR mathematical problems with <strong>Muspan</strong> - the ultimate toolbox for spatial analysis! 
                     Visit <a href="https://www.muspan.co.uk/" target="_blank" style="color: #ffd700; text-decoration: underline;">www.muspan.co.uk</a>
