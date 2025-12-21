@@ -506,10 +506,10 @@ def _match_template_multiscale_binary(
                             y_full = int(round(y_c / COARSE_FACTOR))
                             x_full = max(0, min(x_full, tw - ws))
                             y_full = max(0, min(y_full, th - hs))
-                            x0 = max(0, x_full - COARSE_PAD_PX)
-                            y0 = max(0, y_full - COARSE_PAD_PX)
-                            x1 = min(tw, x_full + ws + COARSE_PAD_PX)
-                            y1 = min(th, y_full + hs + COARSE_PAD_PX)
+                            x0 = max(0, x_full - COARSE_PADDING_PIXELS)
+                            y0 = max(0, y_full - COARSE_PADDING_PIXELS)
+                            x1 = min(tw, x_full + ws + COARSE_PADDING_PIXELS)
+                            y1 = min(th, y_full + hs + COARSE_PADDING_PIXELS)
                             roi_key = (x0, y0, x1, y1)
                             if roi_key in seen_rois:
                                 continue
