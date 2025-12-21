@@ -21,11 +21,13 @@ PIECE_CELLS_APPROX = (1, 1)
 EST_SCALE_WINDOW = np.linspace(0.8, 1.2, num=11).tolist()
 ROTATIONS = [0, 90, 180, 270]
 TOP_MATCH_COUNT = 5
-TOP_MATCH_SCAN_MULT = 50
+TOP_MATCH_SCAN_MULTIPLIER = 50
+TOP_MATCH_SCAN_MULT = TOP_MATCH_SCAN_MULTIPLIER  # Backward-compatible alias; prefer TOP_MATCH_SCAN_MULTIPLIER
 PROFILE_ENV = "WCMBOT_PROFILE"
 COARSE_FACTOR = 0.4
 COARSE_TOP_K = 3
-COARSE_PAD_PX = 24
+COARSE_PADDING_PIXELS = 24
+COARSE_PAD_PX = COARSE_PADDING_PIXELS  # Backward-compatible alias; prefer COARSE_PADDING_PIXELS
 COARSE_MIN_SIDE = 240
 
 KNOB_WIDTH_FRAC = 1.0 / 3.0
@@ -74,6 +76,22 @@ def _load_image(path: str) -> np.ndarray:
 
 
 def _load_template_cached(path: str) -> TemplateCacheEntry:
+    """
+    Load a template image with caching and mtime-based invalidation.
+    
+    Caches the template image (both RGB and binarized versions) to avoid
+    redundant disk I/O and preprocessing. The cache is invalidated automatically
+    when the file's modification time changes.
+    
+    Args:
+        path: Filesystem path to the template image.
+        
+    Returns:
+        A TemplateCacheEntry containing the cached template data.
+        
+    Raises:
+        RuntimeError: If the image file does not exist or cannot be loaded.
+    """
     if not os.path.exists(path):
         raise RuntimeError(f"Failed to load image: {path}")
     mtime = os.path.getmtime(path)
@@ -98,6 +116,22 @@ def _get_template_blur_f32(
     blur_ksz: Optional[Tuple[int, int]],
     blur_cache: Dict[Optional[Tuple[int, int]], np.ndarray],
 ) -> np.ndarray:
+    """
+    Get a blurred float32 version of the template with caching.
+    
+    Converts the binarized template to float32 and optionally applies Gaussian
+    blur. Results are cached to avoid redundant preprocessing when the same
+    blur kernel is used multiple times.
+    
+    Args:
+        template_bin: Binary template image (values 0 or 1, or 0-255).
+        blur_ksz: Optional Gaussian blur kernel size tuple (width, height).
+            If None, no blurring is applied.
+        blur_cache: Dictionary to cache blurred results by kernel size.
+        
+    Returns:
+        Float32 array of the (optionally blurred) template.
+    """
     cached = blur_cache.get(blur_ksz)
     if cached is not None:
         return cached
@@ -118,6 +152,21 @@ def _get_template_blur_f32(
 def preload_template_cache(
     template_image_path: str, blur_ksz: Optional[Tuple[int, int]] = (3, 3)
 ) -> None:
+    """
+    Preload a template image and its blurred binary representation into the cache.
+    
+    This is a convenience API for callers (e.g. the web app) that want to
+    amortize the cost of loading, binarizing and optionally blurring the
+    template image before handling the first real request. Calling this
+    function during application startup reduces the latency of the first
+    request that needs to match against the given template.
+    
+    Args:
+        template_image_path: Filesystem path to the template image that will
+            be used for matching.
+        blur_ksz: Optional Gaussian blur kernel size to precompute on the
+            binarized template. If None, the unblurred template is cached.
+    """
     entry = _load_template_cached(template_image_path)
     _get_template_blur_f32(entry.template_bin, blur_ksz, entry.blur_cache)
 
@@ -130,6 +179,19 @@ def _binarize_two_color(img_bgr: np.ndarray) -> np.ndarray:
 
 
 def _mask_bbox(mask: np.ndarray) -> Tuple[int, int, int, int]:
+    """
+    Compute the bounding box of non-zero pixels in a mask.
+    
+    Args:
+        mask: Binary mask array where non-zero values indicate regions of interest.
+        
+    Returns:
+        Tuple of (y_min, y_max, x_min, x_max) coordinates defining the
+        bounding box of all non-zero pixels in the mask.
+        
+    Raises:
+        RuntimeError: If the mask is empty (contains no non-zero pixels).
+    """
     ys, xs = np.where(mask > 0)
     if len(xs) == 0:
         raise RuntimeError("Crop failed: empty mask")
@@ -296,19 +358,19 @@ def _match_template_multiscale_binary(
         th_c = max(1, int(round(th * COARSE_FACTOR)))
         if tw_c < 2 or th_c < 2:
             use_coarse = False
-            T_blur_coarse = None
+            T_coarse_blur = None
         else:
-            T_blur_coarse = cv2.resize(
+            T_coarse_blur = cv2.resize(
                 T_blur_f32, (tw_c, th_c), interpolation=cv2.INTER_AREA
             )
     else:
-        T_blur_coarse = None
+        T_coarse_blur = None
 
     def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
         if flat.size <= max_len:
             return np.argsort(flat)[::-1]
         scan_count = min(
-            flat.size, max(max_len * TOP_MATCH_SCAN_MULT, max_len)
+            flat.size, max(max_len * TOP_MATCH_SCAN_MULTIPLIER, max_len)
         )
         order = np.argpartition(flat, -scan_count)[-scan_count:]
         return order[np.argsort(flat[order])[::-1]]
@@ -419,10 +481,10 @@ def _match_template_multiscale_binary(
             patt_masked = patt_s_blur * mask_s
             combo_added = False
 
-            if use_coarse and T_blur_coarse is not None:
+            if use_coarse and T_coarse_blur is not None:
                 ws_c = max(1, int(round(ws * COARSE_FACTOR)))
                 hs_c = max(1, int(round(hs * COARSE_FACTOR)))
-                if 1 < ws_c < T_blur_coarse.shape[1] and 1 < hs_c < T_blur_coarse.shape[0]:
+                if 1 < ws_c < T_coarse_blur.shape[1] and 1 < hs_c < T_coarse_blur.shape[0]:
                     patt_c = cv2.resize(
                         patt_s_blur, (ws_c, hs_c), interpolation=cv2.INTER_AREA
                     )
@@ -431,7 +493,7 @@ def _match_template_multiscale_binary(
                     )
                     patt_masked_c = patt_c * mask_c
                     res_c = cv2.matchTemplate(
-                        T_blur_coarse, patt_masked_c, corr_method
+                        T_coarse_blur, patt_masked_c, corr_method
                     )
                     if res_c.size:
                         coarse_positions = _collect_coarse_positions(
@@ -444,10 +506,10 @@ def _match_template_multiscale_binary(
                             y_full = int(round(y_c / COARSE_FACTOR))
                             x_full = max(0, min(x_full, tw - ws))
                             y_full = max(0, min(y_full, th - hs))
-                            x0 = max(0, x_full - COARSE_PAD_PX)
-                            y0 = max(0, y_full - COARSE_PAD_PX)
-                            x1 = min(tw, x_full + ws + COARSE_PAD_PX)
-                            y1 = min(th, y_full + hs + COARSE_PAD_PX)
+                            x0 = max(0, x_full - COARSE_PADDING_PIXELS)
+                            y0 = max(0, y_full - COARSE_PADDING_PIXELS)
+                            x1 = min(tw, x_full + ws + COARSE_PADDING_PIXELS)
+                            y1 = min(th, y_full + hs + COARSE_PADDING_PIXELS)
                             roi_key = (x0, y0, x1, y1)
                             if roi_key in seen_rois:
                                 continue
