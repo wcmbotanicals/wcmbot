@@ -29,8 +29,6 @@ COARSE_PAD_PX = 24
 COARSE_MIN_SIDE = 240
 
 KNOB_WIDTH_FRAC = 1.0 / 3.0
-CANNY_LOW = 50
-CANNY_HIGH = 150
 KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 MATCH_DILATE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
@@ -59,7 +57,6 @@ class MatchPayload:
 @dataclass
 class TemplateCacheEntry:
     mtime: float
-    template_bgr: np.ndarray
     template_rgb: np.ndarray
     template_bin: np.ndarray
     blur_cache: Dict[Optional[Tuple[int, int]], np.ndarray]
@@ -88,7 +85,6 @@ def _load_template_cached(path: str) -> TemplateCacheEntry:
     template_bin = _binarize_two_color(template)
     entry = TemplateCacheEntry(
         mtime=mtime,
-        template_bgr=template,
         template_rgb=template_rgb,
         template_bin=template_bin,
         blur_cache={},
@@ -145,13 +141,13 @@ def _keep_largest_component(mask01: np.ndarray, min_frac: float = MIN_MASK_AREA_
     contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return np.zeros_like(mask01)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    area = cv2.contourArea(contours[0])
+    largest = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest)
     h, w = mask01.shape[:2]
     if area < min_frac * (h * w):
         return np.zeros_like(mask01)
     out = np.zeros_like(mask255)
-    cv2.drawContours(out, [contours[0]], -1, 255, thickness=-1)
+    cv2.drawContours(out, [largest], -1, 255, thickness=-1)
     return (out // 255).astype(np.uint8)
 
 
@@ -169,11 +165,6 @@ def _mask_by_blue(piece_bgr: np.ndarray) -> np.ndarray:
             "Blue segmentation produced empty mask - tune HSV ranges or check image"
         )
     return mask01
-
-
-def _crop_to_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    y0, y1, x0, x1 = _mask_bbox(mask)
-    return img[y0:y1, x0:x1].copy()
 
 
 def _rotate_img(img: np.ndarray, angle: float) -> np.ndarray:
@@ -503,7 +494,7 @@ def _ensure_three_channel(img: np.ndarray) -> np.ndarray:
 
 
 def _binary_to_uint8(img01: np.ndarray) -> np.ndarray:
-    return (img01.astype(np.uint8) * 255).astype(np.uint8)
+    return img01.astype(np.uint8) * 255
 
 
 def _create_resized_preview(piece_bin: np.ndarray, piece_mask: np.ndarray, match: Dict) -> np.ndarray:

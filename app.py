@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import gradio as gr
 import numpy as np
@@ -102,6 +102,13 @@ def _blank_outputs(message: str):
     return _views_to_outputs(blank_views, message, None, 0)
 
 
+def _render_match_payload(payload, idx: int):
+    views = render_primary_views(payload, idx)
+    views["zoom_template"] = make_zoomable_plot(views.get("zoom_template"))
+    summary = format_match_summary(payload, idx)
+    return _views_to_outputs(views, summary, payload, idx)
+
+
 def _change_match(step: int, payload, current_index: int):
     if payload is None or not getattr(payload, "matches", None):
         return _blank_outputs("Run the matcher once a piece is uploaded.")
@@ -110,10 +117,7 @@ def _change_match(step: int, payload, current_index: int):
         return _blank_outputs("No matches available.")
     idx = (current_index or 0) + step
     idx %= total
-    views = render_primary_views(payload, idx)
-    views["zoom_template"] = make_zoomable_plot(views.get("zoom_template"))
-    summary = format_match_summary(payload, idx)
-    return _views_to_outputs(views, summary, payload, idx)
+    return _render_match_payload(payload, idx)
 
 
 def solve_puzzle(piece_path, knobs_x, knobs_y):
@@ -138,10 +142,7 @@ def solve_puzzle(piece_path, knobs_x, knobs_y):
         payload = find_piece_in_template(
             piece_path, str(TEMPLATE_PATH), knobs_x, knobs_y
         )
-        views = render_primary_views(payload, 0)
-        views["zoom_template"] = make_zoomable_plot(views.get("zoom_template"))
-        summary = format_match_summary(payload, 0)
-        return _views_to_outputs(views, summary, payload, 0)
+        return _render_match_payload(payload, 0)
     except Exception as exc:  # pylint: disable=broad-except
         return _blank_outputs(f"Error: {exc}")
 

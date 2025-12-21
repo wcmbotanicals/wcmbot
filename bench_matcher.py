@@ -9,7 +9,10 @@ from typing import Dict, List, Tuple
 
 import matcher
 
-CASE_MATRIX: List[Tuple[str, int, int]] = [
+CaseSpec = Tuple[str, int, int]
+Case = Tuple[str, int, int, str]
+
+CASE_MATRIX: List[CaseSpec] = [
     ("piece_1.jpg", 0, 0),
     ("piece_2.jpg", 2, 2),
     ("piece_3.jpg", 2, 2),
@@ -31,51 +34,56 @@ def _format_ms(value_s: float) -> str:
     return f"{value_s * 1000.0:.2f} ms"
 
 
-def _resolve_cases(selected: List[str]) -> List[Tuple[str, int, int]]:
-    if not selected:
-        return CASE_MATRIX
-    by_name = {name: (name, kx, ky) for name, kx, ky in CASE_MATRIX}
-    resolved = []
-    for name in selected:
-        item = by_name.get(name)
-        if not item:
-            raise ValueError(f"Unknown case '{name}'. Available: {', '.join(by_name)}")
-        resolved.append(item)
+def _resolve_cases(selected: List[str], pieces_dir: str) -> List[Case]:
+    if selected:
+        by_name = {name: (name, kx, ky) for name, kx, ky in CASE_MATRIX}
+        specs = []
+        for name in selected:
+            item = by_name.get(name)
+            if not item:
+                raise ValueError(
+                    f"Unknown case '{name}'. Available: {', '.join(by_name)}"
+                )
+            specs.append(item)
+    else:
+        specs = CASE_MATRIX
+
+    resolved: List[Case] = []
+    for name, knobs_x, knobs_y in specs:
+        piece_path = os.path.join(pieces_dir, name)
+        if not os.path.exists(piece_path):
+            raise FileNotFoundError(f"Missing piece image: {piece_path}")
+        resolved.append((name, knobs_x, knobs_y, piece_path))
     return resolved
 
 
 def _run_benchmark(
     template_path: str,
-    pieces_dir: str,
-    cases: List[Tuple[str, int, int]],
+    cases: List[Case],
     iterations: int,
     repeats: int,
     warmup: int,
 ) -> Dict[str, List[float]]:
-    timings: Dict[str, List[float]] = {name: [] for name, _, _ in cases}
+    timings: Dict[str, List[float]] = {name: [] for name, *_ in cases}
 
-    for _ in range(warmup):
-        for name, knobs_x, knobs_y in cases:
-            piece_path = os.path.join(pieces_dir, name)
+    def _run_cases(record: bool) -> None:
+        for name, knobs_x, knobs_y, piece_path in cases:
+            start = time.perf_counter()
             matcher.find_piece_in_template(
                 piece_image_path=piece_path,
                 template_image_path=template_path,
                 knobs_x=knobs_x,
                 knobs_y=knobs_y,
             )
+            if record:
+                timings[name].append(time.perf_counter() - start)
+
+    for _ in range(warmup):
+        _run_cases(record=False)
 
     for _ in range(repeats):
         for _ in range(iterations):
-            for name, knobs_x, knobs_y in cases:
-                piece_path = os.path.join(pieces_dir, name)
-                start = time.perf_counter()
-                matcher.find_piece_in_template(
-                    piece_image_path=piece_path,
-                    template_image_path=template_path,
-                    knobs_x=knobs_x,
-                    knobs_y=knobs_y,
-                )
-                timings[name].append(time.perf_counter() - start)
+            _run_cases(record=True)
 
     return timings
 
@@ -152,17 +160,12 @@ def main() -> None:
     if args.coarse_min_side is not None:
         matcher.COARSE_MIN_SIDE = args.coarse_min_side
 
-    cases = _resolve_cases(args.case)
-    for name, _, _ in cases:
-        piece_path = os.path.join(pieces_dir, name)
-        if not os.path.exists(piece_path):
-            raise FileNotFoundError(f"Missing piece image: {piece_path}")
+    cases = _resolve_cases(args.case, pieces_dir)
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Missing template image: {template_path}")
 
     timings = _run_benchmark(
         template_path=template_path,
-        pieces_dir=pieces_dir,
         cases=cases,
         iterations=args.iterations,
         repeats=args.repeats,
@@ -182,27 +185,23 @@ def main() -> None:
         f"min_side={matcher.COARSE_MIN_SIDE}",
     )
 
-    combined = []
-    for name, values in timings.items():
-        combined.extend(values)
+    def _summarize(label: str, values: List[float]) -> str:
         sorted_vals = sorted(values)
-        print(
-            f"{name}: median {_format_ms(statistics.median(sorted_vals))}, "
+        return (
+            f"{label}: median {_format_ms(statistics.median(sorted_vals))}, "
             f"mean {_format_ms(statistics.mean(sorted_vals))}, "
             f"p95 {_format_ms(_percentile(sorted_vals, 95))}, "
             f"min {_format_ms(sorted_vals[0])}, "
             f"max {_format_ms(sorted_vals[-1])}"
         )
 
+    combined: List[float] = []
+    for name, values in timings.items():
+        combined.extend(values)
+        print(_summarize(name, values))
+
     if combined:
-        sorted_all = sorted(combined)
-        print(
-            f"overall: median {_format_ms(statistics.median(sorted_all))}, "
-            f"mean {_format_ms(statistics.mean(sorted_all))}, "
-            f"p95 {_format_ms(_percentile(sorted_all, 95))}, "
-            f"min {_format_ms(sorted_all[0])}, "
-            f"max {_format_ms(sorted_all[-1])}"
-        )
+        print(_summarize("overall", combined))
 
 
 if __name__ == "__main__":
