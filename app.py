@@ -1,6 +1,7 @@
 """Gradio interface for the jigsaw puzzle solver"""
 
 import os
+import random
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -15,6 +16,7 @@ from version import __version__
 # Hardcoded paths
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BASE_DIR / "media" / "templates" / "sample_puzzle.png"
+MUSPAN_LOGO_PATH = BASE_DIR / "media" / "muspan_logo.png"
 
 VIEW_KEYS = [
     "template_color",
@@ -62,6 +64,50 @@ def make_zoomable_plot(image: Optional[np.ndarray]):
         scaleratio=1,
     )
     return fig
+
+
+def get_random_ad():
+    """Get a random advertisement banner HTML"""
+    # Use relative path for the logo that Gradio can serve
+    logo_path = "media/muspan_logo.png"
+    ads = [
+        f"""
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    padding: 15px 20px; 
+                    border-radius: 10px; 
+                    border: 3px solid #5a67d8; 
+                    margin: 15px 0; 
+                    text-align: center; 
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    position: relative;">
+            <span style="position: absolute; top: 5px; right: 10px; color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: bold;">Ad</span>
+            <div style="display: flex; align-items: center; justify-content: center; gap: 20px; flex-wrap: wrap;">
+                <img src="/file={MUSPAN_LOGO_PATH}" alt="Muspan" style="height: 80px; width: auto; max-width: 200px; object-fit: contain;">
+                <p style="color: white; font-size: 16px; margin: 0; font-weight: 500; flex: 1; min-width: 300px;">
+                    🔧 Solve YOUR mathematical problems with <strong>Muspan</strong> - the ultimate toolbox for spatial analysis! 
+                    Visit <a href="https://www.muspan.co.uk/" target="_blank" style="color: #ffd700; text-decoration: underline;">www.muspan.co.uk</a>
+                </p>
+            </div>
+        </div>
+        """,
+        """
+        <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); 
+                    padding: 15px 20px; 
+                    border-radius: 10px; 
+                    border: 3px dashed #e91e63; 
+                    margin: 15px 0; 
+                    text-align: center; 
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    position: relative;">
+            <span style="position: absolute; top: 5px; right: 10px; color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: bold;">Ad</span>
+            <p style="color: white; font-size: 16px; margin: 0; font-weight: 500;">
+                🧬 Mathematical biologists HATE him! One simple trick to invoke Schnakenberg kinetics. 
+                <a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" target="_blank" style="color: #ffeb3b; text-decoration: underline;">Click here to learn more...</a>
+            </p>
+        </div>
+        """
+    ]
+    return random.choice(ads)
 
 
 def check_template_exists():
@@ -176,6 +222,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     https://github.com/wcmbotanicals/wcmbot.
     """
     )
+
+    # Display random advertisement banner
+    gr.HTML(get_random_ad())
 
     gr.HTML(
         """
