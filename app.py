@@ -198,7 +198,7 @@ def _change_match(step: int, payload, current_index: int):
     return _render_match_payload(payload, idx)
 
 
-def solve_puzzle(piece_path):
+def solve_puzzle(piece_path, auto_align):
     """Run the high-performance matcher and return visualization slices"""
     if not piece_path or not os.path.exists(piece_path):
         return _blank_outputs("Please upload a puzzle piece image.")
@@ -209,7 +209,7 @@ def solve_puzzle(piece_path):
             str(TEMPLATE_PATH),
             knobs_x=None,
             knobs_y=None,
-            auto_align=True,
+            auto_align=bool(auto_align),
             infer_knobs=True,
         )
         return _render_match_payload(payload, 0)
@@ -244,7 +244,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     Notes:
     - Pictures must show a single puzzle piece on a plain (not blue) background.
     - The piece should be aligned roughly upright in the picture for best results.
-      Small tilts are corrected using the piece mask (rotations of multiples of 90° are evaluated).
+      Optional auto-align (experimental) can correct small tilts (rotations of multiples of 90° are evaluated).
     
     This app is almost entirely vibe-coded. If you and/or your AI agents would like to
     contribute to its development, proposals and PRs are very welcome at
@@ -274,6 +274,10 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 type="filepath",
                 sources=["upload", "clipboard"],
                 height=300,
+            )
+            auto_align_checkbox = gr.Checkbox(
+                label="Auto-align (experimental)",
+                value=False,
             )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
@@ -323,7 +327,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
 
     solve_button.click(
         fn=solve_puzzle,
-        inputs=[piece_input],
+        inputs=[piece_input, auto_align_checkbox],
         outputs=[*ordered_components, match_summary, match_state, match_index],
     )
     prev_button.click(
