@@ -945,19 +945,6 @@ def find_piece_in_template(
     if isinstance(knobs_y, (int, float)) and knobs_y < 0:
         infer_knobs_enabled = True
 
-    knobs_inferred = False
-    if infer_knobs_enabled:
-        knobs_x, knobs_y = _infer_knob_counts(
-            piece_mask_crop,
-            template_bin.shape,
-        )
-        knobs_inferred = True
-        if profile:
-            marks.append(("knob_infer", time.perf_counter()))
-    else:
-        knobs_x = int(knobs_x)
-        knobs_y = int(knobs_y)
-
     auto_align_enabled = auto_align
     auto_align_deg = 0.0
     if auto_align_enabled:
@@ -979,6 +966,19 @@ def find_piece_in_template(
             piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
             if profile:
                 marks.append(("auto_align", time.perf_counter()))
+
+    knobs_inferred = False
+    if infer_knobs_enabled:
+        knobs_x, knobs_y = _infer_knob_counts(
+            piece_mask_crop,
+            template_bin.shape,
+        )
+        knobs_inferred = True
+        if profile:
+            marks.append(("knob_infer", time.perf_counter()))
+    else:
+        knobs_x = int(knobs_x)
+        knobs_y = int(knobs_y)
 
     _, scales = _estimate_scales(
         template_bin.shape, piece_mask_crop, knobs_x, knobs_y
