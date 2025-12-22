@@ -141,6 +141,7 @@ def test_find_piece_expected_location_with_rotation(
         template_image_path=template_path,
         knobs_x=knobs_x,
         knobs_y=knobs_y,
+        auto_align=True,
     )
 
     assert payload.matches, (

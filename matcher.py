@@ -45,9 +45,9 @@ MIN_MASK_AREA_FRAC = 0.0005
 AUTO_ALIGN_MIN_DEG = 2.0
 AUTO_ALIGN_MAX_DEG = 20.0
 AUTO_ALIGN_MIN_LINES = 2
-AUTO_ALIGN_MIN_AREA_FRAC = 0.02
-AUTO_ALIGN_HOUGH_THRESHOLD = 80
-AUTO_ALIGN_HOUGH_MIN_LINE = 60
+AUTO_ALIGN_MIN_AREA_FRAC = 0.03
+AUTO_ALIGN_HOUGH_THRESHOLD = 50
+AUTO_ALIGN_HOUGH_MIN_LINE = 40
 AUTO_ALIGN_HOUGH_MAX_GAP = 20
 INFER_KNOBS_TIE_EPS = 0.01
 INFER_KNOBS_LOW_FILL = 0.50
@@ -294,6 +294,12 @@ def _mask_bbox_area(mask01: np.ndarray) -> int:
 
 
 def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
+    """
+    Estimate tilt angle using Hough line detection on mask edges.
+    
+    Uses a weighted mean of detected line angles, where weights are the
+    line lengths. This is more robust than the median approach.
+    """
     edges = cv2.Canny(mask01.astype(np.uint8) * 255, 50, 150)
     lines = cv2.HoughLinesP(
         edges,
@@ -319,27 +325,42 @@ def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
         lengths.append(length)
     if not angles:
         return None, 0
-    order = np.argsort(angles)
-    angles_sorted = np.array(angles, dtype=np.float32)[order]
-    lengths_sorted = np.array(lengths, dtype=np.float32)[order]
-    cum = np.cumsum(lengths_sorted)
-    idx = int(np.searchsorted(cum, cum[-1] / 2.0))
-    idx = max(0, min(idx, len(angles_sorted) - 1))
-    return float(angles_sorted[idx]), len(angles_sorted)
+    
+    # Use weighted mean instead of median for better angle estimation
+    angles_array = np.array(angles, dtype=np.float32)
+    lengths_array = np.array(lengths, dtype=np.float32)
+    weighted_mean = np.average(angles_array, weights=lengths_array)
+    
+    return float(weighted_mean), len(angles)
 
 
 def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
-    # Use straight-edge segments in the mask to estimate small tilt, then
-    # validate by checking if the mask's bounding box tightens.
+    """
+    Estimate alignment correction using Hough line detection.
+    
+    Detects straight edges in the mask and computes a weighted mean angle.
+    Only applies correction if:
+    1. Sufficient straight lines are detected
+    2. The correction tightens the bounding box (validation)
+    3. The angle is within reasonable bounds
+    """
     angle, line_count = _estimate_mask_tilt(mask01)
+    
+    # Need at least a few lines to be confident
     if angle is None or line_count < AUTO_ALIGN_MIN_LINES:
         return 0.0
+    
     correction = -angle
-    if not (AUTO_ALIGN_MIN_DEG <= abs(correction) <= AUTO_ALIGN_MAX_DEG):
+    
+    # Only consider corrections within a reasonable range
+    if abs(correction) > AUTO_ALIGN_MAX_DEG:
         return 0.0
+    
+    # Validate that the correction actually helps by checking bbox tightness
     area0 = _mask_bbox_area(mask01)
     if area0 <= 0:
         return 0.0
+    
     rotated_mask = _rotate_img(
         (mask01 > 0).astype(np.uint8) * 255,
         correction,
@@ -349,9 +370,13 @@ def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
     area1 = _mask_bbox_area(rotated_mask)
     if area1 <= 0:
         return 0.0
+    
+    # Require that bbox gets tighter with a reasonable threshold
+    # Use a higher threshold to avoid over-correcting pieces that don't need it
     area_delta = (area0 - area1) / float(area0)
     if area_delta < AUTO_ALIGN_MIN_AREA_FRAC:
         return 0.0
+    
     return float(correction)
 
 
