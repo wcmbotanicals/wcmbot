@@ -115,6 +115,23 @@ def get_random_ad():
                 <a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" target="_blank" style="color: #ffeb3b; text-decoration: underline;">Click here to learn more...</a>
             </p>
         </div>
+        """,
+        """
+        <div style="background: linear-gradient(135deg, #ffefba 0%, #ffffff 100%); 
+                    padding: 15px 20px; 
+                    border-radius: 10px; 
+                    border: 3px solid #f4b41a; 
+                    margin: 15px 0; 
+                    text-align: center; 
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    position: relative;">
+            <span style="position: absolute; top: 5px; right: 10px; color: rgba(0, 0, 0, 0.5); font-size: 10px; font-weight: bold;">Ad</span>
+            <p style="color: #2d2d2d; font-size: 16px; margin: 0; font-weight: 600;">
+                Did you use the programming language Julia between 2018 and 2023? 
+                Then you could be entitled to thousands of pounds of compensation. 
+                <a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" target="_blank" style="color: #d35400; text-decoration: underline;">Click here to find out more</a>
+            </p>
+        </div>
         """
     ]
     return random.choice(ads)
