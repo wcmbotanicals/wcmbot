@@ -158,13 +158,6 @@ def test_piece_upload_and_match(page, gradio_app):
         # Wait for upload to complete
         time.sleep(2)
         
-        # Set tab counts (required parameters)
-        # Find the number inputs - they appear in order: horizontal, then vertical
-        number_inputs = page.locator('input[type="number"]').all()
-        if len(number_inputs) >= 2:
-            number_inputs[0].fill("0")  # Horizontal tabs
-            number_inputs[1].fill("0")  # Vertical tabs
-        
         # Click the solve button
         solve_button = page.locator("button:has-text('Find Piece Location')")
         solve_button.click()

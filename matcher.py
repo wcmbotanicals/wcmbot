@@ -42,6 +42,16 @@ UPPER_BLUE2 = np.array([160, 255, 220], dtype=np.uint8)
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
 MIN_MASK_AREA_FRAC = 0.0005
+AUTO_ALIGN_MIN_DEG = 2.0
+AUTO_ALIGN_MAX_DEG = 20.0
+AUTO_ALIGN_MIN_LINES = 2
+AUTO_ALIGN_MIN_AREA_FRAC = 0.02
+AUTO_ALIGN_HOUGH_THRESHOLD = 80
+AUTO_ALIGN_HOUGH_MIN_LINE = 60
+AUTO_ALIGN_HOUGH_MAX_GAP = 20
+INFER_KNOBS_TIE_EPS = 0.01
+INFER_KNOBS_LOW_FILL = 0.50
+INFER_KNOBS_HIGH_FILL = 0.65
 
 
 # ---------- helper dataclasses ----------
@@ -54,6 +64,10 @@ class MatchPayload:
     piece_bin: np.ndarray
     matches: List[Dict]
     template_shape: Tuple[int, int]
+    auto_align_deg: float = 0.0
+    knobs_x: Optional[int] = None
+    knobs_y: Optional[int] = None
+    knobs_inferred: bool = False
 
 
 @dataclass
@@ -229,7 +243,31 @@ def _mask_by_blue(piece_bgr: np.ndarray) -> np.ndarray:
     return mask01
 
 
-def _rotate_img(img: np.ndarray, angle: float) -> np.ndarray:
+def _background_bgr(img_bgr: np.ndarray) -> Tuple[int, int, int]:
+    h, w = img_bgr.shape[:2]
+    samples = np.array(
+        [
+            img_bgr[0, 0],
+            img_bgr[0, w - 1],
+            img_bgr[h - 1, 0],
+            img_bgr[h - 1, w - 1],
+            img_bgr[0, w // 2],
+            img_bgr[h - 1, w // 2],
+            img_bgr[h // 2, 0],
+            img_bgr[h // 2, w - 1],
+        ],
+        dtype=np.float32,
+    )
+    median = np.median(samples, axis=0).round().astype(np.uint8)
+    return int(median[0]), int(median[1]), int(median[2])
+
+
+def _rotate_img(
+    img: np.ndarray,
+    angle: float,
+    interpolation: int = cv2.INTER_LINEAR,
+    border_value: int | Tuple[int, int, int] = 0,
+) -> np.ndarray:
     h, w = img.shape[:2]
     M = cv2.getRotationMatrix2D((w / 2, h / 2), -angle, 1.0)
     cos = abs(M[0, 0])
@@ -238,7 +276,165 @@ def _rotate_img(img: np.ndarray, angle: float) -> np.ndarray:
     nh = int(h * cos + w * sin)
     M[0, 2] += nw / 2 - w / 2
     M[1, 2] += nh / 2 - h / 2
-    return cv2.warpAffine(img, M, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0)
+    return cv2.warpAffine(
+        img,
+        M,
+        (nw, nh),
+        flags=interpolation,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=border_value,
+    )
+
+
+def _mask_bbox_area(mask01: np.ndarray) -> int:
+    ys, xs = np.where(mask01 > 0)
+    if len(xs) == 0:
+        return 0
+    return int((xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1))
+
+
+def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
+    edges = cv2.Canny(mask01.astype(np.uint8) * 255, 50, 150)
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi / 180,
+        threshold=AUTO_ALIGN_HOUGH_THRESHOLD,
+        minLineLength=AUTO_ALIGN_HOUGH_MIN_LINE,
+        maxLineGap=AUTO_ALIGN_HOUGH_MAX_GAP,
+    )
+    if lines is None:
+        return None, 0
+    angles: List[float] = []
+    lengths: List[float] = []
+    for x1, y1, x2, y2 in lines[:, 0]:
+        dx = x2 - x1
+        dy = y2 - y1
+        length = float(np.hypot(dx, dy))
+        if length < AUTO_ALIGN_HOUGH_MIN_LINE * 0.5:
+            continue
+        angle = np.degrees(np.arctan2(dy, dx))
+        angle = ((angle + 45) % 90) - 45
+        angles.append(float(angle))
+        lengths.append(length)
+    if not angles:
+        return None, 0
+    order = np.argsort(angles)
+    angles_sorted = np.array(angles, dtype=np.float32)[order]
+    lengths_sorted = np.array(lengths, dtype=np.float32)[order]
+    cum = np.cumsum(lengths_sorted)
+    idx = int(np.searchsorted(cum, cum[-1] / 2.0))
+    idx = max(0, min(idx, len(angles_sorted) - 1))
+    return float(angles_sorted[idx]), len(angles_sorted)
+
+
+def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
+    # Use straight-edge segments in the mask to estimate small tilt, then
+    # validate by checking if the mask's bounding box tightens.
+    angle, line_count = _estimate_mask_tilt(mask01)
+    if angle is None or line_count < AUTO_ALIGN_MIN_LINES:
+        return 0.0
+    correction = -angle
+    if not (AUTO_ALIGN_MIN_DEG <= abs(correction) <= AUTO_ALIGN_MAX_DEG):
+        return 0.0
+    area0 = _mask_bbox_area(mask01)
+    if area0 <= 0:
+        return 0.0
+    rotated_mask = _rotate_img(
+        (mask01 > 0).astype(np.uint8) * 255,
+        correction,
+        interpolation=cv2.INTER_NEAREST,
+        border_value=0,
+    )
+    area1 = _mask_bbox_area(rotated_mask)
+    if area1 <= 0:
+        return 0.0
+    area_delta = (area0 - area1) / float(area0)
+    if area_delta < AUTO_ALIGN_MIN_AREA_FRAC:
+        return 0.0
+    return float(correction)
+
+
+def _estimate_scales(
+    template_shape: Tuple[int, int],
+    piece_mask: np.ndarray,
+    knobs_x: int,
+    knobs_y: int,
+    scale_window: List[float] = EST_SCALE_WINDOW,
+) -> Tuple[float, List[float]]:
+    th, tw = template_shape
+    cell_w = tw / COLS
+    cell_h = th / ROWS
+    desired_core_w = cell_w * PIECE_CELLS_APPROX[0]
+    desired_core_h = cell_h * PIECE_CELLS_APPROX[1]
+    desired_full_w = desired_core_w * (1.0 + knobs_x * KNOB_WIDTH_FRAC)
+    desired_full_h = desired_core_h * (1.0 + knobs_y * KNOB_WIDTH_FRAC)
+
+    mh, mw = piece_mask.shape
+    if mw == 0 or mh == 0:
+        raise RuntimeError("Piece mask has zero size")
+
+    est_scale_w = desired_full_w / mw
+    est_scale_h = desired_full_h / mh
+    piece_area_px = piece_mask.sum()
+    desired_area_px = desired_core_w * desired_core_h
+    if piece_area_px > 0 and desired_area_px > 0:
+        est_scale_area = np.sqrt(desired_area_px / piece_area_px)
+    else:
+        est_scale_area = (est_scale_w + est_scale_h) / 2.0
+    est_scale = (est_scale_w * 0.45) + (est_scale_h * 0.45) + (est_scale_area * 0.10)
+    if not (0.02 < est_scale < 20.0):
+        raise RuntimeError(
+            f"Estimated scale {est_scale:.3f} is implausible - check PIECE_CELLS_APPROX and image sizes"
+        )
+    scales = [est_scale * f for f in scale_window]
+    return est_scale, scales
+
+
+def _infer_knob_counts(
+    piece_mask: np.ndarray,
+    template_shape: Tuple[int, int],
+) -> Tuple[int, int]:
+    mh, mw = piece_mask.shape
+    if mw == 0 or mh == 0:
+        return 0, 0
+
+    piece_area_px = float(piece_mask.sum())
+    if piece_area_px <= 0:
+        return 0, 0
+    fill_ratio = piece_area_px / float(mw * mh)
+
+    th, tw = template_shape
+    cell_w = tw / COLS
+    cell_h = th / ROWS
+    desired_core_w = cell_w * PIECE_CELLS_APPROX[0]
+    desired_core_h = cell_h * PIECE_CELLS_APPROX[1]
+    desired_area_px = desired_core_w * desired_core_h
+
+    scored: List[Tuple[float, int, int]] = []
+    for kx in range(3):
+        for ky in range(3):
+            desired_full_w = desired_core_w * (1.0 + kx * KNOB_WIDTH_FRAC)
+            desired_full_h = desired_core_h * (1.0 + ky * KNOB_WIDTH_FRAC)
+            est_scale_w = desired_full_w / mw
+            est_scale_h = desired_full_h / mh
+            est_scale_area = np.sqrt(desired_area_px / piece_area_px)
+            diff = (
+                abs(est_scale_w - est_scale_h)
+                + 0.5 * abs(est_scale_w - est_scale_area)
+                + 0.5 * abs(est_scale_h - est_scale_area)
+            )
+            scored.append((float(diff), kx, ky))
+
+    scored.sort(key=lambda item: item[0])
+    best_diff = scored[0][0]
+    candidates = [item for item in scored if item[0] <= best_diff + INFER_KNOBS_TIE_EPS]
+    if fill_ratio <= INFER_KNOBS_LOW_FILL:
+        candidates.sort(key=lambda item: (-(item[1] + item[2]), item[0]))
+    elif fill_ratio >= INFER_KNOBS_HIGH_FILL:
+        candidates.sort(key=lambda item: ((item[1] + item[2]), item[0]))
+    chosen = candidates[0]
+    return chosen[1], chosen[2]
 
 
 def _candidate_is_close(candidate: Dict, existing: Dict) -> bool:
@@ -679,8 +875,10 @@ def _render_zoom_image(
 def find_piece_in_template(
     piece_image_path: str,
     template_image_path: str,
-    knobs_x: int,
-    knobs_y: int,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    auto_align: bool = False,
+    infer_knobs: Optional[bool] = None,
 ) -> MatchPayload:
     profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
     profile = profile_value not in ("", "0", "false", "no")
@@ -702,6 +900,7 @@ def find_piece_in_template(
     piece_mask = _mask_by_blue(piece)
     if profile:
         marks.append(("mask", time.perf_counter()))
+
     y0, y1, x0, x1 = _mask_bbox(piece_mask)
     piece_crop = piece[y0:y1, x0:x1].copy()
     piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
@@ -712,32 +911,52 @@ def find_piece_in_template(
     if profile:
         marks.append(("binarize", time.perf_counter()))
 
-    th, tw = template_bin.shape
-    cell_w = tw / COLS
-    cell_h = th / ROWS
-    desired_core_w = cell_w * PIECE_CELLS_APPROX[0]
-    desired_core_h = cell_h * PIECE_CELLS_APPROX[1]
-    desired_full_w = desired_core_w * (1.0 + knobs_x * KNOB_WIDTH_FRAC)
-    desired_full_h = desired_core_h * (1.0 + knobs_y * KNOB_WIDTH_FRAC)
+    infer_knobs_enabled = bool(infer_knobs)
+    if knobs_x is None or knobs_y is None:
+        infer_knobs_enabled = True
+    if isinstance(knobs_x, (int, float)) and knobs_x < 0:
+        infer_knobs_enabled = True
+    if isinstance(knobs_y, (int, float)) and knobs_y < 0:
+        infer_knobs_enabled = True
 
-    mh, mw = piece_mask_crop.shape
-    if mw == 0 or mh == 0:
-        raise RuntimeError("Piece mask has zero size")
-
-    est_scale_w = desired_full_w / mw
-    est_scale_h = desired_full_h / mh
-    piece_area_px = piece_mask_crop.sum()
-    desired_area_px = desired_core_w * desired_core_h
-    if piece_area_px > 0 and desired_area_px > 0:
-        est_scale_area = np.sqrt(desired_area_px / piece_area_px)
-    else:
-        est_scale_area = (est_scale_w + est_scale_h) / 2.0
-    est_scale = (est_scale_w * 0.45) + (est_scale_h * 0.45) + (est_scale_area * 0.10)
-    if not (0.02 < est_scale < 20.0):
-        raise RuntimeError(
-            f"Estimated scale {est_scale:.3f} is implausible - check PIECE_CELLS_APPROX and image sizes"
+    knobs_inferred = False
+    if infer_knobs_enabled:
+        knobs_x, knobs_y = _infer_knob_counts(
+            piece_mask_crop,
+            template_bin.shape,
         )
-    scales = [est_scale * f for f in EST_SCALE_WINDOW]
+        knobs_inferred = True
+        if profile:
+            marks.append(("knob_infer", time.perf_counter()))
+    else:
+        knobs_x = int(knobs_x)
+        knobs_y = int(knobs_y)
+
+    auto_align_enabled = auto_align
+    auto_align_deg = 0.0
+    if auto_align_enabled:
+        correction = _estimate_alignment_from_mask(piece_mask)
+        if abs(correction) >= AUTO_ALIGN_MIN_DEG:
+            bg = _background_bgr(piece)
+            piece = _rotate_img(
+                piece,
+                correction,
+                interpolation=cv2.INTER_LINEAR,
+                border_value=bg,
+            )
+            auto_align_deg = correction
+            piece_mask = _mask_by_blue(piece)
+            y0, y1, x0, x1 = _mask_bbox(piece_mask)
+            piece_crop = piece[y0:y1, x0:x1].copy()
+            piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
+            piece_bin = _binarize_two_color(piece_crop) * piece_mask_crop
+            piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
+            if profile:
+                marks.append(("auto_align", time.perf_counter()))
+
+    _, scales = _estimate_scales(
+        template_bin.shape, piece_mask_crop, knobs_x, knobs_y
+    )
     if profile:
         marks.append(("scale", time.perf_counter()))
 
@@ -789,6 +1008,10 @@ def find_piece_in_template(
         piece_bin=piece_bin,
         matches=top_matches,
         template_shape=template_bin.shape,
+        auto_align_deg=auto_align_deg,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
+        knobs_inferred=knobs_inferred,
     )
 
 
@@ -845,12 +1068,17 @@ def format_match_summary(payload: MatchPayload, match_index: int) -> str:
         return "No matches available."
     idx = max(0, min(match_index, len(payload.matches) - 1))
     match = payload.matches[idx]
-    return (
-        f"Match #{idx + 1} / {len(payload.matches)}  \n"
+    lines = [
+        f"Match #{idx + 1} / {len(payload.matches)}",
         f"Score: {match['score']:.3f} | Rotation: {match['rot']}° | "
-        f"Scale: {match['scale']:.4f}  \n"
-        f"Grid position: row {match['row']}, col {match['col']}"
-    )
+        f"Scale: {match['scale']:.4f}",
+        f"Grid position: row {match['row']}, col {match['col']}",
+    ]
+    if payload.knobs_inferred and payload.knobs_x is not None and payload.knobs_y is not None:
+        lines.append(f"Tabs inferred: {payload.knobs_x} x {payload.knobs_y}")
+    if abs(payload.auto_align_deg) >= 0.1:
+        lines.append(f"Auto-align (cw): {payload.auto_align_deg:+.1f}°")
+    return "  \n".join(lines)
 
 
 def highlight_position(template_image_path: str, x: int, y: int, radius: int = 30) -> np.ndarray:
