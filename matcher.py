@@ -298,7 +298,8 @@ def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
     Estimate tilt angle using Hough line detection on mask edges.
     
     Uses a weighted mean of detected line angles, where weights are the
-    line lengths. This is more robust than the median approach.
+    line lengths. Longer lines are more reliable edge detections than short
+    segments, so this approach is more robust than using a median or unweighted mean.
     """
     edges = cv2.Canny(mask01.astype(np.uint8) * 255, 50, 150)
     lines = cv2.HoughLinesP(
@@ -371,8 +372,8 @@ def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
     if area1 <= 0:
         return 0.0
     
-    # Require that bbox gets tighter with a reasonable threshold
-    # Use a higher threshold to avoid over-correcting pieces that don't need it
+    # Require that bbox gets tighter with a reasonable threshold (0.8% = 0.008)
+    # Use a modest threshold to catch real alignment issues while avoiding over-correction
     area_delta = (area0 - area1) / float(area0)
     if area_delta < AUTO_ALIGN_MIN_AREA_FRAC:
         return 0.0
