@@ -19,6 +19,7 @@ BASE_CASES = [
     ("piece_6.jpg", 1, 2, 270, 18, 20),
     ("piece_7.jpg", 2, 0, 270, 7, 13),
     ("piece_8.jpg", 0, 2, 270, 18, 24),
+    ("piece_9.jpg", 2, 0, 90, 18, 25),
     ("piece_10.jpg", 0, 2, 90, 2, 5),
     ("piece_11.jpg", 1, 1, 180, 27, 8),
     ("piece_12.jpg", 1, 1, 0, 18, 21),
@@ -100,6 +101,7 @@ def test_find_piece_expected_location(
         knobs_x=None,
         knobs_y=None,
         infer_knobs=True,
+        auto_align=True,
     )
 
     assert payload.matches, "No matches returned by matcher"
