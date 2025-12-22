@@ -132,7 +132,7 @@ def get_random_ad():
                 <a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" target="_blank" style="color: #d35400; text-decoration: underline;">Click here to find out more</a>
             </p>
         </div>
-        """
+        """,
     ]
     return random.choice(ads)
 
@@ -245,7 +245,6 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     - Pictures must show a single puzzle piece on a plain (not blue) background.
     - The piece should be aligned roughly upright in the picture for best results.
       Small tilts are corrected using the piece mask (rotations of multiples of 90° are evaluated).
-    - Tab counts are inferred automatically.
     
     This app is almost entirely vibe-coded. If you and/or your AI agents would like to
     contribute to its development, proposals and PRs are very welcome at
@@ -275,10 +274,6 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 type="filepath",
                 sources=["upload", "clipboard"],
                 height=300,
-            )
-            gr.Markdown(
-                "Tabs are the protruding connectors on each side of the piece. "
-                "WCMBot infers how many tabs this piece has horizontally and vertically."
             )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
