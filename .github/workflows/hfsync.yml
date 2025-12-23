@@ -41,7 +41,13 @@ jobs:
           git config user.email "${GIT_COMMIT_EMAIL}"
 
           # Overwrite versioneer file with pinned version
-          printf '%s\n' '# Auto-generated during HF sync' "__version__ = \"${VERSION}\"" > wcmbot/_version.py
+          printf '%s\n' \
+            '# Auto-generated during HF sync' \
+            'def get_versions():' \
+            "    return {'version': \"${VERSION}\"}" \
+            '' \
+            "__version__ = get_versions()['version']" \
+            > wcmbot/_version.py
 
           # Install git-lfs
           sudo apt-get update -qq
