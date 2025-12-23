@@ -15,7 +15,7 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Build cleaned repo, install git-xet, commit & push (single step)
+      - name: Build cleaned repo, pin version, install git-xet, commit & push
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_USER: wcmbotanicals
@@ -24,64 +24,44 @@ jobs:
           GIT_COMMIT_EMAIL: "github-actions[bot]@users.noreply.github.com"
         run: |
           set -euo pipefail
-          # --- prepare clean working copy ---
-          CLEAN_DIR=$(mktemp -d)
-          echo "Preparing clean copy at $CLEAN_DIR"
-          rsync -a --delete --exclude='.git' ./ "$CLEAN_DIR/"
 
+          # Resolve version directly from package
+          VERSION=$(python -c "import wcmbot; print(wcmbot.__version__)")
+          echo "Resolved version: $VERSION"
+
+          # Prepare clean working copy
+          CLEAN_DIR=$(mktemp -d)
+          rsync -a --delete --exclude='.git' ./ "$CLEAN_DIR/"
           cd "$CLEAN_DIR"
 
-          # initialize fresh git repo and branch
+          # Init fresh repo
           git init
           git checkout -b main
-
-          # set local commit identity (ensures commits succeed)
           git config user.name "${GIT_COMMIT_NAME}"
           git config user.email "${GIT_COMMIT_EMAIL}"
 
-          # --- install prerequisites (git-lfs) ---
-          sudo apt-get update
+          # Overwrite versioneer file with pinned version
+          cat > wcmbot/_version.py <<EOF
+# Auto-generated during HF sync
+__version__ = "${VERSION}"
+EOF
+
+          # Install git-lfs
+          sudo apt-get update -qq
           sudo apt-get install -y git-lfs
           git lfs install --skip-repo
 
-          # --- install git-xet (official install script) ---
-          # this will place git-xet into /usr/local/bin or ~/.local/bin
+          # Install git-xet
           curl -sSf https://raw.githubusercontent.com/huggingface/xet-core/refs/heads/main/git_xet/install.sh | sh
-
-          # ensure git-xet is on PATH
           export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
-          if ! command -v git-xet > /dev/null 2>&1; then
-            echo "git-xet not found on PATH; listing ~/.local/bin and /usr/local/bin for debugging:"
-            ls -la ~/.local/bin || true
-            ls -la /usr/local/bin || true
-            exit 1
-          fi
-
-          # register xet as transfer agent for this fresh repo
           git xet install
 
-          # --- configure xet tracking for your binary paths ---
-          # track entire media directory; change to specific files if you prefer
+          # Track media via xet
           git xet track "media/**"
-          echo "---- .gitattributes ----"
-          cat .gitattributes || true
-          echo "------------------------"
 
-          # --- commit changes if any ---
+          # Commit and push
           git add -A
-          if git diff --cached --quiet; then
-            echo "No changes to commit (clean copy identical). Exiting."
-            exit 0
-          fi
-          git commit -m "Sync to HF Space (xet-tracked binaries)"
+          git commit -m "Sync to HF Space (pinned version ${VERSION})"
 
-          # --- push to Hugging Face Space using token secret ---
-          # push via HTTPS with token embedded (masked in logs)
-          HF_REMOTE_URL="https://${HF_USER}:${HF_TOKEN}@huggingface.co/${HF_REPO}.git"
-          git remote add hf "${HF_REMOTE_URL}"
-
-          # Force push branch
-          echo "Pushing cleaned repo to Hugging Face Space..."
+          git remote add hf "https://${HF_USER}:${HF_TOKEN}@huggingface.co/${HF_REPO}.git"
           git push --force hf main
-
-          echo "Done."
