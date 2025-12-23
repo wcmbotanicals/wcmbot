@@ -7,8 +7,8 @@ import pytest
 from wcmbot.matcher import find_piece_in_template
 
 HERE = os.path.dirname(__file__)
-TEMPLATE_PATH = os.path.join(HERE, "media", "templates", "sample_puzzle.png")
-PIECES_DIR = os.path.join(HERE, "media", "pieces")
+TEMPLATE_PATH = os.path.join(HERE, "..", "media", "templates", "sample_puzzle.png")
+PIECES_DIR = os.path.join(HERE, "..", "media", "pieces")
 
 BASE_CASES = [
     ("piece_1.jpg", 0, 0, 90, 7, 25),
