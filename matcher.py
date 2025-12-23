@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -27,7 +27,9 @@ PROFILE_ENV = "WCMBOT_PROFILE"
 COARSE_FACTOR = 0.4
 COARSE_TOP_K = 3
 COARSE_PADDING_PIXELS = 24
-COARSE_PAD_PX = COARSE_PADDING_PIXELS  # Backward-compatible alias; prefer COARSE_PADDING_PIXELS
+COARSE_PAD_PX = (
+    COARSE_PADDING_PIXELS  # Backward-compatible alias; prefer COARSE_PADDING_PIXELS
+)
 COARSE_MIN_SIDE = 240
 
 KNOB_WIDTH_FRAC = 1.0 / 3.0
@@ -45,7 +47,7 @@ MIN_MASK_AREA_FRAC = 0.0005
 AUTO_ALIGN_MIN_DEG = 2.0
 AUTO_ALIGN_MAX_DEG = 20.0
 AUTO_ALIGN_MIN_LINES = 5
-AUTO_ALIGN_MIN_AREA_FRAC = 0.008
+AUTO_ALIGN_MIN_AREA_FRAC = -0.1
 AUTO_ALIGN_HOUGH_THRESHOLD = 50
 AUTO_ALIGN_HOUGH_MIN_LINE = 40
 AUTO_ALIGN_HOUGH_MAX_GAP = 20
@@ -92,17 +94,17 @@ def _load_image(path: str) -> np.ndarray:
 def _load_template_cached(path: str) -> TemplateCacheEntry:
     """
     Load a template image with caching and mtime-based invalidation.
-    
+
     Caches the template image (both RGB and binarized versions) to avoid
     redundant disk I/O and preprocessing. The cache is invalidated automatically
     when the file's modification time changes.
-    
+
     Args:
         path: Filesystem path to the template image.
-        
+
     Returns:
         A TemplateCacheEntry containing the cached template data.
-        
+
     Raises:
         RuntimeError: If the image file does not exist or cannot be loaded.
     """
@@ -132,17 +134,17 @@ def _get_template_blur_f32(
 ) -> np.ndarray:
     """
     Get a blurred float32 version of the template with caching.
-    
+
     Converts the binarized template to float32 and optionally applies Gaussian
     blur. Results are cached to avoid redundant preprocessing when the same
     blur kernel is used multiple times.
-    
+
     Args:
         template_bin: Binary template image (values 0 or 1, or 0-255).
         blur_ksz: Optional Gaussian blur kernel size tuple (width, height).
             If None, no blurring is applied.
         blur_cache: Dictionary to cache blurred results by kernel size.
-        
+
     Returns:
         Float32 array of the (optionally blurred) template.
     """
@@ -168,13 +170,13 @@ def preload_template_cache(
 ) -> None:
     """
     Preload a template image and its blurred binary representation into the cache.
-    
+
     This is a convenience API for callers (e.g. the web app) that want to
     amortize the cost of loading, binarizing and optionally blurring the
     template image before handling the first real request. Calling this
     function during application startup reduces the latency of the first
     request that needs to match against the given template.
-    
+
     Args:
         template_image_path: Filesystem path to the template image that will
             be used for matching.
@@ -195,14 +197,14 @@ def _binarize_two_color(img_bgr: np.ndarray) -> np.ndarray:
 def _mask_bbox(mask: np.ndarray) -> Tuple[int, int, int, int]:
     """
     Compute the bounding box of non-zero pixels in a mask.
-    
+
     Args:
         mask: Binary mask array where non-zero values indicate regions of interest.
-        
+
     Returns:
         Tuple of (y_min, y_max, x_min, x_max) coordinates defining the
         bounding box of all non-zero pixels in the mask.
-        
+
     Raises:
         RuntimeError: If the mask is empty (contains no non-zero pixels).
     """
@@ -212,7 +214,9 @@ def _mask_bbox(mask: np.ndarray) -> Tuple[int, int, int, int]:
     return ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
 
 
-def _keep_largest_component(mask01: np.ndarray, min_frac: float = MIN_MASK_AREA_FRAC) -> np.ndarray:
+def _keep_largest_component(
+    mask01: np.ndarray, min_frac: float = MIN_MASK_AREA_FRAC
+) -> np.ndarray:
     mask255 = (mask01 > 0).astype(np.uint8) * 255
     contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -296,7 +300,7 @@ def _mask_bbox_area(mask01: np.ndarray) -> int:
 def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
     """
     Estimate tilt angle using Hough line detection on mask edges.
-    
+
     Uses a weighted mean of detected line angles, where weights are the
     line lengths. Longer lines are more reliable edge detections than short
     segments, so this approach is more robust than using a median or unweighted mean.
@@ -326,19 +330,24 @@ def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
         lengths.append(length)
     if not angles:
         return None, 0
-    
-    # Use weighted mean instead of median for better angle estimation
+
+    # Use mean with outlier rejection
+
     angles_array = np.array(angles, dtype=np.float32)
-    lengths_array = np.array(lengths, dtype=np.float32)
-    weighted_mean = np.average(angles_array, weights=lengths_array)
-    
-    return float(weighted_mean), len(angles)
+    iqr_angle = np.percentile(angles_array, 75) - np.percentile(angles_array, 25)
+    inliers = angles_array[
+        abs(angles_array - np.median(angles_array)) <= (1.5 * iqr_angle)
+    ]
+    if len(inliers) == 0:
+        return None, 0
+    mean_angle = float(np.mean(inliers))
+    return mean_angle, len(inliers)
 
 
 def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
     """
     Estimate alignment correction using Hough line detection.
-    
+
     Detects straight edges in the mask and computes a weighted mean angle.
     Only applies correction if:
     1. Sufficient straight lines are detected
@@ -346,22 +355,22 @@ def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
     3. The angle is within reasonable bounds
     """
     angle, line_count = _estimate_mask_tilt(mask01)
-    
+
     # Need at least a few lines to be confident
     if angle is None or line_count < AUTO_ALIGN_MIN_LINES:
         return 0.0
-    
+
     correction = -angle
-    
+
     # Only consider corrections within a reasonable range
     if abs(correction) > AUTO_ALIGN_MAX_DEG:
         return 0.0
-    
+
     # Validate that the correction actually helps by checking bbox tightness
     area0 = _mask_bbox_area(mask01)
     if area0 <= 0:
         return 0.0
-    
+
     rotated_mask = _rotate_img(
         (mask01 > 0).astype(np.uint8) * 255,
         correction,
@@ -371,13 +380,13 @@ def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
     area1 = _mask_bbox_area(rotated_mask)
     if area1 <= 0:
         return 0.0
-    
+
     # Require that bbox gets tighter with a reasonable threshold (0.8% = 0.008)
     # Use a modest threshold to catch real alignment issues while avoiding over-correction
     area_delta = (area0 - area1) / float(area0)
     if area_delta < AUTO_ALIGN_MIN_AREA_FRAC:
         return 0.0
-    
+
     return float(correction)
 
 
@@ -476,7 +485,9 @@ def _candidate_is_close(candidate: Dict, existing: Dict) -> bool:
     return (dx * dx + dy * dy) <= (proximity_thresh * proximity_thresh)
 
 
-def _update_top_matches(top_matches: List[Dict], candidate: Dict, max_len: int = TOP_MATCH_COUNT) -> None:
+def _update_top_matches(
+    top_matches: List[Dict], candidate: Dict, max_len: int = TOP_MATCH_COUNT
+) -> None:
     if max_len <= 0:
         return
     for idx, existing in enumerate(top_matches):
@@ -572,9 +583,7 @@ def _match_template_multiscale_binary(
     combo_candidates: List[Dict] = []
     dilate_ker = MATCH_DILATE_KERNEL
 
-    use_coarse = (
-        0.0 < COARSE_FACTOR < 1.0 and min(tw, th) >= COARSE_MIN_SIDE
-    )
+    use_coarse = 0.0 < COARSE_FACTOR < 1.0 and min(tw, th) >= COARSE_MIN_SIDE
     if use_coarse:
         tw_c = max(1, int(round(tw * COARSE_FACTOR)))
         th_c = max(1, int(round(th * COARSE_FACTOR)))
@@ -591,9 +600,7 @@ def _match_template_multiscale_binary(
     def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
         if flat.size <= max_len:
             return np.argsort(flat)[::-1]
-        scan_count = min(
-            flat.size, max(max_len * TOP_MATCH_SCAN_MULTIPLIER, max_len)
-        )
+        scan_count = min(flat.size, max(max_len * TOP_MATCH_SCAN_MULTIPLIER, max_len))
         order = np.argpartition(flat, -scan_count)[-scan_count:]
         return order[np.argsort(flat[order])[::-1]]
 
@@ -672,9 +679,7 @@ def _match_template_multiscale_binary(
                 "br": (int(x + ws), int(y + hs)),
                 "center": (float(x + ws / 2), float(y + hs / 2)),
             }
-            if any(
-                _candidate_is_close(candidate, existing) for existing in positions
-            ):
+            if any(_candidate_is_close(candidate, existing) for existing in positions):
                 continue
             positions.append(candidate)
         return positions
@@ -706,7 +711,10 @@ def _match_template_multiscale_binary(
             if use_coarse and T_coarse_blur is not None:
                 ws_c = max(1, int(round(ws * COARSE_FACTOR)))
                 hs_c = max(1, int(round(hs * COARSE_FACTOR)))
-                if 1 < ws_c < T_coarse_blur.shape[1] and 1 < hs_c < T_coarse_blur.shape[0]:
+                if (
+                    1 < ws_c < T_coarse_blur.shape[1]
+                    and 1 < hs_c < T_coarse_blur.shape[0]
+                ):
                     patt_c = cv2.resize(
                         patt_s_blur, (ws_c, hs_c), interpolation=cv2.INTER_AREA
                     )
@@ -714,9 +722,7 @@ def _match_template_multiscale_binary(
                         mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST
                     )
                     patt_masked_c = patt_c * mask_c
-                    res_c = cv2.matchTemplate(
-                        T_coarse_blur, patt_masked_c, corr_method
-                    )
+                    res_c = cv2.matchTemplate(T_coarse_blur, patt_masked_c, corr_method)
                     if res_c.size:
                         coarse_positions = _collect_coarse_positions(
                             res_c, ws_c, hs_c, COARSE_TOP_K
@@ -750,9 +756,7 @@ def _match_template_multiscale_binary(
                                 combo_added = True
 
             if not combo_added:
-                res = cv2.matchTemplate(
-                    T_blur_f32, patt_masked, corr_method
-                )
+                res = cv2.matchTemplate(T_blur_f32, patt_masked, corr_method)
 
                 if res.size == 0:
                     continue
@@ -781,7 +785,9 @@ def _binary_to_uint8(img01: np.ndarray) -> np.ndarray:
     return img01.astype(np.uint8) * 255
 
 
-def _create_resized_preview(piece_bin: np.ndarray, piece_mask: np.ndarray, match: Dict) -> np.ndarray:
+def _create_resized_preview(
+    piece_bin: np.ndarray, piece_mask: np.ndarray, match: Dict
+) -> np.ndarray:
     rot = match["rot"]
     scale = match["scale"]
     rot_bin = _rotate_img(_binary_to_uint8(piece_bin), rot)
@@ -980,9 +986,7 @@ def find_piece_in_template(
         knobs_x = int(knobs_x)
         knobs_y = int(knobs_y)
 
-    _, scales = _estimate_scales(
-        template_bin.shape, piece_mask_crop, knobs_x, knobs_y
-    )
+    _, scales = _estimate_scales(template_bin.shape, piece_mask_crop, knobs_x, knobs_y)
     if profile:
         marks.append(("scale", time.perf_counter()))
 
@@ -1054,7 +1058,9 @@ def _static_views(payload: MatchPayload) -> Dict[str, np.ndarray]:
     }
 
 
-def render_primary_views(payload: MatchPayload, match_index: int) -> Dict[str, np.ndarray]:
+def render_primary_views(
+    payload: MatchPayload, match_index: int
+) -> Dict[str, np.ndarray]:
     if not payload.matches:
         raise RuntimeError("No matches available to render")
     idx = max(0, min(match_index, len(payload.matches) - 1))
@@ -1100,14 +1106,20 @@ def format_match_summary(payload: MatchPayload, match_index: int) -> str:
         f"Scale: {match['scale']:.4f}",
         f"Grid position: row {match['row']}, col {match['col']}",
     ]
-    if payload.knobs_inferred and payload.knobs_x is not None and payload.knobs_y is not None:
+    if (
+        payload.knobs_inferred
+        and payload.knobs_x is not None
+        and payload.knobs_y is not None
+    ):
         lines.append(f"Tabs inferred: {payload.knobs_x} x {payload.knobs_y}")
     if abs(payload.auto_align_deg) >= 0.1:
         lines.append(f"Auto-align (cw): {payload.auto_align_deg:+.1f}°")
     return "  \n".join(lines)
 
 
-def highlight_position(template_image_path: str, x: int, y: int, radius: int = 30) -> np.ndarray:
+def highlight_position(
+    template_image_path: str, x: int, y: int, radius: int = 30
+) -> np.ndarray:
     tpl = cv2.imread(template_image_path)
     if tpl is None:
         raise ValueError("Could not load template")
