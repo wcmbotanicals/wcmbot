@@ -25,7 +25,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Resolve version directly from package
+          # Resolve version directly from package (versioneer-backed)
           VERSION=$(python -c "import wcmbot; print(wcmbot.__version__)")
           echo "Resolved version: $VERSION"
 
@@ -56,7 +56,7 @@ EOF
           export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
           git xet install
 
-          # Track media via xet
+          # Track media files with xet
           git xet track "media/**"
 
           # Commit and push
