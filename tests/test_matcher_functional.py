@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from wcmbot.matcher import find_piece_in_template
+from wcmbot.matcher import _background_bgr, find_piece_in_template
 
 HERE = os.path.dirname(__file__)
 TEMPLATE_PATH = os.path.join(HERE, "..", "media", "templates", "sample_puzzle.png")
@@ -28,25 +28,6 @@ BASE_CASES = [
 ]
 
 ROTATION_SWEEP_DEGREES = [-15, -10, -5, -2.5, 0, 2.5, 5, 10, 15]
-
-
-def _background_bgr(img: np.ndarray) -> tuple[int, int, int]:
-    h, w = img.shape[:2]
-    samples = np.array(
-        [
-            img[0, 0],
-            img[0, w - 1],
-            img[h - 1, 0],
-            img[h - 1, w - 1],
-            img[0, w // 2],
-            img[h - 1, w // 2],
-            img[h // 2, 0],
-            img[h // 2, w - 1],
-        ],
-        dtype=np.float32,
-    )
-    median = np.median(samples, axis=0).round().astype(np.uint8)
-    return int(median[0]), int(median[1]), int(median[2])
 
 
 def _rotate_piece_image(img: np.ndarray, angle_deg: float) -> np.ndarray:
