@@ -44,10 +44,10 @@ UPPER_BLUE2 = np.array([160, 255, 220], dtype=np.uint8)
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
 MIN_MASK_AREA_FRAC = 0.0005
-AUTO_ALIGN_MIN_DEG = 2.0
+AUTO_ALIGN_MIN_DEG = 0.0
 AUTO_ALIGN_MAX_DEG = 20.0
-AUTO_ALIGN_MIN_LINES = 5
-AUTO_ALIGN_MIN_AREA_FRAC = -0.1
+AUTO_ALIGN_MIN_LINES = 4
+AUTO_ALIGN_MIN_AREA_FRAC = -0.1  # only reject if bbox gets substantially worse
 AUTO_ALIGN_HOUGH_THRESHOLD = 50
 AUTO_ALIGN_HOUGH_MIN_LINE = 40
 AUTO_ALIGN_HOUGH_MAX_GAP = 20
@@ -354,6 +354,8 @@ def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
     2. The correction tightens the bounding box (validation)
     3. The angle is within reasonable bounds
     """
+
+    # Crop mask to bounding box before estimating tilt
     angle, line_count = _estimate_mask_tilt(mask01)
 
     # Need at least a few lines to be confident
@@ -954,7 +956,7 @@ def find_piece_in_template(
     auto_align_enabled = auto_align
     auto_align_deg = 0.0
     if auto_align_enabled:
-        correction = _estimate_alignment_from_mask(piece_mask)
+        correction = _estimate_alignment_from_mask(piece_mask_crop)
         if abs(correction) >= AUTO_ALIGN_MIN_DEG:
             bg = _background_bgr(piece)
             piece = _rotate_img(
@@ -970,8 +972,8 @@ def find_piece_in_template(
             piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
             piece_bin = _binarize_two_color(piece_crop) * piece_mask_crop
             piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
-            if profile:
-                marks.append(("auto_align", time.perf_counter()))
+        if profile:
+            marks.append(("auto_align", time.perf_counter()))
 
     knobs_inferred = False
     if infer_knobs_enabled:
