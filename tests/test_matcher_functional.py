@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from matcher import find_piece_in_template
+from wcmbot.matcher import find_piece_in_template
 
 HERE = os.path.dirname(__file__)
 TEMPLATE_PATH = os.path.join(HERE, "media", "templates", "sample_puzzle.png")

@@ -11,13 +11,13 @@ import numpy as np
 import plotly.express as px
 from PIL import Image
 
-from matcher import (
+from wcmbot import __version__
+from wcmbot.matcher import (
     find_piece_in_template,
     format_match_summary,
     preload_template_cache,
     render_primary_views,
 )
-from version import __version__
 
 # Hardcoded paths
 BASE_DIR = Path(__file__).resolve().parent

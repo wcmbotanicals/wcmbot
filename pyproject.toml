@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools", "versioneer[toml]==0.28"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wcmbot"
+description = "Jigsaw puzzle solver with AI-powered piece matching"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dynamic = ["version"]
+
+dependencies = [
+    "Pillow>=10.0.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "gradio>=5.0.0",
+    "plotly>=5.22.0",
+]
+
+[project.urls]
+repository = "https://github.com/wcmbotanicals/wcmbot"
+space = "https://huggingface.co/spaces/wcmbotanicals/wcmbot"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "playwright>=1.40.0",
+    "pytest-playwright>=0.4.3",
+    "versioneer[toml]==0.28",
+]
+
+[tool.versioneer]
+VCS = "git"
+style = "pep440"
+versionfile_source = "wcmbot/_version.py"
+versionfile_build = "wcmbot/_version.py"
+tag_prefix = "v"
+parentdir_prefix = "wcmbot-"
+
+[tool.setuptools]
+packages = ["wcmbot"]

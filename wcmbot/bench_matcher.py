@@ -7,7 +7,7 @@ import statistics
 import time
 from typing import Dict, List, Tuple
 
-import matcher
+from wcmbot import matcher
 
 CaseSpec = Tuple[str, int, int]
 Case = Tuple[str, int, int, str]
