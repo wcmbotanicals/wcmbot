@@ -137,7 +137,7 @@ def test_piece_upload_and_match(page, gradio_app):
     time.sleep(2)
 
     # Create a test piece image
-    project_dir = Path(__file__).resolve().parent
+    project_dir = Path(__file__).resolve().parents[1]
     test_piece_path = project_dir / "media" / "pieces" / "piece_1.jpg"
 
     if not test_piece_path.exists():
