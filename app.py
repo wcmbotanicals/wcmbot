@@ -11,13 +11,13 @@ import numpy as np
 import plotly.express as px
 from PIL import Image
 
-from matcher import (
+from wcmbot import __version__
+from wcmbot.matcher import (
     find_piece_in_template,
     format_match_summary,
     preload_template_cache,
     render_primary_views,
 )
-from version import __version__
 
 # Hardcoded paths
 BASE_DIR = Path(__file__).resolve().parent
@@ -132,7 +132,7 @@ def get_random_ad():
                 <a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" target="_blank" style="color: #d35400; text-decoration: underline;">Click here to find out more</a>
             </p>
         </div>
-        """
+        """,
     ]
     return random.choice(ads)
 
@@ -198,27 +198,19 @@ def _change_match(step: int, payload, current_index: int):
     return _render_match_payload(payload, idx)
 
 
-def solve_puzzle(piece_path, knobs_x, knobs_y):
+def solve_puzzle(piece_path, auto_align):
     """Run the high-performance matcher and return visualization slices"""
     if not piece_path or not os.path.exists(piece_path):
         return _blank_outputs("Please upload a puzzle piece image.")
-    if knobs_x is None or knobs_y is None:
-        return _blank_outputs(
-            "Please select the tab counts before running the matcher."
-        )
-
-    try:
-        knobs_x = int(knobs_x)
-        knobs_y = int(knobs_y)
-    except (TypeError, ValueError):
-        return _blank_outputs("Tab counts must be whole numbers.")
-
-    if knobs_x < 0 or knobs_y < 0:
-        return _blank_outputs("Tab counts cannot be negative.")
 
     try:
         payload = find_piece_in_template(
-            piece_path, str(TEMPLATE_PATH), knobs_x, knobs_y
+            piece_path,
+            str(TEMPLATE_PATH),
+            knobs_x=None,
+            knobs_y=None,
+            auto_align=bool(auto_align),
+            infer_knobs=True,
         )
         return _render_match_payload(payload, 0)
     except Exception as exc:  # pylint: disable=broad-except
@@ -246,15 +238,13 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         f"""
     # 🧩 WCMBot v{__version__}
 
-    Upload a picture of a jigsaw puzzle piece, specify its tab counts, and let
-    WCMBot find its location in the full puzzle template!
+    Upload a picture of a jigsaw puzzle piece and let WCMBot infer its tab
+    counts and location in the full puzzle template!
 
     Notes:
     - Pictures must show a single puzzle piece on a plain (not blue) background.
-    - The piece should be aligned nearly upright in the picture for best results
-      (rotations of multiples of 90° are automatically evaluated).
-    - Currently, tab counts must be specified so that the size of the piece relative
-      to the template can be estimated.
+    - The piece should be aligned roughly upright in the picture for best results.
+      Optional auto-align (experimental) can correct small tilts (rotations of multiples of 90° are evaluated).
     
     This app is almost entirely vibe-coded. If you and/or your AI agents would like to
     contribute to its development, proposals and PRs are very welcome at
@@ -285,24 +275,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 sources=["upload", "clipboard"],
                 height=300,
             )
-            with gr.Row():
-                knobs_x_input = gr.Number(
-                    label="Horizontal tabs",
-                    value=0,
-                    precision=0,
-                    minimum=0,
-                    maximum=2,
-                )
-                knobs_y_input = gr.Number(
-                    label="Vertical tabs",
-                    value=0,
-                    precision=0,
-                    minimum=0,
-                    maximum=2,
-                )
-            gr.Markdown(
-                "Tabs are the protruding connectors on each side of the piece. "
-                "Set how many tabs this piece has horizontally and vertically."
+            auto_align_checkbox = gr.Checkbox(
+                label="Auto-align (experimental)",
+                value=False,
             )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
@@ -352,7 +327,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
 
     solve_button.click(
         fn=solve_puzzle,
-        inputs=[piece_input, knobs_x_input, knobs_y_input],
+        inputs=[piece_input, auto_align_checkbox],
         outputs=[*ordered_components, match_summary, match_state, match_index],
     )
     prev_button.click(

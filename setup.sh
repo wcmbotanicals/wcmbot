@@ -5,20 +5,28 @@ set -e
 
 echo "🧩 Setting up Jigsaw Puzzle Solver..."
 
-# Install dependencies
-echo "📦 Installing dependencies..."
-pip install -q -r requirements.txt
+# Check if uv is installed
+if ! command -v uv &> /dev/null; then
+    echo "❌ uv is not installed. Please install it first:"
+    echo "  brew install uv"
+    exit 1
+fi
+
+# Install dependencies with uv
+echo "📦 Installing dependencies with uv..."
+uv sync --all-extras
 
 # Install Playwright browsers (chromium only for E2E tests)
 echo "🎭 Installing Playwright browsers..."
-playwright install chromium
+uv run playwright install chromium
 
 echo ""
 echo "✅ Setup complete!"
 echo ""
 echo "To start the Gradio interface, run:"
-echo "  python app.py"
+echo "  uv run python app.py"
 echo ""
 echo "To run tests:"
-echo "  pytest -v"
+echo "  uv run pytest -v"
 echo ""
+
