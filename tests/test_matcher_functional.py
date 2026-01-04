@@ -98,7 +98,7 @@ def test_find_piece_expected_location(
 
 
 @pytest.mark.e2e
-@pytest.mark.skip(reason="auto-alignment needs more work")
+# @pytest.mark.skip(reason="auto-alignment needs more work")
 @pytest.mark.parametrize("extra_deg", ROTATION_SWEEP_DEGREES)
 @pytest.mark.parametrize(
     "piece_filename,knobs_x,knobs_y,exp_rot,exp_row,exp_col",

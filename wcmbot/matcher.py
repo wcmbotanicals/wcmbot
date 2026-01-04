@@ -31,6 +31,8 @@ COARSE_PAD_PX = (
     COARSE_PADDING_PIXELS  # Backward-compatible alias; prefer COARSE_PADDING_PIXELS
 )
 COARSE_MIN_SIDE = 240
+GRID_CENTER_WEIGHT = 0.7
+GRID_CENTER_MIN_SCORE = 0.5
 
 KNOB_WIDTH_FRAC = 1.0 / 3.0
 KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
@@ -487,6 +489,26 @@ def _candidate_is_close(candidate: Dict, existing: Dict) -> bool:
     return (dx * dx + dy * dy) <= (proximity_thresh * proximity_thresh)
 
 
+def _grid_center_proximity(
+    cx: float, cy: float, cell_w: float, cell_h: float, cols: int, rows: int
+) -> float:
+    if cell_w <= 0 or cell_h <= 0 or cols <= 0 or rows <= 0:
+        return 0.0
+    col_idx = int(round(cx / cell_w - 0.5))
+    row_idx = int(round(cy / cell_h - 0.5))
+    col_idx = max(0, min(col_idx, cols - 1))
+    row_idx = max(0, min(row_idx, rows - 1))
+    center_x = (col_idx + 0.5) * cell_w
+    center_y = (row_idx + 0.5) * cell_h
+    dx = cx - center_x
+    dy = cy - center_y
+    max_dist = 0.5 * float(np.hypot(cell_w, cell_h))
+    if max_dist <= 0:
+        return 0.0
+    dist = float(np.hypot(dx, dy))
+    return max(0.0, 1.0 - min(dist / max_dist, 1.0))
+
+
 def _update_top_matches(
     top_matches: List[Dict], candidate: Dict, max_len: int = TOP_MATCH_COUNT
 ) -> None:
@@ -624,10 +646,16 @@ def _match_template_multiscale_binary(
             y0 = y + offset_y
             cx = x0 + ws / 2
             cy = y0 + hs / 2
+            base_score = float(res[y, x])
+            proximity = _grid_center_proximity(cx, cy, cell_w, cell_h, cols, rows)
+            boost_scale = max(0.0, base_score - GRID_CENTER_MIN_SCORE)
+            score = base_score + (GRID_CENTER_WEIGHT * proximity * boost_scale)
             tl = (int(x0), int(y0))
             br = (int(x0 + ws), int(y0 + hs))
             candidate = {
-                "score": float(res[y, x]),
+                "score": score,
+                "score_raw": base_score,
+                "grid_score": proximity,
                 "rot": rot,
                 "scale": scale,
                 "col": int(cx / cell_w) + 1,
