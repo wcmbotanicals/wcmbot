@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from wcmbot.matcher import _background_bgr, find_piece_in_template
+from wcmbot.matcher import COLS, ROWS, _background_bgr, find_piece_in_template
 
 HERE = os.path.dirname(__file__)
 TEMPLATE_PATH = os.path.join(HERE, "..", "media", "templates", "sample_puzzle.png")
@@ -28,6 +28,7 @@ BASE_CASES = [
 ]
 
 ROTATION_SWEEP_DEGREES = [-15, -10, -5, -2.5, 0, 2.5, 5, 10, 15]
+TEMPLATE_ROTATION_CASE = ("piece_5.jpg", 0, 2, 180, 11, 6)
 
 
 def _rotate_piece_image(img: np.ndarray, angle_deg: float) -> np.ndarray:
@@ -141,3 +142,42 @@ def test_find_piece_expected_location_with_rotation(
             f"(rot={top['rot']} score={top['score']:.3f}), "
             f"expected row={exp_row} col={exp_col}"
         )
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("template_rotation", [0, 180])
+def test_find_piece_with_template_rotation(template_rotation):
+    piece_filename, knobs_x, knobs_y, exp_rot, exp_row, exp_col = (
+        TEMPLATE_ROTATION_CASE
+    )
+    piece_path = os.path.join(PIECES_DIR, piece_filename)
+
+    payload = find_piece_in_template(
+        piece_image_path=piece_path,
+        template_image_path=TEMPLATE_PATH,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
+        auto_align=True,
+        template_rotation=template_rotation,
+    )
+
+    assert payload.matches, "No matches returned by matcher"
+    top = payload.matches[0]
+
+    if template_rotation == 180:
+        exp_row = ROWS - exp_row + 1
+        exp_col = COLS - exp_col + 1
+    exp_rot = (exp_rot + template_rotation) % 360
+
+    assert top["rot"] == exp_rot, (
+        f"rotation mismatch for {piece_filename} at template rotation "
+        f"{template_rotation}deg"
+    )
+    assert top["row"] == exp_row, (
+        f"row mismatch for {piece_filename} at template rotation "
+        f"{template_rotation}deg"
+    )
+    assert top["col"] == exp_col, (
+        f"col mismatch for {piece_filename} at template rotation "
+        f"{template_rotation}deg"
+    )

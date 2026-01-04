@@ -292,6 +292,24 @@ def _rotate_img(
     )
 
 
+def _normalize_template_rotation(rotation: Optional[int]) -> int:
+    if rotation is None:
+        return 0
+    if rotation % 90 != 0:
+        raise ValueError("Template rotation must be a multiple of 90 degrees.")
+    rotation = rotation % 360
+    if rotation not in (0, 90, 180, 270):
+        raise ValueError("Template rotation must be 0, 90, 180, or 270 degrees.")
+    return rotation
+
+
+def _rotate_template_quadrant(img: np.ndarray, rotation: int) -> np.ndarray:
+    if rotation == 0:
+        return img
+    k = -(rotation // 90)
+    return np.rot90(img, k=k)
+
+
 def _mask_bbox_area(mask01: np.ndarray) -> int:
     ys, xs = np.where(mask01 > 0)
     if len(xs) == 0:
@@ -941,6 +959,7 @@ def find_piece_in_template(
     knobs_y: Optional[int],
     auto_align: bool = False,
     infer_knobs: Optional[bool] = None,
+    template_rotation: Optional[int] = None,
 ) -> MatchPayload:
     profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
     profile = profile_value not in ("", "0", "false", "no")
@@ -958,6 +977,12 @@ def find_piece_in_template(
 
     template_rgb = template_entry.template_rgb
     template_bin = template_entry.template_bin
+    rotation = _normalize_template_rotation(template_rotation)
+    template_blur_cache = template_entry.blur_cache
+    if rotation:
+        template_rgb = _rotate_template_quadrant(template_rgb, rotation)
+        template_bin = _rotate_template_quadrant(template_bin, rotation)
+        template_blur_cache = {}
 
     piece_mask = _mask_by_blue(piece)
     if profile:
@@ -1021,7 +1046,7 @@ def find_piece_in_template(
         marks.append(("scale", time.perf_counter()))
 
     template_blur_f32 = _get_template_blur_f32(
-        template_bin, (3, 3), template_entry.blur_cache
+        template_bin, (3, 3), template_blur_cache
     )
     _, top_matches = _match_template_multiscale_binary(
         template_bin,
