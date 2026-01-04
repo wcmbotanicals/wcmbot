@@ -46,6 +46,9 @@ VIEW_LABELS = {
     "zoom_template": "Best match (template view)",
 }
 
+TEMPLATE_ROTATION_OPTIONS = [0, 90, 180, 270]
+DEFAULT_TEMPLATE_ROTATION = 180
+
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
     """Create a Plotly figure with zoom/pan for a numpy RGB image."""
@@ -70,6 +73,17 @@ def make_zoomable_plot(image: Optional[np.ndarray]):
         scaleratio=1,
     )
     return fig
+
+
+def _rotate_template_preview(
+    image: Optional[np.ndarray], rotation: int
+) -> Optional[np.ndarray]:
+    if image is None:
+        return None
+    if rotation == 0:
+        return image
+    k = -(rotation // 90)
+    return np.rot90(image, k=k)
 
 
 def get_random_ad():
@@ -165,43 +179,63 @@ def get_template_image() -> Optional[np.ndarray]:
 
 def _views_to_outputs(
     views: Dict[str, Optional[np.ndarray]],
+    location: str,
     summary: str,
     state,
     idx: int,
 ):
     ordered = [views.get(key) for key in VIEW_KEYS]
-    return (*ordered, summary, state, idx)
+    return (*ordered, location, summary, state, idx)
 
 
-def _blank_outputs(message: str):
+def _blank_outputs(message: str, template_rotation: int):
     blank_views = {key: None for key in VIEW_KEYS}
-    blank_views["template_color"] = DEFAULT_TEMPLATE_IMAGE
-    blank_views["zoom_template"] = DEFAULT_TEMPLATE_PLOT
-    return _views_to_outputs(blank_views, message, None, 0)
+    rotated_template = _rotate_template_preview(
+        DEFAULT_TEMPLATE_IMAGE, template_rotation
+    )
+    blank_views["template_color"] = rotated_template
+    blank_views["zoom_template"] = make_zoomable_plot(rotated_template)
+    location = "Run the matcher to infer a row and column."
+    return _views_to_outputs(blank_views, location, message, None, 0)
+
+
+def _format_match_location(payload, idx: int) -> str:
+    if payload is None or not getattr(payload, "matches", None):
+        return "Run the matcher to infer a row and column."
+    match = payload.matches[idx]
+    return f"**Row:** {match['row']}  **Col:** {match['col']}"
 
 
 def _render_match_payload(payload, idx: int):
     views = render_primary_views(payload, idx)
     views["zoom_template"] = make_zoomable_plot(views.get("zoom_template"))
+    location = _format_match_location(payload, idx)
     summary = format_match_summary(payload, idx)
-    return _views_to_outputs(views, summary, payload, idx)
+    return _views_to_outputs(views, location, summary, payload, idx)
 
 
 def _change_match(step: int, payload, current_index: int):
     if payload is None or not getattr(payload, "matches", None):
-        return _blank_outputs("Run the matcher once a piece is uploaded.")
+        return _blank_outputs(
+            "Run the matcher once a piece is uploaded.", DEFAULT_TEMPLATE_ROTATION
+        )
     total = len(payload.matches)
     if total == 0:
-        return _blank_outputs("No matches available.")
+        return _blank_outputs("No matches available.", DEFAULT_TEMPLATE_ROTATION)
     idx = (current_index or 0) + step
     idx %= total
     return _render_match_payload(payload, idx)
 
 
-def solve_puzzle(piece_path, auto_align):
+def solve_puzzle(piece_path, auto_align, template_rotation):
     """Run the high-performance matcher and return visualization slices"""
+    rotation = (
+        int(template_rotation)
+        if template_rotation is not None
+        else DEFAULT_TEMPLATE_ROTATION
+    )
     if not piece_path or not os.path.exists(piece_path):
-        return _blank_outputs("Please upload a puzzle piece image.")
+        return _blank_outputs("Please upload a puzzle piece image.", rotation)
 
     try:
         payload = find_piece_in_template(
@@ -211,10 +245,11 @@ def solve_puzzle(piece_path, auto_align):
             knobs_y=None,
             auto_align=bool(auto_align),
             infer_knobs=True,
+            template_rotation=rotation,
         )
         return _render_match_payload(payload, 0)
     except Exception as exc:  # pylint: disable=broad-except
-        return _blank_outputs(f"Error: {exc}")
+        return _blank_outputs(f"Error: {exc}", rotation)
 
 
 def goto_previous_match(state, current_index):
@@ -229,7 +264,10 @@ def goto_next_match(state, current_index):
 check_template_exists()
 preload_template_cache(str(TEMPLATE_PATH))
 DEFAULT_TEMPLATE_IMAGE = get_template_image()
-DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_IMAGE)
+DEFAULT_TEMPLATE_PREVIEW = _rotate_template_preview(
+    DEFAULT_TEMPLATE_IMAGE, DEFAULT_TEMPLATE_ROTATION
+)
+DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
 
 # Create Gradio interface
 app_theme = gr.themes.Soft()
@@ -245,6 +283,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     - Pictures must show a single puzzle piece on a plain (not blue) background.
     - The piece should be aligned roughly upright in the picture for best results.
       Optional auto-align (experimental) can correct small tilts (rotations of multiples of 90° are evaluated).
+    - Template rotation can be adjusted in 90° increments.
     
     This app is almost entirely vibe-coded. If you and/or your AI agents would like to
     contribute to its development, proposals and PRs are very welcome at
@@ -279,10 +318,19 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 label="Auto-align (experimental)",
                 value=False,
             )
+            template_rotation = gr.Dropdown(
+                label="Template rotation (degrees)",
+                choices=TEMPLATE_ROTATION_OPTIONS,
+                value=DEFAULT_TEMPLATE_ROTATION,
+            )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
             )
         with gr.Column(scale=1):
+            gr.Markdown("### Inferred row/column")
+            match_location = gr.Markdown(
+                "Run the matcher to infer a row and column."
+            )
             gr.Markdown("### Best match (template view)")
             image_components = {}
             image_components["zoom_template"] = gr.Plot(
@@ -291,15 +339,25 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             )
             gr.Markdown("Use the controls to zoom and pan the image.")
 
+    gr.Markdown("### Best match (zoomed)")
+    image_components["zoom_focus"] = gr.Image(
+        label=VIEW_LABELS["zoom_focus"],
+        type="numpy",
+        interactive=False,
+        height=320,
+    )
+
     gr.Markdown("### Match visualizations/diagnostics")
 
-    other_keys = [key for key in VIEW_KEYS if key != "zoom_template"]
+    other_keys = [
+        key for key in VIEW_KEYS if key not in ("zoom_template", "zoom_focus")
+    ]
     with gr.Row():
         for key in other_keys[:4]:
             comp = gr.Image(
                 label=VIEW_LABELS[key],
                 type="numpy",
-                value=DEFAULT_TEMPLATE_IMAGE if key == "template_color" else None,
+                value=DEFAULT_TEMPLATE_PREVIEW if key == "template_color" else None,
                 interactive=False,
                 height=260,
             )
@@ -327,18 +385,36 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
 
     solve_button.click(
         fn=solve_puzzle,
-        inputs=[piece_input, auto_align_checkbox],
-        outputs=[*ordered_components, match_summary, match_state, match_index],
+        inputs=[piece_input, auto_align_checkbox, template_rotation],
+        outputs=[
+            *ordered_components,
+            match_location,
+            match_summary,
+            match_state,
+            match_index,
+        ],
     )
     prev_button.click(
         fn=goto_previous_match,
         inputs=[match_state, match_index],
-        outputs=[*ordered_components, match_summary, match_state, match_index],
+        outputs=[
+            *ordered_components,
+            match_location,
+            match_summary,
+            match_state,
+            match_index,
+        ],
     )
     next_button.click(
         fn=goto_next_match,
         inputs=[match_state, match_index],
-        outputs=[*ordered_components, match_summary, match_state, match_index],
+        outputs=[
+            *ordered_components,
+            match_location,
+            match_summary,
+            match_state,
+            match_index,
+        ],
     )
 
     gr.Markdown(
