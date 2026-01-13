@@ -115,11 +115,14 @@ wcmbot/
 ├── matcher.py               # Image matching algorithms
 ├── media/                   # Puzzle templates and pieces
 │   ├── templates/           # Puzzle templates
-│   │   └── sample_puzzle.png
+│   │   ├── sample_puzzle.png
+│   │   ├── grass_puzzle.png
+│   │   └── templates.json
 │   └── pieces/              # Sample puzzle pieces
-│       ├── piece_1.jpg
-│       ├── piece_2.jpg
-│       └── piece_3.jpg
+│       └── sample_puzzle/
+│           ├── piece_1.jpg
+│           ├── piece_2.jpg
+│           └── piece_3.jpg
 ├── test_gradio.py           # Playwright E2E tests
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies

@@ -13,15 +13,15 @@ from PIL import Image
 
 from wcmbot import __version__
 from wcmbot.matcher import (
+    build_matcher_config,
     find_piece_in_template,
     format_match_summary,
     preload_template_cache,
     render_primary_views,
 )
+from wcmbot.template_settings import load_template_registry
 
-# Hardcoded paths
 BASE_DIR = Path(__file__).resolve().parent
-TEMPLATE_PATH = BASE_DIR / "media" / "templates" / "sample_puzzle.png"
 MUSPAN_LOGO_PATH = BASE_DIR / "media" / "muspan_logo.png"
 
 VIEW_KEYS = [
@@ -47,7 +47,6 @@ VIEW_LABELS = {
 }
 
 TEMPLATE_ROTATION_OPTIONS = [0, 90, 180, 270]
-DEFAULT_TEMPLATE_ROTATION = 180
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
@@ -161,19 +160,19 @@ def _build_muspan_logo_data_uri() -> str:
 MUSPAN_LOGO_DATA_URI = _build_muspan_logo_data_uri()
 
 
-def check_template_exists():
-    """Check that the required template file exists"""
-    if not TEMPLATE_PATH.exists():
+def check_template_exists(template_path: Path):
+    """Check that the required template file exists."""
+    if not template_path.exists():
         raise FileNotFoundError(
-            f"Template file not found at {TEMPLATE_PATH}. "
+            f"Template file not found at {template_path}. "
             "Please ensure the puzzle template image exists before running the app."
         )
 
 
-def get_template_image() -> Optional[np.ndarray]:
-    """Get the template image"""
-    if TEMPLATE_PATH.exists():
-        return np.array(Image.open(TEMPLATE_PATH))
+def get_template_image(template_path: Path) -> Optional[np.ndarray]:
+    """Get the template image."""
+    if template_path.exists():
+        return np.array(Image.open(template_path))
     return None
 
 
@@ -188,10 +187,10 @@ def _views_to_outputs(
     return (*ordered, location, summary, state, idx)
 
 
-def _blank_outputs(message: str, template_rotation: int):
+def _blank_outputs(message: str, template_id: str, template_rotation: int):
     blank_views = {key: None for key in VIEW_KEYS}
     rotated_template = _rotate_template_preview(
-        DEFAULT_TEMPLATE_IMAGE, template_rotation
+        TEMPLATE_IMAGES.get(template_id), template_rotation
     )
     blank_views["template_color"] = rotated_template
     blank_views["zoom_template"] = make_zoomable_plot(rotated_template)
@@ -214,58 +213,85 @@ def _render_match_payload(payload, idx: int):
     return _views_to_outputs(views, location, summary, payload, idx)
 
 
-def _change_match(step: int, payload, current_index: int):
+def _change_match(
+    step: int,
+    payload,
+    current_index: int,
+    template_id: str,
+    template_rotation: int,
+):
     if payload is None or not getattr(payload, "matches", None):
         return _blank_outputs(
-            "Run the matcher once a piece is uploaded.", DEFAULT_TEMPLATE_ROTATION
+            "Run the matcher once a piece is uploaded.",
+            template_id,
+            template_rotation,
         )
     total = len(payload.matches)
     if total == 0:
-        return _blank_outputs("No matches available.", DEFAULT_TEMPLATE_ROTATION)
+        return _blank_outputs("No matches available.", template_id, template_rotation)
     idx = (current_index or 0) + step
     idx %= total
     return _render_match_payload(payload, idx)
 
 
-def solve_puzzle(piece_path, auto_align, template_rotation):
+def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
     """Run the high-performance matcher and return visualization slices"""
+    template_spec = TEMPLATE_REGISTRY.get(template_id)
     rotation = (
         int(template_rotation)
         if template_rotation is not None
-        else DEFAULT_TEMPLATE_ROTATION
+        else template_spec.default_rotation
     )
     if not piece_path or not os.path.exists(piece_path):
-        return _blank_outputs("Please upload a puzzle piece image.", rotation)
+        return _blank_outputs(
+            "Please upload a puzzle piece image.", template_id, rotation
+        )
 
     try:
+        matcher_config = build_matcher_config(
+            {
+                "rows": template_spec.rows,
+                "cols": template_spec.cols,
+                **template_spec.matcher_overrides,
+            }
+        )
         payload = find_piece_in_template(
             piece_path,
-            str(TEMPLATE_PATH),
+            str(template_spec.template_path),
             knobs_x=None,
             knobs_y=None,
             auto_align=bool(auto_align),
             infer_knobs=True,
             template_rotation=rotation,
+            matcher_config=matcher_config,
         )
         return _render_match_payload(payload, 0)
     except Exception as exc:  # pylint: disable=broad-except
-        return _blank_outputs(f"Error: {exc}", rotation)
+        return _blank_outputs(f"Error: {exc}", template_id, rotation)
 
 
-def goto_previous_match(state, current_index):
-    return _change_match(-1, state, current_index)
+def goto_previous_match(state, current_index, template_id, template_rotation):
+    return _change_match(-1, state, current_index, template_id, template_rotation)
 
 
-def goto_next_match(state, current_index):
-    return _change_match(1, state, current_index)
+def goto_next_match(state, current_index, template_id, template_rotation):
+    return _change_match(1, state, current_index, template_id, template_rotation)
 
 
-# Check template exists on startup and pre-load the static preview
-check_template_exists()
-preload_template_cache(str(TEMPLATE_PATH))
-DEFAULT_TEMPLATE_IMAGE = get_template_image()
+TEMPLATE_REGISTRY = load_template_registry()
+DEFAULT_TEMPLATE_ID = TEMPLATE_REGISTRY.default_template_id
+DEFAULT_TEMPLATE_SPEC = TEMPLATE_REGISTRY.get(DEFAULT_TEMPLATE_ID)
+
+for spec in TEMPLATE_REGISTRY.templates.values():
+    check_template_exists(spec.template_path)
+    preload_template_cache(str(spec.template_path))
+
+TEMPLATE_IMAGES = {
+    spec.template_id: get_template_image(spec.template_path)
+    for spec in TEMPLATE_REGISTRY.templates.values()
+}
 DEFAULT_TEMPLATE_PREVIEW = _rotate_template_preview(
-    DEFAULT_TEMPLATE_IMAGE, DEFAULT_TEMPLATE_ROTATION
+    TEMPLATE_IMAGES.get(DEFAULT_TEMPLATE_ID), DEFAULT_TEMPLATE_SPEC.default_rotation
 )
 DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
 
@@ -314,15 +340,21 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 sources=["upload", "clipboard"],
                 height=300,
             )
-            auto_align_checkbox = gr.Checkbox(
-                label="Auto-align (experimental)",
-                value=False,
-            )
-            template_rotation = gr.Dropdown(
-                label="Template rotation (degrees)",
-                choices=TEMPLATE_ROTATION_OPTIONS,
-                value=DEFAULT_TEMPLATE_ROTATION,
-            )
+            with gr.Accordion("Settings", open=False):
+                template_selector = gr.Dropdown(
+                    label="Template",
+                    choices=TEMPLATE_REGISTRY.choices(),
+                    value=DEFAULT_TEMPLATE_ID,
+                )
+                auto_align_checkbox = gr.Checkbox(
+                    label="Auto-align (experimental)",
+                    value=DEFAULT_TEMPLATE_SPEC.auto_align_default,
+                )
+                template_rotation = gr.Dropdown(
+                    label="Template rotation (degrees)",
+                    choices=TEMPLATE_ROTATION_OPTIONS,
+                    value=DEFAULT_TEMPLATE_SPEC.default_rotation,
+                )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
             )
@@ -383,9 +415,36 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
 
     ordered_components = [image_components[key] for key in VIEW_KEYS]
 
+    def _on_template_change(selected_template):
+        spec = TEMPLATE_REGISTRY.get(selected_template)
+        defaults = _blank_outputs(
+            "Run the matcher once a piece is uploaded.",
+            selected_template,
+            spec.default_rotation,
+        )
+        return (
+            spec.default_rotation,
+            spec.auto_align_default,
+            *defaults,
+        )
+
+    template_selector.change(
+        fn=_on_template_change,
+        inputs=[template_selector],
+        outputs=[
+            template_rotation,
+            auto_align_checkbox,
+            *ordered_components,
+            match_location,
+            match_summary,
+            match_state,
+            match_index,
+        ],
+    )
+
     solve_button.click(
         fn=solve_puzzle,
-        inputs=[piece_input, auto_align_checkbox, template_rotation],
+        inputs=[piece_input, template_selector, auto_align_checkbox, template_rotation],
         outputs=[
             *ordered_components,
             match_location,
@@ -396,7 +455,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
     prev_button.click(
         fn=goto_previous_match,
-        inputs=[match_state, match_index],
+        inputs=[match_state, match_index, template_selector, template_rotation],
         outputs=[
             *ordered_components,
             match_location,
@@ -407,7 +466,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
     next_button.click(
         fn=goto_next_match,
-        inputs=[match_state, match_index],
+        inputs=[match_state, match_index, template_selector, template_rotation],
         outputs=[
             *ordered_components,
             match_location,

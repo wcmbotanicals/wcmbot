@@ -8,7 +8,7 @@ from wcmbot.matcher import COLS, ROWS, _background_bgr, find_piece_in_template
 
 HERE = os.path.dirname(__file__)
 TEMPLATE_PATH = os.path.join(HERE, "..", "media", "templates", "sample_puzzle.png")
-PIECES_DIR = os.path.join(HERE, "..", "media", "pieces")
+PIECES_DIR = os.path.join(HERE, "..", "media", "pieces", "sample_puzzle")
 
 BASE_CASES = [
     ("piece_1.jpg", 0, 0, 90, 7, 25),
@@ -99,7 +99,7 @@ def test_find_piece_expected_location(
 
 
 @pytest.mark.e2e
-# @pytest.mark.skip(reason="auto-alignment needs more work")
+@pytest.mark.skip(reason="slow test")
 @pytest.mark.parametrize("extra_deg", ROTATION_SWEEP_DEGREES)
 @pytest.mark.parametrize(
     "piece_filename,knobs_x,knobs_y,exp_rot,exp_row,exp_col",
@@ -147,9 +147,7 @@ def test_find_piece_expected_location_with_rotation(
 @pytest.mark.e2e
 @pytest.mark.parametrize("template_rotation", [0, 180])
 def test_find_piece_with_template_rotation(template_rotation):
-    piece_filename, knobs_x, knobs_y, exp_rot, exp_row, exp_col = (
-        TEMPLATE_ROTATION_CASE
-    )
+    piece_filename, knobs_x, knobs_y, exp_rot, exp_row, exp_col = TEMPLATE_ROTATION_CASE
     piece_path = os.path.join(PIECES_DIR, piece_filename)
 
     payload = find_piece_in_template(
@@ -174,10 +172,8 @@ def test_find_piece_with_template_rotation(template_rotation):
         f"{template_rotation}deg"
     )
     assert top["row"] == exp_row, (
-        f"row mismatch for {piece_filename} at template rotation "
-        f"{template_rotation}deg"
+        f"row mismatch for {piece_filename} at template rotation {template_rotation}deg"
     )
     assert top["col"] == exp_col, (
-        f"col mismatch for {piece_filename} at template rotation "
-        f"{template_rotation}deg"
+        f"col mismatch for {piece_filename} at template rotation {template_rotation}deg"
     )

@@ -1,0 +1,32 @@
+{
+  "default_template": "sample_puzzle",
+  "templates": [
+    {
+      "id": "sample_puzzle",
+      "label": "Sample Puzzle",
+      "template_path": "media/templates/sample_puzzle.png",
+      "rows": 28,
+      "cols": 36,
+      "default_rotation": 180,
+      "auto_align_default": true,
+      "piece_dirs": ["media/pieces/sample_puzzle"],
+      "matcher_overrides": {}
+    },
+    {
+      "id": "grass_puzzle",
+      "label": "Grass Puzzle",
+      "template_path": "media/templates/grass_puzzle.png",
+      "rows": 25,
+      "cols": 36,
+      "default_rotation": 0,
+      "auto_align_default": true,
+      "piece_dirs": ["media/pieces/grass_puzzle"],
+      "matcher_overrides": {
+        "mask_mode": "green",
+        "mask_kernel_size": 3,
+        "mask_open_iters": 1,
+        "mask_close_iters": 1
+      }
+    }
+  ]
+}

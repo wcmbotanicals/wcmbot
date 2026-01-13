@@ -12,9 +12,9 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
-# Install dependencies with uv
+# Install dependencies with uv (include dev extras for tests)
 echo "📦 Installing dependencies with uv..."
-uv sync --all-extras
+uv sync --extra dev
 
 # Install Playwright browsers (chromium only for E2E tests)
 echo "🎭 Installing Playwright browsers..."
@@ -27,6 +27,5 @@ echo "To start the Gradio interface, run:"
 echo "  uv run python app.py"
 echo ""
 echo "To run tests:"
-echo "  uv run pytest -v"
+echo "  uv run python -m pytest -v"
 echo ""
-

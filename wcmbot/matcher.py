@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -42,6 +42,8 @@ LOWER_BLUE1 = np.array([90, 60, 40], dtype=np.uint8)
 UPPER_BLUE1 = np.array([140, 255, 255], dtype=np.uint8)
 LOWER_BLUE2 = np.array([85, 30, 60], dtype=np.uint8)
 UPPER_BLUE2 = np.array([160, 255, 220], dtype=np.uint8)
+LOWER_GREEN1 = np.array([35, 40, 40], dtype=np.uint8)
+UPPER_GREEN1 = np.array([85, 255, 255], dtype=np.uint8)
 
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
@@ -59,6 +61,64 @@ INFER_KNOBS_HIGH_FILL = 0.65
 
 
 # ---------- helper dataclasses ----------
+@dataclass(frozen=True)
+class MatcherConfig:
+    cols: int = COLS
+    rows: int = ROWS
+    piece_cells_approx: Tuple[float, float] = PIECE_CELLS_APPROX
+    est_scale_window: List[float] = field(
+        default_factory=lambda: list(EST_SCALE_WINDOW)
+    )
+    rotations: List[int] = field(default_factory=lambda: list(ROTATIONS))
+    top_match_count: int = TOP_MATCH_COUNT
+    top_match_scan_multiplier: int = TOP_MATCH_SCAN_MULTIPLIER
+    coarse_factor: float = COARSE_FACTOR
+    coarse_top_k: int = COARSE_TOP_K
+    coarse_padding_pixels: int = COARSE_PADDING_PIXELS
+    coarse_min_side: int = COARSE_MIN_SIDE
+    grid_center_weight: float = GRID_CENTER_WEIGHT
+    grid_center_min_score: float = GRID_CENTER_MIN_SCORE
+    knob_width_frac: float = KNOB_WIDTH_FRAC
+    mask_mode: str = "blue"
+    mask_hsv_ranges: Optional[List[Tuple[List[int], List[int]]]] = None
+    mask_kernel_size: int = 7
+    mask_open_iters: int = OPEN_ITERS
+    mask_close_iters: int = CLOSE_ITERS
+
+
+def build_matcher_config(
+    overrides: Optional[Dict[str, object]] = None,
+) -> MatcherConfig:
+    payload = {
+        "cols": COLS,
+        "rows": ROWS,
+        "piece_cells_approx": PIECE_CELLS_APPROX,
+        "est_scale_window": list(EST_SCALE_WINDOW),
+        "rotations": list(ROTATIONS),
+        "top_match_count": TOP_MATCH_COUNT,
+        "top_match_scan_multiplier": TOP_MATCH_SCAN_MULTIPLIER,
+        "coarse_factor": COARSE_FACTOR,
+        "coarse_top_k": COARSE_TOP_K,
+        "coarse_padding_pixels": COARSE_PADDING_PIXELS,
+        "coarse_min_side": COARSE_MIN_SIDE,
+        "grid_center_weight": GRID_CENTER_WEIGHT,
+        "grid_center_min_score": GRID_CENTER_MIN_SCORE,
+        "knob_width_frac": KNOB_WIDTH_FRAC,
+        "mask_mode": "blue",
+        "mask_hsv_ranges": None,
+        "mask_kernel_size": 7,
+        "mask_open_iters": OPEN_ITERS,
+        "mask_close_iters": CLOSE_ITERS,
+    }
+    if not overrides:
+        return MatcherConfig(**payload)
+    for key, value in overrides.items():
+        if key not in payload:
+            raise ValueError(f"Unknown matcher override: {key}")
+        payload[key] = value
+    return MatcherConfig(**payload)
+
+
 @dataclass
 class MatchPayload:
     template_rgb: np.ndarray
@@ -233,13 +293,27 @@ def _keep_largest_component(
     return (out // 255).astype(np.uint8)
 
 
-def _mask_by_blue(piece_bgr: np.ndarray) -> np.ndarray:
+def _cleanup_mask(
+    mask: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
+) -> np.ndarray:
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    if open_iters > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iters)
+    if close_iters > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_iters)
+    return mask
+
+
+def _mask_by_blue(
+    piece_bgr: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
+) -> np.ndarray:
     hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
     m1 = cv2.inRange(hsv, LOWER_BLUE1, UPPER_BLUE1)
     m2 = cv2.inRange(hsv, LOWER_BLUE2, UPPER_BLUE2)
     mask = cv2.bitwise_or(m1, m2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL, iterations=OPEN_ITERS)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, KERNEL, iterations=CLOSE_ITERS)
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
     mask01 = (mask > 0).astype(np.uint8)
     mask01 = _keep_largest_component(mask01)
     if mask01.sum() == 0:
@@ -247,6 +321,69 @@ def _mask_by_blue(piece_bgr: np.ndarray) -> np.ndarray:
             "Blue segmentation produced empty mask - tune HSV ranges or check image"
         )
     return mask01
+
+
+def _mask_by_green(
+    piece_bgr: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
+) -> np.ndarray:
+    hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, LOWER_GREEN1, UPPER_GREEN1)
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
+    mask01 = (mask > 0).astype(np.uint8)
+    mask01 = _keep_largest_component(mask01)
+    if mask01.sum() == 0:
+        raise RuntimeError(
+            "Green segmentation produced empty mask - tune HSV ranges or check image"
+        )
+    return mask01
+
+
+def _mask_by_hsv_ranges(
+    piece_bgr: np.ndarray,
+    ranges: List[Tuple[List[int], List[int]]],
+    kernel_size: int,
+    open_iters: int,
+    close_iters: int,
+) -> np.ndarray:
+    hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
+    mask = None
+    for lower, upper in ranges:
+        lower_arr = np.array(lower, dtype=np.uint8)
+        upper_arr = np.array(upper, dtype=np.uint8)
+        curr = cv2.inRange(hsv, lower_arr, upper_arr)
+        mask = curr if mask is None else cv2.bitwise_or(mask, curr)
+    if mask is None:
+        raise RuntimeError("HSV segmentation requires at least one range.")
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
+    mask01 = (mask > 0).astype(np.uint8)
+    mask01 = _keep_largest_component(mask01)
+    if mask01.sum() == 0:
+        raise RuntimeError(
+            "HSV segmentation produced empty mask - tune HSV ranges or check image"
+        )
+    return mask01
+
+
+def _compute_piece_mask(piece_bgr: np.ndarray, config: MatcherConfig) -> np.ndarray:
+    mask_mode = (config.mask_mode or "blue").lower()
+    kernel_size = int(config.mask_kernel_size)
+    open_iters = int(config.mask_open_iters)
+    close_iters = int(config.mask_close_iters)
+    if mask_mode == "blue":
+        return _mask_by_blue(piece_bgr, kernel_size, open_iters, close_iters)
+    if mask_mode == "green":
+        return _mask_by_green(piece_bgr, kernel_size, open_iters, close_iters)
+    if mask_mode in ("hsv", "hsv_ranges"):
+        if not config.mask_hsv_ranges:
+            raise RuntimeError("mask_hsv_ranges must be set for hsv mask mode.")
+        return _mask_by_hsv_ranges(
+            piece_bgr,
+            config.mask_hsv_ranges,
+            kernel_size,
+            open_iters,
+            close_iters,
+        )
+    raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
 
 
 def _background_bgr(img_bgr: np.ndarray) -> Tuple[int, int, int]:
@@ -417,15 +554,15 @@ def _estimate_scales(
     piece_mask: np.ndarray,
     knobs_x: int,
     knobs_y: int,
-    scale_window: List[float] = EST_SCALE_WINDOW,
+    config: MatcherConfig,
 ) -> Tuple[float, List[float]]:
     th, tw = template_shape
-    cell_w = tw / COLS
-    cell_h = th / ROWS
-    desired_core_w = cell_w * PIECE_CELLS_APPROX[0]
-    desired_core_h = cell_h * PIECE_CELLS_APPROX[1]
-    desired_full_w = desired_core_w * (1.0 + knobs_x * KNOB_WIDTH_FRAC)
-    desired_full_h = desired_core_h * (1.0 + knobs_y * KNOB_WIDTH_FRAC)
+    cell_w = tw / config.cols
+    cell_h = th / config.rows
+    desired_core_w = cell_w * config.piece_cells_approx[0]
+    desired_core_h = cell_h * config.piece_cells_approx[1]
+    desired_full_w = desired_core_w * (1.0 + knobs_x * config.knob_width_frac)
+    desired_full_h = desired_core_h * (1.0 + knobs_y * config.knob_width_frac)
 
     mh, mw = piece_mask.shape
     if mw == 0 or mh == 0:
@@ -444,13 +581,14 @@ def _estimate_scales(
         raise RuntimeError(
             f"Estimated scale {est_scale:.3f} is implausible - check PIECE_CELLS_APPROX and image sizes"
         )
-    scales = [est_scale * f for f in scale_window]
+    scales = [est_scale * f for f in config.est_scale_window]
     return est_scale, scales
 
 
 def _infer_knob_counts(
     piece_mask: np.ndarray,
     template_shape: Tuple[int, int],
+    config: MatcherConfig,
 ) -> Tuple[int, int]:
     mh, mw = piece_mask.shape
     if mw == 0 or mh == 0:
@@ -462,17 +600,17 @@ def _infer_knob_counts(
     fill_ratio = piece_area_px / float(mw * mh)
 
     th, tw = template_shape
-    cell_w = tw / COLS
-    cell_h = th / ROWS
-    desired_core_w = cell_w * PIECE_CELLS_APPROX[0]
-    desired_core_h = cell_h * PIECE_CELLS_APPROX[1]
+    cell_w = tw / config.cols
+    cell_h = th / config.rows
+    desired_core_w = cell_w * config.piece_cells_approx[0]
+    desired_core_h = cell_h * config.piece_cells_approx[1]
     desired_area_px = desired_core_w * desired_core_h
 
     scored: List[Tuple[float, int, int]] = []
     for kx in range(3):
         for ky in range(3):
-            desired_full_w = desired_core_w * (1.0 + kx * KNOB_WIDTH_FRAC)
-            desired_full_h = desired_core_h * (1.0 + ky * KNOB_WIDTH_FRAC)
+            desired_full_w = desired_core_w * (1.0 + kx * config.knob_width_frac)
+            desired_full_h = desired_core_h * (1.0 + ky * config.knob_width_frac)
             est_scale_w = desired_full_w / mw
             est_scale_h = desired_full_h / mh
             est_scale_area = np.sqrt(desired_area_px / piece_area_px)
@@ -591,10 +729,19 @@ def _match_template_multiscale_binary(
     rows: int,
     scales: List[float],
     rotations: List[int],
+    config: MatcherConfig,
     blur_ksz: Optional[Tuple[int, int]] = (3, 3),
     corr_method: int = cv2.TM_CCORR_NORMED,
     template_blur_f32: Optional[np.ndarray] = None,
 ) -> Tuple[Dict, List[Dict]]:
+    top_match_count = config.top_match_count
+    top_match_scan_multiplier = config.top_match_scan_multiplier
+    coarse_factor = config.coarse_factor
+    coarse_top_k = config.coarse_top_k
+    coarse_padding_pixels = config.coarse_padding_pixels
+    coarse_min_side = config.coarse_min_side
+    grid_center_weight = config.grid_center_weight
+    grid_center_min_score = config.grid_center_min_score
     if template_blur_f32 is None:
         T = (
             (template_bin_img * 255).astype(np.uint8)
@@ -625,10 +772,10 @@ def _match_template_multiscale_binary(
     combo_candidates: List[Dict] = []
     dilate_ker = MATCH_DILATE_KERNEL
 
-    use_coarse = 0.0 < COARSE_FACTOR < 1.0 and min(tw, th) >= COARSE_MIN_SIDE
+    use_coarse = 0.0 < coarse_factor < 1.0 and min(tw, th) >= coarse_min_side
     if use_coarse:
-        tw_c = max(1, int(round(tw * COARSE_FACTOR)))
-        th_c = max(1, int(round(th * COARSE_FACTOR)))
+        tw_c = max(1, int(round(tw * coarse_factor)))
+        th_c = max(1, int(round(th * coarse_factor)))
         if tw_c < 2 or th_c < 2:
             use_coarse = False
             T_coarse_blur = None
@@ -642,7 +789,9 @@ def _match_template_multiscale_binary(
     def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
         if flat.size <= max_len:
             return np.argsort(flat)[::-1]
-        scan_count = min(flat.size, max(max_len * TOP_MATCH_SCAN_MULTIPLIER, max_len))
+        scan_count = min(
+            flat.size, max(max_len * top_match_scan_multiplier, max_len)
+        )
         order = np.argpartition(flat, -scan_count)[-scan_count:]
         return order[np.argsort(flat[order])[::-1]]
 
@@ -657,7 +806,7 @@ def _match_template_multiscale_binary(
     ) -> List[Dict]:
         combo_best_local: List[Dict] = []
         for idx in order:
-            if len(combo_best_local) >= TOP_MATCH_COUNT:
+            if len(combo_best_local) >= top_match_count:
                 break
             y, x = divmod(int(idx), res_w)
             x0 = x + offset_x
@@ -666,8 +815,8 @@ def _match_template_multiscale_binary(
             cy = y0 + hs / 2
             base_score = float(res[y, x])
             proximity = _grid_center_proximity(cx, cy, cell_w, cell_h, cols, rows)
-            boost_scale = max(0.0, base_score - GRID_CENTER_MIN_SCORE)
-            score = base_score + (GRID_CENTER_WEIGHT * proximity * boost_scale)
+            boost_scale = max(0.0, base_score - grid_center_min_score)
+            score = base_score + (grid_center_weight * proximity * boost_scale)
             tl = (int(x0), int(y0))
             br = (int(x0 + ws), int(y0 + hs))
             candidate = {
@@ -698,12 +847,12 @@ def _match_template_multiscale_binary(
         offset_y: int = 0,
     ) -> List[Dict]:
         flat = res.ravel()
-        order = _candidate_order(flat, TOP_MATCH_COUNT)
+        order = _candidate_order(flat, top_match_count)
         res_w = res.shape[1]
         combo_best = _scan_candidates(
             res, order, res_w, ws, hs, offset_x=offset_x, offset_y=offset_y
         )
-        if len(combo_best) < TOP_MATCH_COUNT and order.size < flat.size:
+        if len(combo_best) < top_match_count and order.size < flat.size:
             order = np.argsort(flat)[::-1]
             combo_best = _scan_candidates(
                 res, order, res_w, ws, hs, offset_x=offset_x, offset_y=offset_y
@@ -757,8 +906,8 @@ def _match_template_multiscale_binary(
             combo_added = False
 
             if use_coarse and T_coarse_blur is not None:
-                ws_c = max(1, int(round(ws * COARSE_FACTOR)))
-                hs_c = max(1, int(round(hs * COARSE_FACTOR)))
+                ws_c = max(1, int(round(ws * coarse_factor)))
+                hs_c = max(1, int(round(hs * coarse_factor)))
                 if (
                     1 < ws_c < T_coarse_blur.shape[1]
                     and 1 < hs_c < T_coarse_blur.shape[0]
@@ -773,19 +922,19 @@ def _match_template_multiscale_binary(
                     res_c = cv2.matchTemplate(T_coarse_blur, patt_masked_c, corr_method)
                     if res_c.size:
                         coarse_positions = _collect_coarse_positions(
-                            res_c, ws_c, hs_c, COARSE_TOP_K
+                            res_c, ws_c, hs_c, coarse_top_k
                         )
                         seen_rois = set()
                         for coarse in coarse_positions:
                             x_c, y_c = coarse["tl"]
-                            x_full = int(round(x_c / COARSE_FACTOR))
-                            y_full = int(round(y_c / COARSE_FACTOR))
+                            x_full = int(round(x_c / coarse_factor))
+                            y_full = int(round(y_c / coarse_factor))
                             x_full = max(0, min(x_full, tw - ws))
                             y_full = max(0, min(y_full, th - hs))
-                            x0 = max(0, x_full - COARSE_PADDING_PIXELS)
-                            y0 = max(0, y_full - COARSE_PADDING_PIXELS)
-                            x1 = min(tw, x_full + ws + COARSE_PADDING_PIXELS)
-                            y1 = min(th, y_full + hs + COARSE_PADDING_PIXELS)
+                            x0 = max(0, x_full - coarse_padding_pixels)
+                            y0 = max(0, y_full - coarse_padding_pixels)
+                            x1 = min(tw, x_full + ws + coarse_padding_pixels)
+                            y1 = min(th, y_full + hs + coarse_padding_pixels)
                             roi_key = (x0, y0, x1, y1)
                             if roi_key in seen_rois:
                                 continue
@@ -818,7 +967,7 @@ def _match_template_multiscale_binary(
     combo_candidates.sort(key=lambda c: c["score"], reverse=True)
     top_matches: List[Dict] = []
     for candidate in combo_candidates:
-        _update_top_matches(top_matches, candidate, TOP_MATCH_COUNT)
+        _update_top_matches(top_matches, candidate, top_match_count)
     best = top_matches[0]
     return best, top_matches
 
@@ -960,7 +1109,9 @@ def find_piece_in_template(
     auto_align: bool = False,
     infer_knobs: Optional[bool] = None,
     template_rotation: Optional[int] = None,
+    matcher_config: Optional[MatcherConfig] = None,
 ) -> MatchPayload:
+    config = matcher_config or build_matcher_config()
     profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
     profile = profile_value not in ("", "0", "false", "no")
     if profile:
@@ -984,7 +1135,7 @@ def find_piece_in_template(
         template_bin = _rotate_template_quadrant(template_bin, rotation)
         template_blur_cache = {}
 
-    piece_mask = _mask_by_blue(piece)
+    piece_mask = _compute_piece_mask(piece, config)
     if profile:
         marks.append(("mask", time.perf_counter()))
 
@@ -1019,7 +1170,7 @@ def find_piece_in_template(
                 border_value=bg,
             )
             auto_align_deg = correction
-            piece_mask = _mask_by_blue(piece)
+            piece_mask = _compute_piece_mask(piece, config)
             y0, y1, x0, x1 = _mask_bbox(piece_mask)
             piece_crop = piece[y0:y1, x0:x1].copy()
             piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
@@ -1033,6 +1184,7 @@ def find_piece_in_template(
         knobs_x, knobs_y = _infer_knob_counts(
             piece_mask_crop,
             template_bin.shape,
+            config,
         )
         knobs_inferred = True
         if profile:
@@ -1041,7 +1193,9 @@ def find_piece_in_template(
         knobs_x = int(knobs_x)
         knobs_y = int(knobs_y)
 
-    _, scales = _estimate_scales(template_bin.shape, piece_mask_crop, knobs_x, knobs_y)
+    _, scales = _estimate_scales(
+        template_bin.shape, piece_mask_crop, knobs_x, knobs_y, config
+    )
     if profile:
         marks.append(("scale", time.perf_counter()))
 
@@ -1052,10 +1206,11 @@ def find_piece_in_template(
         template_bin,
         piece_bin,
         piece_mask_crop,
-        COLS,
-        ROWS,
+        config.cols,
+        config.rows,
         scales,
-        ROTATIONS,
+        config.rotations,
+        config,
         blur_ksz=(3, 3),
         corr_method=cv2.TM_CCORR_NORMED,
         template_blur_f32=template_blur_f32,
