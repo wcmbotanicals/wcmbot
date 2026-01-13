@@ -42,6 +42,8 @@ LOWER_BLUE1 = np.array([90, 60, 40], dtype=np.uint8)
 UPPER_BLUE1 = np.array([140, 255, 255], dtype=np.uint8)
 LOWER_BLUE2 = np.array([85, 30, 60], dtype=np.uint8)
 UPPER_BLUE2 = np.array([160, 255, 220], dtype=np.uint8)
+LOWER_GREEN1 = np.array([35, 40, 40], dtype=np.uint8)
+UPPER_GREEN1 = np.array([85, 255, 255], dtype=np.uint8)
 
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
@@ -77,6 +79,11 @@ class MatcherConfig:
     grid_center_weight: float = GRID_CENTER_WEIGHT
     grid_center_min_score: float = GRID_CENTER_MIN_SCORE
     knob_width_frac: float = KNOB_WIDTH_FRAC
+    mask_mode: str = "blue"
+    mask_hsv_ranges: Optional[List[Tuple[List[int], List[int]]]] = None
+    mask_kernel_size: int = 7
+    mask_open_iters: int = OPEN_ITERS
+    mask_close_iters: int = CLOSE_ITERS
 
 
 def build_matcher_config(
@@ -97,6 +104,11 @@ def build_matcher_config(
         "grid_center_weight": GRID_CENTER_WEIGHT,
         "grid_center_min_score": GRID_CENTER_MIN_SCORE,
         "knob_width_frac": KNOB_WIDTH_FRAC,
+        "mask_mode": "blue",
+        "mask_hsv_ranges": None,
+        "mask_kernel_size": 7,
+        "mask_open_iters": OPEN_ITERS,
+        "mask_close_iters": CLOSE_ITERS,
     }
     if not overrides:
         return MatcherConfig(**payload)
@@ -281,13 +293,27 @@ def _keep_largest_component(
     return (out // 255).astype(np.uint8)
 
 
-def _mask_by_blue(piece_bgr: np.ndarray) -> np.ndarray:
+def _cleanup_mask(
+    mask: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
+) -> np.ndarray:
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    if open_iters > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iters)
+    if close_iters > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_iters)
+    return mask
+
+
+def _mask_by_blue(
+    piece_bgr: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
+) -> np.ndarray:
     hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
     m1 = cv2.inRange(hsv, LOWER_BLUE1, UPPER_BLUE1)
     m2 = cv2.inRange(hsv, LOWER_BLUE2, UPPER_BLUE2)
     mask = cv2.bitwise_or(m1, m2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL, iterations=OPEN_ITERS)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, KERNEL, iterations=CLOSE_ITERS)
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
     mask01 = (mask > 0).astype(np.uint8)
     mask01 = _keep_largest_component(mask01)
     if mask01.sum() == 0:
@@ -295,6 +321,69 @@ def _mask_by_blue(piece_bgr: np.ndarray) -> np.ndarray:
             "Blue segmentation produced empty mask - tune HSV ranges or check image"
         )
     return mask01
+
+
+def _mask_by_green(
+    piece_bgr: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
+) -> np.ndarray:
+    hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, LOWER_GREEN1, UPPER_GREEN1)
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
+    mask01 = (mask > 0).astype(np.uint8)
+    mask01 = _keep_largest_component(mask01)
+    if mask01.sum() == 0:
+        raise RuntimeError(
+            "Green segmentation produced empty mask - tune HSV ranges or check image"
+        )
+    return mask01
+
+
+def _mask_by_hsv_ranges(
+    piece_bgr: np.ndarray,
+    ranges: List[Tuple[List[int], List[int]]],
+    kernel_size: int,
+    open_iters: int,
+    close_iters: int,
+) -> np.ndarray:
+    hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
+    mask = None
+    for lower, upper in ranges:
+        lower_arr = np.array(lower, dtype=np.uint8)
+        upper_arr = np.array(upper, dtype=np.uint8)
+        curr = cv2.inRange(hsv, lower_arr, upper_arr)
+        mask = curr if mask is None else cv2.bitwise_or(mask, curr)
+    if mask is None:
+        raise RuntimeError("HSV segmentation requires at least one range.")
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
+    mask01 = (mask > 0).astype(np.uint8)
+    mask01 = _keep_largest_component(mask01)
+    if mask01.sum() == 0:
+        raise RuntimeError(
+            "HSV segmentation produced empty mask - tune HSV ranges or check image"
+        )
+    return mask01
+
+
+def _compute_piece_mask(piece_bgr: np.ndarray, config: MatcherConfig) -> np.ndarray:
+    mask_mode = (config.mask_mode or "blue").lower()
+    kernel_size = int(config.mask_kernel_size)
+    open_iters = int(config.mask_open_iters)
+    close_iters = int(config.mask_close_iters)
+    if mask_mode == "blue":
+        return _mask_by_blue(piece_bgr, kernel_size, open_iters, close_iters)
+    if mask_mode == "green":
+        return _mask_by_green(piece_bgr, kernel_size, open_iters, close_iters)
+    if mask_mode in ("hsv", "hsv_ranges"):
+        if not config.mask_hsv_ranges:
+            raise RuntimeError("mask_hsv_ranges must be set for hsv mask mode.")
+        return _mask_by_hsv_ranges(
+            piece_bgr,
+            config.mask_hsv_ranges,
+            kernel_size,
+            open_iters,
+            close_iters,
+        )
+    raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
 
 
 def _background_bgr(img_bgr: np.ndarray) -> Tuple[int, int, int]:
@@ -1046,7 +1135,7 @@ def find_piece_in_template(
         template_bin = _rotate_template_quadrant(template_bin, rotation)
         template_blur_cache = {}
 
-    piece_mask = _mask_by_blue(piece)
+    piece_mask = _compute_piece_mask(piece, config)
     if profile:
         marks.append(("mask", time.perf_counter()))
 
@@ -1081,7 +1170,7 @@ def find_piece_in_template(
                 border_value=bg,
             )
             auto_align_deg = correction
-            piece_mask = _mask_by_blue(piece)
+            piece_mask = _compute_piece_mask(piece, config)
             y0, y1, x0, x1 = _mask_bbox(piece_mask)
             piece_crop = piece[y0:y1, x0:x1].copy()
             piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
