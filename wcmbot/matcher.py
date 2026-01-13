@@ -31,7 +31,7 @@ COARSE_PAD_PX = (
     COARSE_PADDING_PIXELS  # Backward-compatible alias; prefer COARSE_PADDING_PIXELS
 )
 COARSE_MIN_SIDE = 240
-GRID_CENTER_WEIGHT = 0.7
+GRID_CENTER_WEIGHT = 2.0
 GRID_CENTER_MIN_SCORE = 0.5
 
 KNOB_WIDTH_FRAC = 1.0 / 3.0
@@ -249,10 +249,42 @@ def preload_template_cache(
     _get_template_blur_f32(entry.template_bin, blur_ksz, entry.blur_cache)
 
 
+def _enhance_contrast_gray(gray: np.ndarray) -> np.ndarray:
+    """Apply CLAHE to stabilize thresholding across lighting variations."""
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(gray)
+
+
 def _binarize_two_color(img_bgr: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray = _enhance_contrast_gray(gray)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     _, bw = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return (bw // 255).astype(np.uint8)
+
+
+def _binarize_median_threshold(img_bgr: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Binarize using median intensity of masked region as threshold.
+    
+    This ensures roughly 50% of the piece is black and 50% white, preserving
+    internal pattern contrast regardless of absolute brightness.
+    """
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray = _enhance_contrast_gray(gray)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    if mask is not None:
+        # Find median of masked pixels only
+        masked_pixels = blur[mask > 0]
+        if len(masked_pixels) > 0:
+            threshold = int(np.median(masked_pixels))
+        else:
+            threshold = 127
+    else:
+        # Use overall median
+        threshold = int(np.median(blur))
+    
+    _, bw = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY)
     return (bw // 255).astype(np.uint8)
 
 
@@ -1144,7 +1176,8 @@ def find_piece_in_template(
     piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
     if profile:
         marks.append(("crop", time.perf_counter()))
-    piece_bin = _binarize_two_color(piece_crop) * piece_mask_crop
+
+    piece_bin = _binarize_median_threshold(piece_crop, piece_mask_crop) * piece_mask_crop
     piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
     if profile:
         marks.append(("binarize", time.perf_counter()))
@@ -1174,7 +1207,7 @@ def find_piece_in_template(
             y0, y1, x0, x1 = _mask_bbox(piece_mask)
             piece_crop = piece[y0:y1, x0:x1].copy()
             piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
-            piece_bin = _binarize_two_color(piece_crop) * piece_mask_crop
+            piece_bin = _binarize_median_threshold(piece_crop, piece_mask_crop) * piece_mask_crop
             piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
         if profile:
             marks.append(("auto_align", time.perf_counter()))
@@ -1223,6 +1256,7 @@ def find_piece_in_template(
     )
     if profile:
         marks.append(("contours", time.perf_counter()))
+
     for idx, match in enumerate(top_matches):
         match["index"] = idx
         match["cx"] = int(round(match["center"][0]))
@@ -1235,9 +1269,9 @@ def find_piece_in_template(
         prev = t0
         parts = []
         for label, ts in marks:
-            parts.append(f"{label}={((ts - prev) * 1000.0):.2f}ms")
+            parts.append(f"{label}={(ts - prev) * 1000.0:.2f}ms")
             prev = ts
-        parts.append(f"total={((t_end - t0) * 1000.0):.2f}ms")
+        parts.append(f"total={(t_end - t0) * 1000.0:.2f}ms")
         print("matcher profile:", " ".join(parts))
 
     return MatchPayload(

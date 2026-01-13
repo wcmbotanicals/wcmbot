@@ -3,9 +3,11 @@
 import base64
 import os
 import random
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
+import cv2
 import gradio as gr
 import numpy as np
 import plotly.express as px
@@ -270,6 +272,247 @@ def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
         return _blank_outputs(f"Error: {exc}", template_id, rotation)
 
 
+def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
+    """Split a 3x3 grid upload into nine cells and stream results as each completes."""
+    template_spec = TEMPLATE_REGISTRY.get(template_id)
+    rotation = (
+        int(template_rotation)
+        if template_rotation is not None
+        else template_spec.default_rotation
+    )
+    
+    if not piece_path or not os.path.exists(piece_path):
+        yield _blank_outputs(
+            "Please upload a puzzle piece image.", template_id, rotation
+        )
+        return
+
+    try:
+        grid_img = Image.open(piece_path).convert("RGB")
+    except Exception as exc:
+        yield _blank_outputs(
+            f"Could not read grid image: {exc}",
+            template_id,
+            rotation,
+        )
+        return
+
+    width, height = grid_img.size
+    rows = cols = 3
+    cell_w = width // cols
+    cell_h = height // rows
+    if cell_w <= 0 or cell_h <= 0:
+        yield _blank_outputs(
+            "Grid image is too small to split.",
+            template_id,
+            rotation,
+        )
+        return
+
+    total = rows * cols
+    all_results = []
+    
+    # Define distinct colors (BGR) - no green
+    colors = [
+        (0, 0, 255),      # Red
+        (255, 0, 0),      # Blue
+        (0, 165, 255),    # Orange
+        (255, 0, 255),    # Magenta
+        (255, 255, 0),    # Cyan
+        (0, 255, 255),    # Yellow
+        (128, 0, 255),    # Pink
+        (255, 128, 0),    # Light blue
+        (128, 255, 0),    # Teal
+    ]
+    
+    # Convert BGR to RGB for HTML display
+    colors_rgb = [(b, g, r) for (b, g, r) in colors]
+    
+    # Get template RGB for overlay
+    template_rgb = None
+    for spec in TEMPLATE_REGISTRY.templates.values():
+        if spec.template_id == template_id:
+            template_rgb = get_template_image(spec.template_path)
+            break
+    
+    for idx in range(total):
+        r = idx // cols
+        c = idx % cols
+        box = (c * cell_w, r * cell_h, (c + 1) * cell_w, (r + 1) * cell_h)
+        crop = grid_img.crop(box)
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+            crop.save(tmp_path)
+
+        try:
+            result = solve_puzzle(tmp_path, template_id, auto_align, rotation)
+            all_results.append((idx, r, c, result))
+        except Exception as exc:
+            all_results.append((idx, r, c, None))
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+        # Build and yield incremental update after each piece
+        coord_lines = ["| Piece | Grid Position | Row | Col |", "|-------|---------------|-----|-----|"]
+        for i, (pidx, pr, pc, presult) in enumerate(all_results):
+            piece_color = colors_rgb[pidx % len(colors_rgb)]
+            piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{pidx + 1}**</span>'
+            if presult is None:
+                coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | Error | Error |")
+                continue
+            outputs = list(presult)
+            location_idx = len(VIEW_KEYS)
+            location_text = str(outputs[location_idx]) if location_idx < len(outputs) else ""
+            try:
+                if "**Row:**" in location_text and "**Col:**" in location_text:
+                    row_match = location_text.split("**Row:**")[1].split("**")[0].strip()
+                    col_match = location_text.split("**Col:**")[1].split("\n")[0].strip()
+                    coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | {row_match} | {col_match} |")
+                else:
+                    coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |")
+            except (IndexError, AttributeError):
+                coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |")
+        
+        # Add placeholder rows for unprocessed pieces
+        for i in range(idx + 1, total):
+            upr = i // cols
+            upc = i % cols
+            piece_color = colors_rgb[i % len(colors_rgb)]
+            piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{i + 1}**</span>'
+            coord_lines.append(f"| {piece_num_html} | r{upr + 1}, c{upc + 1} | ... | ... |")
+        
+        combined_location = "\n".join(coord_lines)
+
+        # Build 3x3 grid with processed results and blank placeholders
+        zoom_images = []
+        for i in range(total):
+            if i < len(all_results):
+                _, _, _, presult = all_results[i]
+                if presult is None:
+                    zoom_images.append(np.zeros((200, 200, 3), dtype=np.uint8))
+                else:
+                    outputs = list(presult)
+                    zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
+                    zoom_img = outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
+                    if zoom_img is not None and isinstance(zoom_img, np.ndarray):
+                        zoom_images.append(zoom_img)
+                    else:
+                        zoom_images.append(np.zeros((200, 200, 3), dtype=np.uint8))
+            else:
+                # Placeholder for unprocessed piece
+                zoom_images.append(np.full((200, 200, 3), 200, dtype=np.uint8))
+        
+        # Arrange in 3x3 grid
+        if zoom_images:
+            heights = [img.shape[0] for img in zoom_images if img.shape[0] > 0]
+            widths = [img.shape[1] for img in zoom_images if img.shape[1] > 0]
+            target_h = int(np.median(heights)) if heights else 200
+            target_w = int(np.median(widths)) if widths else 200
+            
+            uniform_images = []
+            for img in zoom_images:
+                if img.shape[0] > 0 and img.shape[1] > 0:
+                    h, w = img.shape[:2]
+                    scale = min(target_w / w, target_h / h)
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                    
+                    pad_top = (target_h - new_h) // 2
+                    pad_bottom = target_h - new_h - pad_top
+                    pad_left = (target_w - new_w) // 2
+                    pad_right = target_w - new_w - pad_left
+                    
+                    padded = cv2.copyMakeBorder(
+                        resized,
+                        pad_top, pad_bottom, pad_left, pad_right,
+                        cv2.BORDER_CONSTANT,
+                        value=(255, 255, 255)
+                    )
+                else:
+                    padded = np.full((target_h, target_w, 3), 200, dtype=np.uint8)
+                uniform_images.append(padded)
+            
+            grid_rows = []
+            for gr in range(3):
+                row_imgs = uniform_images[gr * 3:(gr + 1) * 3]
+                grid_rows.append(np.hstack(row_imgs))
+            
+            combined_zoom = np.vstack(grid_rows)
+        else:
+            combined_zoom = np.full((600, 600, 3), 200, dtype=np.uint8)
+
+        # Build template overlay with processed pieces
+        template_view = None
+        if template_rgb is not None:
+            template_marked = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR).copy()
+            
+            for pidx, pr, pc, presult in all_results:
+                if presult is None:
+                    continue
+                try:
+                    outputs = list(presult)
+                    state_idx = len(VIEW_KEYS) + 2
+                    if state_idx < len(outputs):
+                        payload = outputs[state_idx]
+                        if payload and hasattr(payload, 'matches') and payload.matches:
+                            match = payload.matches[0]
+                            color = colors[pidx % len(colors)]
+                            
+                            contours = match.get('contours', [])
+                            if contours:
+                                for cnt in contours:
+                                    cnt = np.asarray(cnt).reshape(-1, 2).astype(np.int32)
+                                    cv2.polylines(template_marked, [cnt], True, color, 2)
+                            else:
+                                tlx, tly = match.get('tl', (0, 0))
+                                brx, bry = match.get('br', (0, 0))
+                                cv2.rectangle(template_marked, (tlx, tly), (brx, bry), color, 2)
+                            
+                            tlx, tly = match.get('tl', (0, 0))
+                            cv2.putText(
+                                template_marked,
+                                f"{pidx + 1}",
+                                (tlx + 5, tly + 20),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7,
+                                color,
+                                2
+                            )
+                except Exception:
+                    pass
+            
+            template_marked_rgb = cv2.cvtColor(template_marked, cv2.COLOR_BGR2RGB)
+            template_view = make_zoomable_plot(template_marked_rgb)
+
+        final_views = {key: None for key in VIEW_KEYS}
+        final_views["zoom_focus"] = combined_zoom
+        final_views["zoom_template"] = template_view if template_view is not None else make_zoomable_plot(None)
+        rotated_template = _rotate_template_preview(
+            TEMPLATE_IMAGES.get(template_id), rotation
+        )
+        final_views["template_color"] = rotated_template
+        
+        summary = f"Processed {len(all_results)}/{total} pieces."
+        yield _views_to_outputs(final_views, combined_location, summary, None, 0)
+
+
+def solve_single_or_batch(
+    piece_path, template_id, auto_align, template_rotation, batch_mode
+):
+    """Dispatch to single-piece solve or streamed 3x3 batch mode."""
+    if batch_mode:
+        yield from solve_puzzle_grid(
+            piece_path, template_id, auto_align, template_rotation
+        )
+    else:
+        yield solve_puzzle(piece_path, template_id, auto_align, template_rotation)
+
+
 def goto_previous_match(state, current_index, template_id, template_rotation):
     return _change_match(-1, state, current_index, template_id, template_rotation)
 
@@ -350,6 +593,16 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                     label="Auto-align (experimental)",
                     value=DEFAULT_TEMPLATE_SPEC.auto_align_default,
                 )
+                batch_grid_checkbox = gr.Checkbox(
+                    label="Treat upload as 3x3 grid (batch)",
+                    value=False,
+                    info="If checked, split the uploaded image into 9 equal cells and solve each in sequence.",
+                )
+                diagnostic_mode_checkbox = gr.Checkbox(
+                    label="Show diagnostic visualizations",
+                    value=False,
+                    info="Show detailed mask, binary, and processing steps for single pieces.",
+                )
                 template_rotation = gr.Dropdown(
                     label="Template rotation (degrees)",
                     choices=TEMPLATE_ROTATION_OPTIONS,
@@ -373,18 +626,22 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
 
     gr.Markdown("### Best match (zoomed)")
     image_components["zoom_focus"] = gr.Image(
-        label=VIEW_LABELS["zoom_focus"],
+        label="Zoomed piece + neighbors",
         type="numpy",
         interactive=False,
-        height=320,
+        height=340,
     )
 
-    gr.Markdown("### Match visualizations/diagnostics")
-
+    # Diagnostic outputs - hidden by default, shown when diagnostic mode enabled
+    gr.Markdown("### Match visualizations/diagnostics", visible=False, elem_id="diag-header")
+    diagnostic_header = gr.Markdown("### Match visualizations/diagnostics", visible=False)
+    
     other_keys = [
         key for key in VIEW_KEYS if key not in ("zoom_template", "zoom_focus")
     ]
-    with gr.Row():
+    
+    diagnostic_row1 = gr.Row(visible=False)
+    with diagnostic_row1:
         for key in other_keys[:4]:
             comp = gr.Image(
                 label=VIEW_LABELS[key],
@@ -394,8 +651,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 height=260,
             )
             image_components[key] = comp
-
-    with gr.Row():
+    
+    diagnostic_row2 = gr.Row(visible=False)
+    with diagnostic_row2:
         for key in other_keys[4:]:
             comp = gr.Image(
                 label=VIEW_LABELS[key],
@@ -404,8 +662,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 height=260,
             )
             image_components[key] = comp
-
-    with gr.Row():
+    
+    diagnostic_controls = gr.Row(visible=False)
+    with diagnostic_controls:
         prev_button = gr.Button("⬅️ Previous match")
         next_button = gr.Button("Next match ➡️")
         match_summary = gr.Markdown("Run the matcher to view detailed plots.")
@@ -414,6 +673,21 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     match_index = gr.State(0)
 
     ordered_components = [image_components[key] for key in VIEW_KEYS]
+
+    def _toggle_diagnostics(show_diag):
+        """Toggle visibility of diagnostic outputs."""
+        return {
+            diagnostic_header: gr.update(visible=show_diag),
+            diagnostic_row1: gr.update(visible=show_diag),
+            diagnostic_row2: gr.update(visible=show_diag),
+            diagnostic_controls: gr.update(visible=show_diag),
+        }
+
+    diagnostic_mode_checkbox.change(
+        fn=_toggle_diagnostics,
+        inputs=[diagnostic_mode_checkbox],
+        outputs=[diagnostic_header, diagnostic_row1, diagnostic_row2, diagnostic_controls],
+    )
 
     def _on_template_change(selected_template):
         spec = TEMPLATE_REGISTRY.get(selected_template)
@@ -442,9 +716,34 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         ],
     )
 
+    # Auto-run matching whenever a new piece is uploaded or pasted
+    piece_input.change(
+        fn=solve_single_or_batch,
+        inputs=[
+            piece_input,
+            template_selector,
+            auto_align_checkbox,
+            template_rotation,
+            batch_grid_checkbox,
+        ],
+        outputs=[
+            *ordered_components,
+            match_location,
+            match_summary,
+            match_state,
+            match_index,
+        ],
+    )
+
     solve_button.click(
-        fn=solve_puzzle,
-        inputs=[piece_input, template_selector, auto_align_checkbox, template_rotation],
+        fn=solve_single_or_batch,
+        inputs=[
+            piece_input,
+            template_selector,
+            auto_align_checkbox,
+            template_rotation,
+            batch_grid_checkbox,
+        ],
         outputs=[
             *ordered_components,
             match_location,
