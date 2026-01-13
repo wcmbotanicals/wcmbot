@@ -147,7 +147,7 @@ def main() -> None:
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     template_path = os.path.join(base_dir, "media", "templates", "sample_puzzle.png")
-    pieces_dir = os.path.join(base_dir, "media", "pieces")
+    pieces_dir = os.path.join(base_dir, "media", "pieces", "sample_puzzle")
 
     if args.coarse_off:
         matcher.COARSE_FACTOR = 0.0
