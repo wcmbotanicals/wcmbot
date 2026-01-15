@@ -322,7 +322,7 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
         (0, 255, 255),    # Yellow
         (128, 0, 255),    # Pink
         (255, 128, 0),    # Light blue
-        (128, 255, 0),    # Teal
+        (128, 255, 0),    # Green-cyan
     ]
     
     # Convert BGR to RGB for HTML display
