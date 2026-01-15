@@ -607,7 +607,10 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 diagnostic_mode_checkbox = gr.Checkbox(
                     label="Show diagnostic visualizations",
                     value=False,
-                    info="Show detailed mask, binary, and processing steps for single pieces.",
+                    info=(
+                        "Show detailed mask, binary, and processing steps for single pieces. "
+                        "Has no effect when 'Treat upload as 3x3 grid (batch)' is enabled."
+                    ),
                 )
                 template_rotation = gr.Dropdown(
                     label="Template rotation (degrees)",
