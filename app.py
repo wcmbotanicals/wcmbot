@@ -359,26 +359,42 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
 
         # Build and yield incremental update after each piece
         coord_lines = ["| Piece | Grid Position | Row | Col |", "|-------|---------------|-----|-----|"]
-        for pidx, pr, pc, presult in all_results:
+        for i, (pidx, pr, pc, presult) in enumerate(all_results):
             piece_color = colors_rgb[pidx % len(colors_rgb)]
             piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{pidx + 1}**</span>'
-            if presult is None:
-                coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | Error | Error |")
-                continue
-            outputs = list(presult)
-            location_idx = len(VIEW_KEYS)
-            location_text = str(outputs[location_idx]) if location_idx < len(outputs) else ""
-            try:
-                if "**Row:**" in location_text and "**Col:**" in location_text:
-                    row_match = location_text.split("**Row:**")[1].split("**")[0].strip()
-                    col_match = location_text.split("**Col:**")[1].split("\n")[0].strip()
-                    coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | {row_match} | {col_match} |")
-                else:
+                if presult is None:
+                    coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | Error | Error |")
+                    continue
+                outputs = list(presult)
+                location_idx = len(VIEW_KEYS)
+                location_text = str(outputs[location_idx]) if location_idx < len(outputs) else ""
+                try:
+                    if "**Row:**" in location_text and "**Col:**" in location_text:
+                        row_match = location_text.split("**Row:**")[1].split("**")[0].strip()
+                        col_match = location_text.split("**Col:**")[1].split("\n")[0].strip()
+                        coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | {row_match} | {col_match} |")
+                    else:
+                        coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |")
+                except (IndexError, AttributeError):
                     coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |")
-            except (IndexError, AttributeError):
-                coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |")
         
-        # Add placeholder rows for unprocessed pieces
+            # Add placeholder rows for unprocessed pieces
+            remaining = total - len(all_results)
+            for _ in range(remaining):
+                coord_lines.append("| - | - | - | - |")
+
+            coord_markdown = "\n".join(coord_lines)
+
+            yield (
+                None,  # image plot (unchanged here)
+                coord_markdown,
+                f"Processed {len(all_results)}/{total} pieces",
+            )
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         for i in range(idx + 1, total):
             upr = i // cols
             upc = i % cols
