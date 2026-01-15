@@ -31,6 +31,10 @@ COARSE_PAD_PX = (
     COARSE_PADDING_PIXELS  # Backward-compatible alias; prefer COARSE_PADDING_PIXELS
 )
 COARSE_MIN_SIDE = 240
+# Increased from 0.7 to 2.0 to more strongly favor candidates whose centers
+# align with the expected grid cell centers. Empirically this reduces high-score
+# false positives near borders/partial pieces and better reflects the puzzle's
+# regular grid structure without changing the rest of the scoring logic.
 GRID_CENTER_WEIGHT = 2.0
 GRID_CENTER_MIN_SCORE = 0.5
 
