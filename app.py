@@ -359,7 +359,7 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
 
         # Build and yield incremental update after each piece
         coord_lines = ["| Piece | Grid Position | Row | Col |", "|-------|---------------|-----|-----|"]
-        for i, (pidx, pr, pc, presult) in enumerate(all_results):
+        for pidx, pr, pc, presult in all_results:
             piece_color = colors_rgb[pidx % len(colors_rgb)]
             piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{pidx + 1}**</span>'
             if presult is None:
