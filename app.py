@@ -639,7 +639,6 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
 
     # Diagnostic outputs - hidden by default, shown when diagnostic mode enabled
-    gr.Markdown("### Match visualizations/diagnostics", visible=False, elem_id="diag-header")
     diagnostic_header = gr.Markdown("### Match visualizations/diagnostics", visible=False)
     
     other_keys = [
