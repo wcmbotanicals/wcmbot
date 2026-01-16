@@ -280,7 +280,7 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
         if template_rotation is not None
         else template_spec.default_rotation
     )
-    
+
     if not piece_path or not os.path.exists(piece_path):
         yield _blank_outputs(
             "Please upload a puzzle piece image.", template_id, rotation
@@ -311,30 +311,30 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
 
     total = rows * cols
     all_results = []
-    
+
     # Define distinct colors (BGR) - no green
     colors = [
-        (0, 0, 255),      # Red
-        (255, 0, 0),      # Blue
-        (0, 165, 255),    # Orange
-        (255, 0, 255),    # Magenta
-        (255, 255, 0),    # Cyan
-        (0, 255, 255),    # Yellow
-        (128, 0, 255),    # Pink
-        (255, 128, 0),    # Light blue
-        (128, 255, 0),    # Green-cyan
+        (0, 0, 255),  # Red
+        (255, 0, 0),  # Blue
+        (0, 165, 255),  # Orange
+        (255, 0, 255),  # Magenta
+        (255, 255, 0),  # Cyan
+        (0, 255, 255),  # Yellow
+        (128, 0, 255),  # Pink
+        (255, 128, 0),  # Light blue
+        (128, 255, 0),  # Green-cyan
     ]
-    
+
     # Convert BGR to RGB for HTML display
     colors_rgb = [(b, g, r) for (b, g, r) in colors]
-    
+
     # Get template RGB for overlay
     template_rgb = None
     for spec in TEMPLATE_REGISTRY.templates.values():
         if spec.template_id == template_id:
             template_rgb = get_template_image(spec.template_path)
             break
-    
+
     for idx in range(total):
         r = idx // cols
         c = idx % cols
@@ -413,9 +413,7 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
         upc = i % cols
         piece_color = colors_rgb[i % len(colors_rgb)]
         piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{i + 1}**</span>'
-        coord_lines.append(
-            f"| {piece_num_html} | r{upr + 1}, c{upc + 1} | ... | ... |"
-        )
+        coord_lines.append(f"| {piece_num_html} | r{upr + 1}, c{upc + 1} | ... | ... |")
 
     combined_location = "\n".join(coord_lines)
 
@@ -454,7 +452,9 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
                 scale = min(target_w / w, target_h / h)
                 new_w = int(w * scale)
                 new_h = int(h * scale)
-                resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                resized = cv2.resize(
+                    img, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+                )
 
                 pad_top = (target_h - new_h) // 2
                 pad_bottom = target_h - new_h - pad_top
@@ -688,12 +688,14 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
 
     # Diagnostic outputs - hidden by default, shown when diagnostic mode enabled
-    diagnostic_header = gr.Markdown("### Match visualizations/diagnostics", visible=False)
-    
+    diagnostic_header = gr.Markdown(
+        "### Match visualizations/diagnostics", visible=False
+    )
+
     other_keys = [
         key for key in VIEW_KEYS if key not in ("zoom_template", "zoom_focus")
     ]
-    
+
     diagnostic_row1 = gr.Row(visible=False)
     with diagnostic_row1:
         for key in other_keys[:4]:
@@ -705,7 +707,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 height=260,
             )
             image_components[key] = comp
-    
+
     diagnostic_row2 = gr.Row(visible=False)
     with diagnostic_row2:
         for key in other_keys[4:]:
@@ -716,7 +718,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 height=260,
             )
             image_components[key] = comp
-    
+
     diagnostic_controls = gr.Row(visible=False)
     with diagnostic_controls:
         prev_button = gr.Button("⬅️ Previous match")
@@ -739,7 +741,12 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     diagnostic_mode_checkbox.change(
         fn=_toggle_diagnostics,
         inputs=[diagnostic_mode_checkbox],
-        outputs=[diagnostic_header, diagnostic_row1, diagnostic_row2, diagnostic_controls],
+        outputs=[
+            diagnostic_header,
+            diagnostic_row1,
+            diagnostic_row2,
+            diagnostic_controls,
+        ],
     )
 
     def _on_template_change(selected_template):

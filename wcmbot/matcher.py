@@ -267,16 +267,18 @@ def _binarize_two_color(img_bgr: np.ndarray) -> np.ndarray:
     return (bw // 255).astype(np.uint8)
 
 
-def _binarize_median_threshold(img_bgr: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
+def _binarize_median_threshold(
+    img_bgr: np.ndarray, mask: Optional[np.ndarray] = None
+) -> np.ndarray:
     """Binarize using median intensity of masked region as threshold.
-    
+
     This ensures roughly 50% of the piece is black and 50% white, preserving
     internal pattern contrast regardless of absolute brightness.
     """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = _enhance_contrast_gray(gray)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    
+
     if mask is not None:
         # Find median of masked pixels only
         masked_pixels = blur[mask > 0]
@@ -287,7 +289,7 @@ def _binarize_median_threshold(img_bgr: np.ndarray, mask: Optional[np.ndarray] =
     else:
         # Use overall median
         threshold = int(np.median(blur))
-    
+
     _, bw = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY)
     return (bw // 255).astype(np.uint8)
 
@@ -332,9 +334,7 @@ def _keep_largest_component(
 def _cleanup_mask(
     mask: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
 ) -> np.ndarray:
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
-    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     if open_iters > 0:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iters)
     if close_iters > 0:
@@ -825,9 +825,7 @@ def _match_template_multiscale_binary(
     def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
         if flat.size <= max_len:
             return np.argsort(flat)[::-1]
-        scan_count = min(
-            flat.size, max(max_len * top_match_scan_multiplier, max_len)
-        )
+        scan_count = min(flat.size, max(max_len * top_match_scan_multiplier, max_len))
         order = np.argpartition(flat, -scan_count)[-scan_count:]
         return order[np.argsort(flat[order])[::-1]]
 
@@ -1181,7 +1179,9 @@ def find_piece_in_template(
     if profile:
         marks.append(("crop", time.perf_counter()))
 
-    piece_bin = _binarize_median_threshold(piece_crop, piece_mask_crop) * piece_mask_crop
+    piece_bin = (
+        _binarize_median_threshold(piece_crop, piece_mask_crop) * piece_mask_crop
+    )
     piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
     if profile:
         marks.append(("binarize", time.perf_counter()))
@@ -1211,7 +1211,10 @@ def find_piece_in_template(
             y0, y1, x0, x1 = _mask_bbox(piece_mask)
             piece_crop = piece[y0:y1, x0:x1].copy()
             piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
-            piece_bin = _binarize_median_threshold(piece_crop, piece_mask_crop) * piece_mask_crop
+            piece_bin = (
+                _binarize_median_threshold(piece_crop, piece_mask_crop)
+                * piece_mask_crop
+            )
             piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
         if profile:
             marks.append(("auto_align", time.perf_counter()))
