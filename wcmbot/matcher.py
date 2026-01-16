@@ -156,12 +156,12 @@ class TemplateCacheEntry:
     binarize_blur_ksz: Optional[Tuple[int, int]]
 
 
-_TEMPLATE_CACHE: Dict[str, TemplateCacheEntry] = {}
+_TEMPLATE_CACHE: Dict[Tuple[str, Optional[Tuple[int, int]]], TemplateCacheEntry] = {}
 
 
 # ---------- helpers ----------
 def _normalize_kernel(
-    kernel: Optional[Tuple[int, int]] | List[int] | Tuple[int, int] | None,
+    kernel: Tuple[int, int] | List[int] | None,
 ) -> Optional[Tuple[int, int]]:
     if kernel is None:
         return None
@@ -199,9 +199,10 @@ def _load_template_cached(
     if not os.path.exists(path):
         raise RuntimeError(f"Failed to load image: {path}")
     mtime = os.path.getmtime(path)
-    entry = _TEMPLATE_CACHE.get(path)
     blur_ksz = _normalize_kernel(binarize_blur_ksz)
-    if entry and entry.mtime == mtime and entry.binarize_blur_ksz == blur_ksz:
+    cache_key = (path, blur_ksz)
+    entry = _TEMPLATE_CACHE.get(cache_key)
+    if entry and entry.mtime == mtime:
         return entry
     template = _load_image(path)
     template_rgb = cv2.cvtColor(template, cv2.COLOR_BGR2RGB)
@@ -213,7 +214,7 @@ def _load_template_cached(
         blur_cache={},
         binarize_blur_ksz=blur_ksz,
     )
-    _TEMPLATE_CACHE[path] = entry
+    _TEMPLATE_CACHE[cache_key] = entry
     return entry
 
 
@@ -312,20 +313,20 @@ def _binarize_median_threshold(
     gray = _enhance_contrast_gray(gray)
     if blur_ksz is not None:
         gray = cv2.GaussianBlur(gray, blur_ksz, 0)
-    blur = gray
+    gray_processed = gray
 
     if mask is not None:
         # Find median of masked pixels only
-        masked_pixels = blur[mask > 0]
+        masked_pixels = gray_processed[mask > 0]
         if len(masked_pixels) > 0:
             threshold = int(np.median(masked_pixels))
         else:
             threshold = 127
     else:
         # Use overall median
-        threshold = int(np.median(blur))
+        threshold = int(np.median(gray_processed))
 
-    _, bw = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY)
+    _, bw = cv2.threshold(gray_processed, threshold, 255, cv2.THRESH_BINARY)
     return (bw // 255).astype(np.uint8)
 
 
