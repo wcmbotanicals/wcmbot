@@ -10,26 +10,14 @@ requires-python = ">=3.10"
 license = "MIT"
 dynamic = ["version"]
 
-dependencies = [
-    "Pillow>=10.0.0",
-    "opencv-python>=4.8.0,<4.12.0",
-    "numpy>=1.24.0,<2.0",
-    "gradio>=5.0.0",
-    "plotly>=5.22.0",
-]
+dependencies = ["Pillow", "opencv-python", "numpy", "gradio", "plotly"]
 
 [project.urls]
 repository = "https://github.com/wcmbotanicals/wcmbot"
 space = "https://huggingface.co/spaces/wcmbotanicals/wcmbot"
 
 [project.optional-dependencies]
-dev = [
-    "ruff",
-    "pytest>=7.4.0",
-    "playwright>=1.40.0",
-    "pytest-playwright>=0.4.3",
-    "versioneer[toml]==0.28",
-]
+dev = ["ruff", "pytest", "playwright", "pytest-playwright", "versioneer[toml]"]
 
 [tool.versioneer]
 VCS = "git"
