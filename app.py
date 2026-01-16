@@ -878,7 +878,15 @@ DEFAULT_TEMPLATE_SPEC = TEMPLATE_REGISTRY.get(DEFAULT_TEMPLATE_ID)
 for spec in TEMPLATE_REGISTRY.templates.values():
     check_template_exists(spec.template_path)
     try:
-        preload_template_cache(str(spec.template_path))
+        overrides = spec.matcher_overrides
+        if "binarize_blur_ksz" in overrides or "match_blur_ksz" in overrides:
+            preload_template_cache(
+                str(spec.template_path),
+                blur_ksz=overrides.get("match_blur_ksz"),
+                binarize_blur_ksz=overrides.get("binarize_blur_ksz"),
+            )
+        else:
+            preload_template_cache(str(spec.template_path))
     except Exception:
         # Preloading is an optimization; if it fails, templates will load on-demand
         pass

@@ -22,6 +22,12 @@
       "auto_align_default": true,
       "piece_dirs": ["media/pieces/grass_puzzle"],
       "matcher_overrides": {
+        "coarse_factor": 1.0,
+        "grid_center_weight": 0.0,
+        "grid_center_min_score": 0.0,
+        "binarize_blur_ksz": null,
+        "resize_rethreshold": true,
+        "match_blur_ksz": null,
         "mask_mode": "hsv",
         "mask_hsv_ranges": [
           [[35, 30, 30], [90, 255, 255]],

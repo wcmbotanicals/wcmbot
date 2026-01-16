@@ -31,10 +31,6 @@ COARSE_PAD_PX = (
     COARSE_PADDING_PIXELS  # Backward-compatible alias; prefer COARSE_PADDING_PIXELS
 )
 COARSE_MIN_SIDE = 240
-# Increased from 0.7 to 2.0 to more strongly favor candidates whose centers
-# align with the expected grid cell centers. Empirically this reduces high-score
-# false positives near borders/partial pieces and better reflects the puzzle's
-# regular grid structure without changing the rest of the scoring logic.
 GRID_CENTER_WEIGHT = 2.0
 GRID_CENTER_MIN_SCORE = 0.5
 
@@ -62,6 +58,9 @@ AUTO_ALIGN_HOUGH_MAX_GAP = 20
 INFER_KNOBS_TIE_EPS = 0.01
 INFER_KNOBS_LOW_FILL = 0.50
 INFER_KNOBS_HIGH_FILL = 0.65
+BINARIZE_BLUR_KSZ = (5, 5)
+MATCH_BLUR_KSZ = (3, 3)
+RESIZE_RETHRESHOLD = False
 
 
 # ---------- helper dataclasses ----------
@@ -83,6 +82,9 @@ class MatcherConfig:
     grid_center_weight: float = GRID_CENTER_WEIGHT
     grid_center_min_score: float = GRID_CENTER_MIN_SCORE
     knob_width_frac: float = KNOB_WIDTH_FRAC
+    binarize_blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ
+    resize_rethreshold: bool = RESIZE_RETHRESHOLD
+    match_blur_ksz: Optional[Tuple[int, int]] = MATCH_BLUR_KSZ
     mask_mode: str = "blue"
     mask_hsv_ranges: Optional[List[Tuple[List[int], List[int]]]] = None
     mask_kernel_size: int = 7
@@ -108,6 +110,9 @@ def build_matcher_config(
         "grid_center_weight": GRID_CENTER_WEIGHT,
         "grid_center_min_score": GRID_CENTER_MIN_SCORE,
         "knob_width_frac": KNOB_WIDTH_FRAC,
+        "binarize_blur_ksz": BINARIZE_BLUR_KSZ,
+        "resize_rethreshold": RESIZE_RETHRESHOLD,
+        "match_blur_ksz": MATCH_BLUR_KSZ,
         "mask_mode": "blue",
         "mask_hsv_ranges": None,
         "mask_kernel_size": 7,
@@ -119,6 +124,9 @@ def build_matcher_config(
     for key, value in overrides.items():
         if key not in payload:
             raise ValueError(f"Unknown matcher override: {key}")
+        if key in ("binarize_blur_ksz", "match_blur_ksz"):
+            payload[key] = _normalize_kernel(value)
+            continue
         payload[key] = value
     return MatcherConfig(**payload)
 
@@ -136,6 +144,7 @@ class MatchPayload:
     knobs_x: Optional[int] = None
     knobs_y: Optional[int] = None
     knobs_inferred: bool = False
+    resize_rethreshold: bool = False
 
 
 @dataclass
@@ -144,12 +153,23 @@ class TemplateCacheEntry:
     template_rgb: np.ndarray
     template_bin: np.ndarray
     blur_cache: Dict[Optional[Tuple[int, int]], np.ndarray]
+    binarize_blur_ksz: Optional[Tuple[int, int]]
 
 
-_TEMPLATE_CACHE: Dict[str, TemplateCacheEntry] = {}
+_TEMPLATE_CACHE: Dict[Tuple[str, Optional[Tuple[int, int]]], TemplateCacheEntry] = {}
 
 
 # ---------- helpers ----------
+def _normalize_kernel(
+    kernel: Tuple[int, int] | List[int] | None,
+) -> Optional[Tuple[int, int]]:
+    if kernel is None:
+        return None
+    if isinstance(kernel, (list, tuple)) and len(kernel) == 2:
+        return int(kernel[0]), int(kernel[1])
+    raise ValueError("binarize_blur_ksz must be a 2-item list/tuple or null.")
+
+
 def _load_image(path: str) -> np.ndarray:
     img = cv2.imread(path, cv2.IMREAD_COLOR)
     if img is None:
@@ -157,7 +177,9 @@ def _load_image(path: str) -> np.ndarray:
     return img
 
 
-def _load_template_cached(path: str) -> TemplateCacheEntry:
+def _load_template_cached(
+    path: str, binarize_blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ
+) -> TemplateCacheEntry:
     """
     Load a template image with caching and mtime-based invalidation.
 
@@ -177,19 +199,22 @@ def _load_template_cached(path: str) -> TemplateCacheEntry:
     if not os.path.exists(path):
         raise RuntimeError(f"Failed to load image: {path}")
     mtime = os.path.getmtime(path)
-    entry = _TEMPLATE_CACHE.get(path)
+    blur_ksz = _normalize_kernel(binarize_blur_ksz)
+    cache_key = (path, blur_ksz)
+    entry = _TEMPLATE_CACHE.get(cache_key)
     if entry and entry.mtime == mtime:
         return entry
     template = _load_image(path)
     template_rgb = cv2.cvtColor(template, cv2.COLOR_BGR2RGB)
-    template_bin = _binarize_two_color(template)
+    template_bin = _binarize_two_color(template, blur_ksz)
     entry = TemplateCacheEntry(
         mtime=mtime,
         template_rgb=template_rgb,
         template_bin=template_bin,
         blur_cache={},
+        binarize_blur_ksz=blur_ksz,
     )
-    _TEMPLATE_CACHE[path] = entry
+    _TEMPLATE_CACHE[cache_key] = entry
     return entry
 
 
@@ -232,7 +257,9 @@ def _get_template_blur_f32(
 
 
 def preload_template_cache(
-    template_image_path: str, blur_ksz: Optional[Tuple[int, int]] = (3, 3)
+    template_image_path: str,
+    blur_ksz: Optional[Tuple[int, int]] = MATCH_BLUR_KSZ,
+    binarize_blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ,
 ) -> None:
     """
     Preload a template image and its blurred binary representation into the cache.
@@ -249,7 +276,9 @@ def preload_template_cache(
         blur_ksz: Optional Gaussian blur kernel size to precompute on the
             binarized template. If None, the unblurred template is cached.
     """
-    entry = _load_template_cached(template_image_path)
+    entry = _load_template_cached(
+        template_image_path, binarize_blur_ksz=binarize_blur_ksz
+    )
     _get_template_blur_f32(entry.template_bin, blur_ksz, entry.blur_cache)
 
 
@@ -259,16 +288,21 @@ def _enhance_contrast_gray(gray: np.ndarray) -> np.ndarray:
     return clahe.apply(gray)
 
 
-def _binarize_two_color(img_bgr: np.ndarray) -> np.ndarray:
+def _binarize_two_color(
+    img_bgr: np.ndarray, blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ
+) -> np.ndarray:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = _enhance_contrast_gray(gray)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, bw = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if blur_ksz is not None:
+        gray = cv2.GaussianBlur(gray, blur_ksz, 0)
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return (bw // 255).astype(np.uint8)
 
 
 def _binarize_median_threshold(
-    img_bgr: np.ndarray, mask: Optional[np.ndarray] = None
+    img_bgr: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ,
 ) -> np.ndarray:
     """Binarize using median intensity of masked region as threshold.
 
@@ -277,20 +311,22 @@ def _binarize_median_threshold(
     """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = _enhance_contrast_gray(gray)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    if blur_ksz is not None:
+        gray = cv2.GaussianBlur(gray, blur_ksz, 0)
+    gray_processed = gray
 
     if mask is not None:
         # Find median of masked pixels only
-        masked_pixels = blur[mask > 0]
+        masked_pixels = gray_processed[mask > 0]
         if len(masked_pixels) > 0:
             threshold = int(np.median(masked_pixels))
         else:
             threshold = 127
     else:
         # Use overall median
-        threshold = int(np.median(blur))
+        threshold = int(np.median(gray_processed))
 
-    _, bw = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY)
+    _, bw = cv2.threshold(gray_processed, threshold, 255, cv2.THRESH_BINARY)
     return (bw // 255).astype(np.uint8)
 
 
@@ -928,8 +964,10 @@ def _match_template_multiscale_binary(
             if ws <= 0 or hs <= 0 or ws >= tw or hs >= th:
                 continue
 
-            patt_s = cv2.resize(P_r, (ws, hs), interpolation=cv2.INTER_NEAREST)
-            mask_s = cv2.resize(M_r01, (ws, hs), interpolation=cv2.INTER_NEAREST)
+            patt_s = _resize_for_match(
+                P_r, ws, hs, rethreshold=config.resize_rethreshold
+            )
+            mask_s = _resize_for_match(M_r01, ws, hs)
 
             if blur_ksz is not None:
                 patt_s_blur = cv2.GaussianBlur(patt_s, blur_ksz, 0).astype(np.float32)
@@ -1016,16 +1054,40 @@ def _binary_to_uint8(img01: np.ndarray) -> np.ndarray:
     return img01.astype(np.uint8) * 255
 
 
+def _resize_for_match(
+    img: np.ndarray,
+    target_w: int,
+    target_h: int,
+    rethreshold: bool = False,
+) -> np.ndarray:
+    h, w = img.shape[:2]
+    if target_w == w and target_h == h:
+        return img
+    if target_w < w or target_h < h:
+        interp = cv2.INTER_AREA
+    else:
+        interp = cv2.INTER_LINEAR
+    resized = cv2.resize(img, (target_w, target_h), interpolation=interp)
+    if rethreshold:
+        if resized.dtype != np.uint8:
+            resized = np.clip(resized, 0, 255).astype(np.uint8)
+        resized = (resized > 127).astype(np.uint8) * 255
+    return resized
+
+
 def _create_resized_preview(
-    piece_bin: np.ndarray, piece_mask: np.ndarray, match: Dict
+    piece_bin: np.ndarray,
+    piece_mask: np.ndarray,
+    match: Dict,
+    rethreshold: bool = False,
 ) -> np.ndarray:
     rot = match["rot"]
     rot_bin = _rotate_img(_binary_to_uint8(piece_bin), rot)
     rot_mask = _rotate_img(_binary_to_uint8(piece_mask), rot)
     ws = max(1, match["br"][0] - match["tl"][0])
     hs = max(1, match["br"][1] - match["tl"][1])
-    rv = cv2.resize(rot_bin, (ws, hs), interpolation=cv2.INTER_NEAREST)
-    rv_mask = cv2.resize(rot_mask, (ws, hs), interpolation=cv2.INTER_NEAREST)
+    rv = _resize_for_match(rot_bin, ws, hs, rethreshold=rethreshold)
+    rv_mask = _resize_for_match(rot_mask, ws, hs)
     rv = (rv * (rv_mask > 127)).astype(np.uint8)
     return rv
 
@@ -1250,7 +1312,9 @@ def find_piece_in_template(
         t0 = time.perf_counter()
         marks: List[Tuple[str, float]] = []
 
-    template_entry = _load_template_cached(template_image_path)
+    template_entry = _load_template_cached(
+        template_image_path, config.binarize_blur_ksz
+    )
     if profile:
         marks.append(("template", time.perf_counter()))
 
@@ -1278,7 +1342,10 @@ def find_piece_in_template(
         marks.append(("crop", time.perf_counter()))
 
     piece_bin = (
-        _binarize_median_threshold(piece_crop, piece_mask_crop) * piece_mask_crop
+        _binarize_median_threshold(
+            piece_crop, piece_mask_crop, config.binarize_blur_ksz
+        )
+        * piece_mask_crop
     )
     piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
     if profile:
@@ -1310,7 +1377,9 @@ def find_piece_in_template(
             piece_crop = piece[y0:y1, x0:x1].copy()
             piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
             piece_bin = (
-                _binarize_median_threshold(piece_crop, piece_mask_crop)
+                _binarize_median_threshold(
+                    piece_crop, piece_mask_crop, config.binarize_blur_ksz
+                )
                 * piece_mask_crop
             )
             piece_rgb = cv2.cvtColor(piece_crop, cv2.COLOR_BGR2RGB)
@@ -1338,7 +1407,7 @@ def find_piece_in_template(
         marks.append(("scale", time.perf_counter()))
 
     template_blur_f32 = _get_template_blur_f32(
-        template_bin, (3, 3), template_blur_cache
+        template_bin, config.match_blur_ksz, template_blur_cache
     )
     _, top_matches = _match_template_multiscale_binary(
         template_bin,
@@ -1349,7 +1418,7 @@ def find_piece_in_template(
         scales,
         config.rotations,
         config,
-        blur_ksz=(3, 3),
+        blur_ksz=config.match_blur_ksz,
         corr_method=cv2.TM_CCORR_NORMED,
         template_blur_f32=template_blur_f32,
     )
@@ -1391,6 +1460,7 @@ def find_piece_in_template(
         knobs_x=knobs_x,
         knobs_y=knobs_y,
         knobs_inferred=knobs_inferred,
+        resize_rethreshold=config.resize_rethreshold,
     )
 
 
@@ -1416,7 +1486,12 @@ def render_primary_views(
     match = payload.matches[idx]
     static = _static_views(payload)
     preview = _ensure_three_channel(
-        _create_resized_preview(payload.piece_bin, payload.piece_mask, match)
+        _create_resized_preview(
+            payload.piece_bin,
+            payload.piece_mask,
+            match,
+            rethreshold=payload.resize_rethreshold,
+        )
     )
     zoom = _render_zoom_image(
         payload.template_rgb,

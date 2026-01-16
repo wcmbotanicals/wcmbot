@@ -4,11 +4,31 @@ import cv2
 import numpy as np
 import pytest
 
-from wcmbot.matcher import COLS, ROWS, _background_bgr, find_piece_in_template
+from wcmbot.matcher import (
+    COLS,
+    ROWS,
+    _background_bgr,
+    build_matcher_config,
+    find_piece_in_template,
+)
+from wcmbot.template_settings import load_template_registry
 
 HERE = os.path.dirname(__file__)
-TEMPLATE_PATH = os.path.join(HERE, "..", "media", "templates", "sample_puzzle.png")
-PIECES_DIR = os.path.join(HERE, "..", "media", "pieces", "sample_puzzle")
+TEMPLATE_REGISTRY = load_template_registry()
+SAMPLE_SPEC = TEMPLATE_REGISTRY.get("sample_puzzle")
+SAMPLE_TEMPLATE_PATH = os.fspath(SAMPLE_SPEC.template_path)
+SAMPLE_PIECES_DIR = (
+    os.fspath(SAMPLE_SPEC.piece_dirs[0])
+    if SAMPLE_SPEC.piece_dirs
+    else os.path.join(HERE, "..", "media", "pieces", "sample_puzzle")
+)
+GRASS_SPEC = TEMPLATE_REGISTRY.get("grass_puzzle")
+GRASS_TEMPLATE_PATH = os.fspath(GRASS_SPEC.template_path)
+GRASS_PIECES_DIR = (
+    os.fspath(GRASS_SPEC.piece_dirs[0])
+    if GRASS_SPEC.piece_dirs
+    else os.path.join(HERE, "..", "media", "pieces", "grass_puzzle")
+)
 
 BASE_CASES = [
     ("piece_1.jpg", 0, 0, 90, 7, 25),
@@ -25,6 +45,16 @@ BASE_CASES = [
     ("piece_12.jpg", 1, 1, 0, 18, 21),
     ("piece_13.jpg", 2, 0, 90, 2, 4),
     ("piece_14.jpg", 0, 2, 180, 25, 10),
+]
+GRASS_CASES = [
+    ("grass_piece_1.jpg", 0, 2, 270, 21, 25),
+    ("grass_piece_2.jpg", 2, 2, 0, 6, 3),
+    ("grass_piece_3.jpg", 1, 2, 0, 11, 24),
+    ("grass_piece_4.jpg", 0, 0, 0, 28, 13),
+    ("grass_piece_5.jpg", 1, 1, 0, 27, 13),
+]
+EXPECTED_LOCATION_CASES = [("sample_puzzle", *case) for case in BASE_CASES] + [
+    ("grass_puzzle", *case) for case in GRASS_CASES
 ]
 
 ROTATION_SWEEP_DEGREES = [-15, -10, -5, -2.5, 0, 2.5, 5, 10, 15]
@@ -54,7 +84,7 @@ def _rotate_piece_image(img: np.ndarray, angle_deg: float) -> np.ndarray:
 def _write_rotated_piece(
     tmp_path: os.PathLike, piece_filename: str, angle_deg: float
 ) -> str:
-    piece_path = os.path.join(PIECES_DIR, piece_filename)
+    piece_path = os.path.join(SAMPLE_PIECES_DIR, piece_filename)
     img = cv2.imread(piece_path, cv2.IMREAD_COLOR)
     if img is None:
         raise RuntimeError(f"Failed to load piece image: {piece_path}")
@@ -68,14 +98,26 @@ def _write_rotated_piece(
 
 @pytest.mark.e2e
 @pytest.mark.parametrize(
-    "piece_filename,knobs_x,knobs_y,exp_rot,exp_row,exp_col",
-    BASE_CASES,
+    "template_id,piece_filename,knobs_x,knobs_y,exp_rot,exp_row,exp_col",
+    EXPECTED_LOCATION_CASES,
 )
 def test_find_piece_expected_location(
-    piece_filename, knobs_x, knobs_y, exp_rot, exp_row, exp_col
+    template_id, piece_filename, knobs_x, knobs_y, exp_rot, exp_row, exp_col
 ):
-    template_path = TEMPLATE_PATH
-    piece_path = os.path.join(PIECES_DIR, piece_filename)
+    spec = TEMPLATE_REGISTRY.get(template_id)
+    template_path = os.fspath(spec.template_path)
+    if template_id == "grass_puzzle":
+        pieces_dir = GRASS_PIECES_DIR
+    else:
+        pieces_dir = SAMPLE_PIECES_DIR
+    piece_path = os.path.join(pieces_dir, piece_filename)
+    matcher_config = build_matcher_config(
+        {
+            "rows": spec.rows,
+            "cols": spec.cols,
+            **spec.matcher_overrides,
+        }
+    )
 
     payload = find_piece_in_template(
         piece_image_path=piece_path,
@@ -84,6 +126,7 @@ def test_find_piece_expected_location(
         knobs_y=None,
         infer_knobs=True,
         auto_align=True,
+        matcher_config=matcher_config,
     )
 
     assert payload.matches, "No matches returned by matcher"
@@ -115,9 +158,9 @@ def test_find_piece_expected_location_with_rotation(
     exp_col,
     extra_deg,
 ):
-    template_path = TEMPLATE_PATH
+    template_path = SAMPLE_TEMPLATE_PATH
     if extra_deg == 0:
-        piece_path = os.path.join(PIECES_DIR, piece_filename)
+        piece_path = os.path.join(SAMPLE_PIECES_DIR, piece_filename)
     else:
         piece_path = _write_rotated_piece(tmp_path, piece_filename, extra_deg)
 
@@ -148,11 +191,11 @@ def test_find_piece_expected_location_with_rotation(
 @pytest.mark.parametrize("template_rotation", [0, 180])
 def test_find_piece_with_template_rotation(template_rotation):
     piece_filename, knobs_x, knobs_y, exp_rot, exp_row, exp_col = TEMPLATE_ROTATION_CASE
-    piece_path = os.path.join(PIECES_DIR, piece_filename)
+    piece_path = os.path.join(SAMPLE_PIECES_DIR, piece_filename)
 
     payload = find_piece_in_template(
         piece_image_path=piece_path,
-        template_image_path=TEMPLATE_PATH,
+        template_image_path=SAMPLE_TEMPLATE_PATH,
         knobs_x=knobs_x,
         knobs_y=knobs_y,
         auto_align=True,
