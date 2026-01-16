@@ -36,6 +36,7 @@ VIEW_KEYS = [
     "zoom_focus",
     "zoom_template",
     "zoom_piece",
+    "zoom_pair",
 ]
 
 VIEW_LABELS = {
@@ -48,6 +49,7 @@ VIEW_LABELS = {
     "zoom_focus": "Best match (zoomed)",
     "zoom_template": "Best match (template view)",
     "zoom_piece": "Piece (masked + rotated)",
+    "zoom_pair": "Best match (side-by-side)",
 }
 
 TEMPLATE_ROTATION_OPTIONS = [0, 90, 180, 270]
@@ -533,6 +535,7 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
 
     final_views = {key: None for key in VIEW_KEYS}
     final_views["zoom_focus"] = combined_zoom
+    final_views["zoom_pair"] = combined_zoom
     final_views["zoom_template"] = (
         template_view if template_view is not None else make_zoomable_plot(None)
     )
@@ -682,18 +685,22 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             gr.Markdown("Use the controls to zoom and pan the image.")
 
     gr.Markdown("### Best match (side-by-side)")
-    with gr.Row():
+    image_components["zoom_pair"] = gr.Image(
+        label="Piece + template match (outline)",
+        type="numpy",
+        interactive=False,
+        height=300,
+    )
+    with gr.Row(visible=False):
         image_components["zoom_piece"] = gr.Image(
             label="Piece (masked + rotated)",
             type="numpy",
             interactive=False,
-            height=340,
         )
         image_components["zoom_focus"] = gr.Image(
             label="Template match (outline)",
             type="numpy",
             interactive=False,
-            height=340,
         )
 
     # Diagnostic outputs - hidden by default, shown when diagnostic mode enabled
@@ -704,7 +711,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     other_keys = [
         key
         for key in VIEW_KEYS
-        if key not in ("zoom_template", "zoom_focus", "zoom_piece")
+        if key not in ("zoom_template", "zoom_focus", "zoom_piece", "zoom_pair")
     ]
 
     diagnostic_row1 = gr.Row(visible=False)

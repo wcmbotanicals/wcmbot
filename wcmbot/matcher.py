@@ -1068,6 +1068,57 @@ def _render_masked_piece_view(
     return piece_view
 
 
+def _combine_side_by_side(
+    left: Optional[np.ndarray],
+    right: Optional[np.ndarray],
+    gap: int = 4,
+    background: int = 255,
+    min_height: int = 0,
+    max_width: int = 0,
+) -> Optional[np.ndarray]:
+    if left is None and right is None:
+        return None
+    if left is None:
+        return right
+    if right is None:
+        return left
+
+    left = _ensure_three_channel(left)
+    right = _ensure_three_channel(right)
+    if left.dtype != np.uint8:
+        left = np.clip(left, 0, 255).astype(np.uint8)
+    if right.dtype != np.uint8:
+        right = np.clip(right, 0, 255).astype(np.uint8)
+
+    h1 = left.shape[0]
+    h2 = right.shape[0]
+    target_h = max(h1, h2)
+    if min_height > 0:
+        target_h = max(target_h, min_height)
+
+    def _resize_to_height(img: np.ndarray, height: int) -> np.ndarray:
+        h, w = img.shape[:2]
+        if h == height:
+            return img
+        new_w = max(1, int(round(w * height / h)))
+        interp = cv2.INTER_AREA if height < h else cv2.INTER_CUBIC
+        return cv2.resize(img, (new_w, height), interpolation=interp)
+
+    left = _resize_to_height(left, target_h)
+    right = _resize_to_height(right, target_h)
+
+    total_w = left.shape[1] + gap + right.shape[1]
+    canvas = np.full((target_h, total_w, 3), background, dtype=np.uint8)
+    canvas[: left.shape[0], : left.shape[1]] = left
+    x_off = left.shape[1] + gap
+    canvas[: right.shape[0], x_off : x_off + right.shape[1]] = right
+    if max_width > 0 and canvas.shape[1] > max_width:
+        scale = max_width / canvas.shape[1]
+        new_h = max(1, int(round(canvas.shape[0] * scale)))
+        canvas = cv2.resize(canvas, (max_width, new_h), interpolation=cv2.INTER_AREA)
+    return canvas
+
+
 def _render_zoom_image(
     template_rgb: np.ndarray,
     template_shape: Tuple[int, int],
@@ -1376,6 +1427,20 @@ def render_primary_views(
         zoom=98,
     )
     piece_view = _render_masked_piece_view(payload.piece_rgb, payload.piece_mask, match)
+    zoom_pair_view = _render_zoom_image(
+        payload.template_rgb,
+        payload.template_shape,
+        payload.piece_bin,
+        payload.piece_mask,
+        match,
+        zoom=100,
+    )
+    zoom_pair = _combine_side_by_side(
+        piece_view,
+        zoom_pair_view,
+        min_height=300,
+        max_width=900,
+    )
     zoom_full = _render_zoom_image(
         payload.template_rgb,
         payload.template_shape,
@@ -1389,6 +1454,7 @@ def render_primary_views(
             "resized_piece": preview,
             "zoom_piece": piece_view,
             "zoom_focus": zoom,
+            "zoom_pair": zoom_pair,
             "zoom_template": zoom_full,
         }
     )
