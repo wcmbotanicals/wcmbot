@@ -56,6 +56,11 @@ jobs:
         run: |
           uv sync --all-extras
 
+      # Step 5: Run linting with Ruff
+      - name: Run Ruff lint checks
+        run: |
+          uv run ruff check
+
       # Step 5: Install Playwright browsers
       # Required for E2E tests
       - name: Install Playwright browsers
