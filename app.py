@@ -35,6 +35,7 @@ VIEW_KEYS = [
     "resized_piece",
     "zoom_focus",
     "zoom_template",
+    "zoom_piece",
 ]
 
 VIEW_LABELS = {
@@ -46,6 +47,7 @@ VIEW_LABELS = {
     "resized_piece": "Resized piece preview",
     "zoom_focus": "Best match (zoomed)",
     "zoom_template": "Best match (template view)",
+    "zoom_piece": "Piece (masked + rotated)",
 }
 
 TEMPLATE_ROTATION_OPTIONS = [0, 90, 180, 270]
@@ -348,7 +350,7 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
         try:
             result = solve_puzzle(tmp_path, template_id, auto_align, rotation)
             all_results.append((idx, r, c, result))
-        except Exception as exc:
+        except Exception:
             all_results.append((idx, r, c, None))
         finally:
             try:
@@ -679,13 +681,20 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             )
             gr.Markdown("Use the controls to zoom and pan the image.")
 
-    gr.Markdown("### Best match (zoomed)")
-    image_components["zoom_focus"] = gr.Image(
-        label="Zoomed piece + neighbors",
-        type="numpy",
-        interactive=False,
-        height=340,
-    )
+    gr.Markdown("### Best match (side-by-side)")
+    with gr.Row():
+        image_components["zoom_piece"] = gr.Image(
+            label="Piece (masked + rotated)",
+            type="numpy",
+            interactive=False,
+            height=340,
+        )
+        image_components["zoom_focus"] = gr.Image(
+            label="Template match (outline)",
+            type="numpy",
+            interactive=False,
+            height=340,
+        )
 
     # Diagnostic outputs - hidden by default, shown when diagnostic mode enabled
     diagnostic_header = gr.Markdown(
@@ -693,7 +702,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
 
     other_keys = [
-        key for key in VIEW_KEYS if key not in ("zoom_template", "zoom_focus")
+        key
+        for key in VIEW_KEYS
+        if key not in ("zoom_template", "zoom_focus", "zoom_piece")
     ]
 
     diagnostic_row1 = gr.Row(visible=False)

@@ -1020,7 +1020,6 @@ def _create_resized_preview(
     piece_bin: np.ndarray, piece_mask: np.ndarray, match: Dict
 ) -> np.ndarray:
     rot = match["rot"]
-    scale = match["scale"]
     rot_bin = _rotate_img(_binary_to_uint8(piece_bin), rot)
     rot_mask = _rotate_img(_binary_to_uint8(piece_mask), rot)
     ws = max(1, match["br"][0] - match["tl"][0])
@@ -1031,6 +1030,44 @@ def _create_resized_preview(
     return rv
 
 
+def _render_masked_piece_view(
+    piece_rgb: np.ndarray, piece_mask: np.ndarray, match: Dict
+) -> np.ndarray:
+    rot = match["rot"]
+    mask01 = (piece_mask > 0).astype(np.uint8)
+    masked_rgb = piece_rgb.copy()
+    masked_rgb[mask01 == 0] = 255
+    rot_rgb = _rotate_img(
+        masked_rgb,
+        rot,
+        interpolation=cv2.INTER_LINEAR,
+        border_value=(255, 255, 255),
+    )
+    rot_mask = _rotate_img(
+        mask01 * 255,
+        rot,
+        interpolation=cv2.INTER_NEAREST,
+        border_value=0,
+    )
+
+    target_h = max(1, match["br"][1] - match["tl"][1])
+    target_w = max(1, match["br"][0] - match["tl"][0])
+    if rot_rgb.shape[0] != target_h or rot_rgb.shape[1] != target_w:
+        interp = (
+            cv2.INTER_AREA
+            if rot_rgb.shape[0] > target_h or rot_rgb.shape[1] > target_w
+            else cv2.INTER_LINEAR
+        )
+        rot_rgb = cv2.resize(rot_rgb, (target_w, target_h), interpolation=interp)
+        rot_mask = cv2.resize(
+            rot_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST
+        )
+
+    piece_view = rot_rgb.copy()
+    piece_view[rot_mask <= 127] = 255
+    return piece_view
+
+
 def _render_zoom_image(
     template_rgb: np.ndarray,
     template_shape: Tuple[int, int],
@@ -1038,6 +1075,7 @@ def _render_zoom_image(
     piece_mask: np.ndarray,
     match: Dict,
     zoom: int = 98,
+    overlay_piece: bool = False,
 ) -> np.ndarray:
     tlx, tly = match["tl"]
     brx, bry = match["br"]
@@ -1069,48 +1107,57 @@ def _render_zoom_image(
     zy1 = max(zy0 + 1, min(zy1, th))
 
     region_rgb = template_rgb[zy0:zy1, zx0:zx1].copy()
-    piece_x0 = tlx - zx0
-    piece_y0 = tly - zy0
-    piece_x1 = piece_x0 + (brx - tlx)
-    piece_y1 = piece_y0 + (bry - tly)
 
-    rot = match["rot"]
-    rot_bin = _rotate_img(_binary_to_uint8(piece_bin), rot)
-    rot_mask = _rotate_img(_binary_to_uint8(piece_mask), rot)
-    target_h = max(1, piece_y1 - piece_y0)
-    target_w = max(1, piece_x1 - piece_x0)
-    pv = cv2.resize(rot_bin, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-    mask = cv2.resize(rot_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-    pv3 = _ensure_three_channel(pv)
+    if overlay_piece:
+        piece_x0 = tlx - zx0
+        piece_y0 = tly - zy0
+        piece_x1 = piece_x0 + (brx - tlx)
+        piece_y1 = piece_y0 + (bry - tly)
 
-    if (
-        piece_x0 < region_rgb.shape[1]
-        and piece_y0 < region_rgb.shape[0]
-        and piece_x1 > 0
-        and piece_y1 > 0
-    ):
-        src_x0 = max(0, -piece_x0)
-        src_y0 = max(0, -piece_y0)
-        src_x1 = pv3.shape[1] - max(0, piece_x1 - region_rgb.shape[1])
-        src_y1 = pv3.shape[0] - max(0, piece_y1 - region_rgb.shape[0])
-        dst_x0 = max(0, piece_x0)
-        dst_y0 = max(0, piece_y0)
-        dst_x1 = min(region_rgb.shape[1], piece_x1)
-        dst_y1 = min(region_rgb.shape[0], piece_y1)
+        rot = match["rot"]
+        rot_bin = _rotate_img(_binary_to_uint8(piece_bin), rot)
+        rot_mask = _rotate_img(_binary_to_uint8(piece_mask), rot)
+        target_h = max(1, piece_y1 - piece_y0)
+        target_w = max(1, piece_x1 - piece_x0)
+        pv = cv2.resize(rot_bin, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        mask = cv2.resize(
+            rot_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST
+        )
+        pv3 = _ensure_three_channel(pv)
 
-        if dst_x1 > dst_x0 and dst_y1 > dst_y0 and src_x1 > src_x0 and src_y1 > src_y0:
-            piece_patch = pv3[src_y0:src_y1, src_x0:src_x1]
-            mask_patch = mask[src_y0:src_y1, src_x0:src_x1]
-            template_patch = region_rgb[dst_y0:dst_y1, dst_x0:dst_x1]
-            if piece_patch.shape[:2] == template_patch.shape[:2]:
-                mask_norm = (mask_patch > 127).astype(np.float32)
-                if mask_norm.ndim == 2:
-                    mask_norm = mask_norm[:, :, np.newaxis]
-                blended_patch = (
-                    template_patch * (1 - mask_norm * 0.4)
-                    + piece_patch * (mask_norm * 0.4)
-                ).astype(np.uint8)
-                region_rgb[dst_y0:dst_y1, dst_x0:dst_x1] = blended_patch
+        if (
+            piece_x0 < region_rgb.shape[1]
+            and piece_y0 < region_rgb.shape[0]
+            and piece_x1 > 0
+            and piece_y1 > 0
+        ):
+            src_x0 = max(0, -piece_x0)
+            src_y0 = max(0, -piece_y0)
+            src_x1 = pv3.shape[1] - max(0, piece_x1 - region_rgb.shape[1])
+            src_y1 = pv3.shape[0] - max(0, piece_y1 - region_rgb.shape[0])
+            dst_x0 = max(0, piece_x0)
+            dst_y0 = max(0, piece_y0)
+            dst_x1 = min(region_rgb.shape[1], piece_x1)
+            dst_y1 = min(region_rgb.shape[0], piece_y1)
+
+            if (
+                dst_x1 > dst_x0
+                and dst_y1 > dst_y0
+                and src_x1 > src_x0
+                and src_y1 > src_y0
+            ):
+                piece_patch = pv3[src_y0:src_y1, src_x0:src_x1]
+                mask_patch = mask[src_y0:src_y1, src_x0:src_x1]
+                template_patch = region_rgb[dst_y0:dst_y1, dst_x0:dst_x1]
+                if piece_patch.shape[:2] == template_patch.shape[:2]:
+                    mask_norm = (mask_patch > 127).astype(np.float32)
+                    if mask_norm.ndim == 2:
+                        mask_norm = mask_norm[:, :, np.newaxis]
+                    blended_patch = (
+                        template_patch * (1 - mask_norm * 0.4)
+                        + piece_patch * (mask_norm * 0.4)
+                    ).astype(np.uint8)
+                    region_rgb[dst_y0:dst_y1, dst_x0:dst_x1] = blended_patch
 
     contours = match.get("contours", [])
     region_bgr = cv2.cvtColor(region_rgb, cv2.COLOR_RGB2BGR)
@@ -1328,6 +1375,7 @@ def render_primary_views(
         match,
         zoom=98,
     )
+    piece_view = _render_masked_piece_view(payload.piece_rgb, payload.piece_mask, match)
     zoom_full = _render_zoom_image(
         payload.template_rgb,
         payload.template_shape,
@@ -1339,6 +1387,7 @@ def render_primary_views(
     static.update(
         {
             "resized_piece": preview,
+            "zoom_piece": piece_view,
             "zoom_focus": zoom,
             "zoom_template": zoom_full,
         }
