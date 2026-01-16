@@ -358,165 +358,189 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
                 pass
 
         # Build and yield incremental update after each piece
-        coord_lines = ["| Piece | Grid Position | Row | Col |", "|-------|---------------|-----|-----|"]
+        coord_lines = [
+            "| Piece | Grid Position | Row | Col |",
+            "|-------|---------------|-----|-----|",
+        ]
         for i, (pidx, pr, pc, presult) in enumerate(all_results):
             piece_color = colors_rgb[pidx % len(colors_rgb)]
             piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{pidx + 1}**</span>'
-                if presult is None:
-                    coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | Error | Error |")
-                    continue
-                outputs = list(presult)
-                location_idx = len(VIEW_KEYS)
-                location_text = str(outputs[location_idx]) if location_idx < len(outputs) else ""
-                try:
-                    if "**Row:**" in location_text and "**Col:**" in location_text:
-                        row_match = location_text.split("**Row:**")[1].split("**")[0].strip()
-                        col_match = location_text.split("**Col:**")[1].split("\n")[0].strip()
-                        coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | {row_match} | {col_match} |")
-                    else:
-                        coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |")
-                except (IndexError, AttributeError):
-                    coord_lines.append(f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |")
-        
-            # Add placeholder rows for unprocessed pieces
-            remaining = total - len(all_results)
-            for _ in range(remaining):
-                coord_lines.append("| - | - | - | - |")
-
-            coord_markdown = "\n".join(coord_lines)
-
-            yield (
-                None,  # image plot (unchanged here)
-                coord_markdown,
-                f"Processed {len(all_results)}/{total} pieces",
+            if presult is None:
+                coord_lines.append(
+                    f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | Error | Error |"
+                )
+                continue
+            outputs = list(presult)
+            location_idx = len(VIEW_KEYS)
+            location_text = (
+                str(outputs[location_idx]) if location_idx < len(outputs) else ""
             )
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        for i in range(idx + 1, total):
-            upr = i // cols
-            upc = i % cols
-            piece_color = colors_rgb[i % len(colors_rgb)]
-            piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{i + 1}**</span>'
-            coord_lines.append(f"| {piece_num_html} | r{upr + 1}, c{upc + 1} | ... | ... |")
-        
-        combined_location = "\n".join(coord_lines)
-
-        # Build 3x3 grid with processed results and blank placeholders
-        zoom_images = []
-        for i in range(total):
-            if i < len(all_results):
-                _, _, _, presult = all_results[i]
-                if presult is None:
-                    zoom_images.append(np.zeros((200, 200, 3), dtype=np.uint8))
-                else:
-                    outputs = list(presult)
-                    zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
-                    zoom_img = outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
-                    if zoom_img is not None and isinstance(zoom_img, np.ndarray):
-                        zoom_images.append(zoom_img)
-                    else:
-                        zoom_images.append(np.zeros((200, 200, 3), dtype=np.uint8))
-            else:
-                # Placeholder for unprocessed piece
-                zoom_images.append(np.full((200, 200, 3), 200, dtype=np.uint8))
-        
-        # Arrange in 3x3 grid
-        if zoom_images:
-            heights = [img.shape[0] for img in zoom_images if img.shape[0] > 0]
-            widths = [img.shape[1] for img in zoom_images if img.shape[1] > 0]
-            target_h = int(np.median(heights)) if heights else 200
-            target_w = int(np.median(widths)) if widths else 200
-            
-            uniform_images = []
-            for img in zoom_images:
-                if img.shape[0] > 0 and img.shape[1] > 0:
-                    h, w = img.shape[:2]
-                    scale = min(target_w / w, target_h / h)
-                    new_w = int(w * scale)
-                    new_h = int(h * scale)
-                    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                    
-                    pad_top = (target_h - new_h) // 2
-                    pad_bottom = target_h - new_h - pad_top
-                    pad_left = (target_w - new_w) // 2
-                    pad_right = target_w - new_w - pad_left
-                    
-                    padded = cv2.copyMakeBorder(
-                        resized,
-                        pad_top, pad_bottom, pad_left, pad_right,
-                        cv2.BORDER_CONSTANT,
-                        value=(255, 255, 255)
+            try:
+                if "**Row:**" in location_text and "**Col:**" in location_text:
+                    row_match = (
+                        location_text.split("**Row:**")[1].split("**")[0].strip()
+                    )
+                    col_match = (
+                        location_text.split("**Col:**")[1].split("\n")[0].strip()
+                    )
+                    coord_lines.append(
+                        f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | {row_match} | {col_match} |"
                     )
                 else:
-                    padded = np.full((target_h, target_w, 3), 200, dtype=np.uint8)
-                uniform_images.append(padded)
-            
-            grid_rows = []
-            for gr in range(3):
-                row_imgs = uniform_images[gr * 3:(gr + 1) * 3]
-                grid_rows.append(np.hstack(row_imgs))
-            
-            combined_zoom = np.vstack(grid_rows)
-        else:
-            combined_zoom = np.full((600, 600, 3), 200, dtype=np.uint8)
+                    coord_lines.append(
+                        f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |"
+                    )
+            except (IndexError, AttributeError):
+                coord_lines.append(
+                    f"| {piece_num_html} | r{pr + 1}, c{pc + 1} | - | - |"
+                )
 
-        # Build template overlay with processed pieces
-        template_view = None
-        if template_rgb is not None:
-            template_marked = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR).copy()
-            
-            for pidx, pr, pc, presult in all_results:
-                if presult is None:
-                    continue
-                try:
-                    outputs = list(presult)
-                    state_idx = len(VIEW_KEYS) + 2
-                    if state_idx < len(outputs):
-                        payload = outputs[state_idx]
-                        if payload and hasattr(payload, 'matches') and payload.matches:
-                            match = payload.matches[0]
-                            color = colors[pidx % len(colors)]
-                            
-                            contours = match.get('contours', [])
-                            if contours:
-                                for cnt in contours:
-                                    cnt = np.asarray(cnt).reshape(-1, 2).astype(np.int32)
-                                    cv2.polylines(template_marked, [cnt], True, color, 2)
-                            else:
-                                tlx, tly = match.get('tl', (0, 0))
-                                brx, bry = match.get('br', (0, 0))
-                                cv2.rectangle(template_marked, (tlx, tly), (brx, bry), color, 2)
-                            
-                            tlx, tly = match.get('tl', (0, 0))
-                            cv2.putText(
-                                template_marked,
-                                f"{pidx + 1}",
-                                (tlx + 5, tly + 20),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.7,
-                                color,
-                                2
-                            )
-                except Exception:
-                    # Skip drawing overlay if match result is malformed or drawing fails
-                    pass
-            
-            template_marked_rgb = cv2.cvtColor(template_marked, cv2.COLOR_BGR2RGB)
-            template_view = make_zoomable_plot(template_marked_rgb)
+        # Add placeholder rows for unprocessed pieces
+        remaining = total - len(all_results)
+        for _ in range(remaining):
+            coord_lines.append("| - | - | - | - |")
 
-        final_views = {key: None for key in VIEW_KEYS}
-        final_views["zoom_focus"] = combined_zoom
-        final_views["zoom_template"] = template_view if template_view is not None else make_zoomable_plot(None)
-        rotated_template = _rotate_template_preview(
-            TEMPLATE_IMAGES.get(template_id), rotation
+        coord_markdown = "\n".join(coord_lines)
+
+        yield (
+            None,  # image plot (unchanged here)
+            coord_markdown,
+            f"Processed {len(all_results)}/{total} pieces",
         )
-        final_views["template_color"] = rotated_template
-        
-        summary = f"Processed {len(all_results)}/{total} pieces."
-        yield _views_to_outputs(final_views, combined_location, summary, None, 0)
+
+    for i in range(idx + 1, total):
+        upr = i // cols
+        upc = i % cols
+        piece_color = colors_rgb[i % len(colors_rgb)]
+        piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{i + 1}**</span>'
+        coord_lines.append(
+            f"| {piece_num_html} | r{upr + 1}, c{upc + 1} | ... | ... |"
+        )
+
+    combined_location = "\n".join(coord_lines)
+
+    # Build 3x3 grid with processed results and blank placeholders
+    zoom_images = []
+    for i in range(total):
+        if i < len(all_results):
+            _, _, _, presult = all_results[i]
+            if presult is None:
+                zoom_images.append(np.zeros((200, 200, 3), dtype=np.uint8))
+            else:
+                outputs = list(presult)
+                zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
+                zoom_img = (
+                    outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
+                )
+                if zoom_img is not None and isinstance(zoom_img, np.ndarray):
+                    zoom_images.append(zoom_img)
+                else:
+                    zoom_images.append(np.zeros((200, 200, 3), dtype=np.uint8))
+        else:
+            # Placeholder for unprocessed piece
+            zoom_images.append(np.full((200, 200, 3), 200, dtype=np.uint8))
+
+    # Arrange in 3x3 grid
+    if zoom_images:
+        heights = [img.shape[0] for img in zoom_images if img.shape[0] > 0]
+        widths = [img.shape[1] for img in zoom_images if img.shape[1] > 0]
+        target_h = int(np.median(heights)) if heights else 200
+        target_w = int(np.median(widths)) if widths else 200
+
+        uniform_images = []
+        for img in zoom_images:
+            if img.shape[0] > 0 and img.shape[1] > 0:
+                h, w = img.shape[:2]
+                scale = min(target_w / w, target_h / h)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+                pad_top = (target_h - new_h) // 2
+                pad_bottom = target_h - new_h - pad_top
+                pad_left = (target_w - new_w) // 2
+                pad_right = target_w - new_w - pad_left
+
+                padded = cv2.copyMakeBorder(
+                    resized,
+                    pad_top,
+                    pad_bottom,
+                    pad_left,
+                    pad_right,
+                    cv2.BORDER_CONSTANT,
+                    value=(255, 255, 255),
+                )
+            else:
+                padded = np.full((target_h, target_w, 3), 200, dtype=np.uint8)
+            uniform_images.append(padded)
+
+        grid_rows = []
+        for gr in range(3):
+            row_imgs = uniform_images[gr * 3 : (gr + 1) * 3]
+            grid_rows.append(np.hstack(row_imgs))
+
+        combined_zoom = np.vstack(grid_rows)
+    else:
+        combined_zoom = np.full((600, 600, 3), 200, dtype=np.uint8)
+
+    # Build template overlay with processed pieces
+    template_view = None
+    if template_rgb is not None:
+        template_marked = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR).copy()
+
+        for pidx, pr, pc, presult in all_results:
+            if presult is None:
+                continue
+            try:
+                outputs = list(presult)
+                state_idx = len(VIEW_KEYS) + 2
+                if state_idx < len(outputs):
+                    payload = outputs[state_idx]
+                    if payload and hasattr(payload, "matches") and payload.matches:
+                        match = payload.matches[0]
+                        color = colors[pidx % len(colors)]
+
+                        contours = match.get("contours", [])
+                        if contours:
+                            for cnt in contours:
+                                cnt = np.asarray(cnt).reshape(-1, 2).astype(np.int32)
+                                cv2.polylines(template_marked, [cnt], True, color, 2)
+                        else:
+                            tlx, tly = match.get("tl", (0, 0))
+                            brx, bry = match.get("br", (0, 0))
+                            cv2.rectangle(
+                                template_marked, (tlx, tly), (brx, bry), color, 2
+                            )
+
+                        tlx, tly = match.get("tl", (0, 0))
+                        cv2.putText(
+                            template_marked,
+                            f"{pidx + 1}",
+                            (tlx + 5, tly + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            color,
+                            2,
+                        )
+            except Exception:
+                # Skip drawing overlay if match result is malformed or drawing fails
+                pass
+
+        template_marked_rgb = cv2.cvtColor(template_marked, cv2.COLOR_BGR2RGB)
+        template_view = make_zoomable_plot(template_marked_rgb)
+
+    final_views = {key: None for key in VIEW_KEYS}
+    final_views["zoom_focus"] = combined_zoom
+    final_views["zoom_template"] = (
+        template_view if template_view is not None else make_zoomable_plot(None)
+    )
+    rotated_template = _rotate_template_preview(
+        TEMPLATE_IMAGES.get(template_id), rotation
+    )
+    final_views["template_color"] = rotated_template
+
+    summary = f"Processed {len(all_results)}/{total} pieces."
+    yield _views_to_outputs(final_views, combined_location, summary, None, 0)
 
 
 def solve_single_or_batch(
@@ -604,6 +628,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 type="filepath",
                 sources=["upload", "clipboard"],
                 height=300,
+                elem_id="piece-upload",
             )
             with gr.Accordion("Settings", open=False):
                 template_selector = gr.Dropdown(
@@ -639,7 +664,12 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         with gr.Column(scale=1):
             gr.Markdown("### Inferred row/column")
             match_location = gr.Markdown(
-                "Run the matcher to infer a row and column."
+                "Run the matcher to infer a row and column.",
+                elem_id="match-location",
+            )
+            match_summary = gr.Markdown(
+                "Run the matcher to view detailed plots.",
+                elem_id="match-summary",
             )
             gr.Markdown("### Best match (template view)")
             image_components = {}
@@ -691,7 +721,6 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     with diagnostic_controls:
         prev_button = gr.Button("⬅️ Previous match")
         next_button = gr.Button("Next match ➡️")
-        match_summary = gr.Markdown("Run the matcher to view detailed plots.")
 
     match_state = gr.State()
     match_index = gr.State(0)
