@@ -63,9 +63,7 @@ def load_template_registry(
         template_id = entry["id"]
         label = entry.get("label", template_id)
         template_path = _resolve_path(entry["template_path"])
-        piece_dirs = tuple(
-            _resolve_path(path) for path in entry.get("piece_dirs", [])
-        )
+        piece_dirs = tuple(_resolve_path(path) for path in entry.get("piece_dirs", []))
         matcher_overrides = entry.get("matcher_overrides", {}) or {}
         spec = TemplateSpec(
             template_id=template_id,

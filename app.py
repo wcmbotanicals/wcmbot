@@ -42,6 +42,8 @@ VIEW_KEYS = [
     "grid_overview",
     "zoom_focus",
     "zoom_template",
+    "zoom_piece",
+    "zoom_pair",
 ]
 
 VIEW_LABELS = {
@@ -54,6 +56,8 @@ VIEW_LABELS = {
     "grid_overview": "Multipiece overview",
     "zoom_focus": "Best match (zoomed)",
     "zoom_template": "Best match (template view)",
+    "zoom_piece": "Piece (masked + rotated)",
+    "zoom_pair": "Best match (side-by-side)",
 }
 
 TEMPLATE_ROTATION_OPTIONS = [0, 90, 180, 270]
@@ -608,7 +612,6 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
     colors_rgb = [(b, g, r) for (b, g, r) in colors]
 
     grid_overview = _build_multipiece_overview(grid_bgr, regions, colors)
-
     # Get template RGB for overlay
     template_rgb = None
     for spec in TEMPLATE_REGISTRY.templates.values():
@@ -618,11 +621,21 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
 
     def _build_multipiece_views(last_result=None):
         latest_zoom = None
+        latest_pair = None
+        latest_piece = None
         if last_result is not None:
             outputs = list(last_result)
             zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
             latest_zoom = (
                 outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
+            )
+            zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
+            latest_pair = (
+                outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
+            )
+            zoom_piece_idx = VIEW_KEYS.index("zoom_piece")
+            latest_piece = (
+                outputs[zoom_piece_idx] if zoom_piece_idx < len(outputs) else None
             )
 
         template_view = None
@@ -721,6 +734,16 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         views["zoom_focus"] = (
             latest_zoom
             if isinstance(latest_zoom, np.ndarray)
+            else np.zeros((200, 200, 3), dtype=np.uint8)
+        )
+        views["zoom_pair"] = (
+            latest_pair
+            if isinstance(latest_pair, np.ndarray)
+            else np.zeros((200, 200, 3), dtype=np.uint8)
+        )
+        views["zoom_piece"] = (
+            latest_piece
+            if isinstance(latest_piece, np.ndarray)
             else np.zeros((200, 200, 3), dtype=np.uint8)
         )
         views["zoom_template"] = (
@@ -974,22 +997,36 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             )
             gr.Markdown("Use the controls to zoom and pan the image.")
 
-    gr.Markdown("### Best match (zoomed)")
-    image_components["zoom_focus"] = gr.Image(
-        label="Zoomed piece + neighbors",
+    gr.Markdown("### Best match (side-by-side)")
+    image_components["zoom_pair"] = gr.Image(
+        label="Piece + template match (outline)",
         type="numpy",
         interactive=False,
-        height=340,
+        height=300,
     )
+    with gr.Row(visible=False):
+        image_components["zoom_piece"] = gr.Image(
+            label="Piece (masked + rotated)",
+            type="numpy",
+            interactive=False,
+        )
+        image_components["zoom_focus"] = gr.Image(
+            label="Template match (outline)",
+            type="numpy",
+            interactive=False,
+        )
     # Diagnostic outputs - hidden by default, shown when diagnostic mode enabled
-    diagnostic_header = gr.Markdown("### Match visualizations/diagnostics", visible=False)
-    
+    diagnostic_header = gr.Markdown(
+        "### Match visualizations/diagnostics", visible=False
+    )
+
     other_keys = [
         key
         for key in VIEW_KEYS
-        if key not in ("zoom_template", "zoom_focus", "grid_overview")
+        if key
+        not in ("zoom_template", "zoom_focus", "zoom_piece", "zoom_pair", "grid_overview")
     ]
-    
+
     diagnostic_row1 = gr.Row(visible=False)
     with diagnostic_row1:
         for key in other_keys[:4]:
@@ -1001,7 +1038,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 height=260,
             )
             image_components[key] = comp
-    
+
     diagnostic_row2 = gr.Row(visible=False)
     with diagnostic_row2:
         for key in other_keys[4:]:
@@ -1012,7 +1049,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 height=260,
             )
             image_components[key] = comp
-    
+
     diagnostic_controls = gr.Row(visible=False)
     with diagnostic_controls:
         prev_button = gr.Button("⬅️ Previous match")
@@ -1035,7 +1072,12 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     diagnostic_mode_checkbox.change(
         fn=_toggle_diagnostics,
         inputs=[diagnostic_mode_checkbox],
-        outputs=[diagnostic_header, diagnostic_row1, diagnostic_row2, diagnostic_controls],
+        outputs=[
+            diagnostic_header,
+            diagnostic_row1,
+            diagnostic_row2,
+            diagnostic_controls,
+        ],
     )
 
     def _toggle_grid_overview(show_grid):
