@@ -136,6 +136,12 @@ def test_piece_upload_and_match(page, gradio_app):
     page.wait_for_selector("text=Upload Puzzle Piece", timeout=10000)
     time.sleep(2)
 
+    # Switch to the sample puzzle template to match the sample piece
+    page.get_by_role("button", name="Settings ▼").click()
+    page.wait_for_selector("input[aria-label='Template']", timeout=10000)
+    page.locator("input[aria-label='Template']").click()
+    page.get_by_role("option", name="Sample Puzzle", exact=True).click()
+
     # Create a test piece image
     project_dir = Path(__file__).resolve().parents[1]
     test_piece_path = (
@@ -151,26 +157,29 @@ def test_piece_upload_and_match(page, gradio_app):
             draw.rectangle([0, 0, 100, 100], outline="black", width=2)
             img.save(test_piece_path)
 
-    # Find and use the file upload - Gradio uses input[type=file]
-    # The upload button in Gradio typically has a file input
-    file_inputs = page.locator('input[type="file"]').all()
+    # Find and use the file upload for the puzzle piece input
+    page.wait_for_selector(
+        '#piece-upload input[type="file"]', state="attached", timeout=10000
+    )
+    file_input = page.locator('#piece-upload input[type="file"]').first
+    file_input.set_input_files(str(test_piece_path))
 
-    if len(file_inputs) > 0:
-        # Upload to the first file input (should be the piece input)
-        file_inputs[0].set_input_files(str(test_piece_path))
+    # Wait for upload preview to render
+    page.wait_for_selector("#piece-upload img", timeout=10000)
 
-        # Wait for upload to complete
-        time.sleep(2)
+    # Click the solve button
+    solve_button = page.locator("button:has-text('Find Piece Location')")
+    solve_button.click()
 
-        # Click the solve button
-        solve_button = page.locator("button:has-text('Find Piece Location')")
-        solve_button.click()
+    # Wait for result (this may take a few seconds for CV processing)
+    time.sleep(5)
 
-        # Wait for result (this may take a few seconds for CV processing)
-        time.sleep(5)
-
-        # Check for result text (should contain "Match #" followed by a number)
-        # The result is displayed in a markdown component
-        page.wait_for_selector("text=/Match #\\d+/", timeout=15000)
-        result = page.locator("text=/Match #\\d+/")
-        assert result.is_visible()
+    # Check for inferred row/col text in the main summary
+    page.wait_for_function(
+        "document.querySelector('#match-location') && document.querySelector('#match-location').innerText.includes('Row:')",
+        timeout=30000,
+    )
+    page.wait_for_function(
+        "document.querySelector('#match-location') && document.querySelector('#match-location').innerText.includes('Col:')",
+        timeout=30000,
+    )
