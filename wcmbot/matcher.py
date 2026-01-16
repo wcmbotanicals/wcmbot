@@ -649,12 +649,21 @@ def _estimate_scales(
     else:
         est_scale_area = (est_scale_w + est_scale_h) / 2.0
     est_scale = (est_scale_w * 0.45) + (est_scale_h * 0.45) + (est_scale_area * 0.10)
-    if not (0.02 < est_scale < 20.0):
-        raise RuntimeError(
-            f"Estimated scale {est_scale:.3f} is implausible - check PIECE_CELLS_APPROX and image sizes"
-        )
     scales = [est_scale * f for f in config.est_scale_window]
-    return est_scale, scales
+    valid_scales: List[float] = []
+    for scale in scales:
+        ws = int(round(mw * scale))
+        hs = int(round(mh * scale))
+        if ws <= 0 or hs <= 0 or ws >= tw or hs >= th:
+            continue
+        valid_scales.append(scale)
+    if not valid_scales:
+        raise RuntimeError(
+            "Estimated scale produced no valid candidates; "
+            f"est_scale={est_scale:.4f} piece_size=({mw}x{mh}) "
+            f"template_size=({tw}x{th}) knobs=({knobs_x},{knobs_y})"
+        )
+    return est_scale, valid_scales
 
 
 def _infer_knob_counts(
