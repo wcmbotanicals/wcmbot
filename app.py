@@ -354,6 +354,7 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
             try:
                 os.remove(tmp_path)
             except OSError:
+                # Ignore errors if temporary file already deleted or inaccessible
                 pass
 
         # Build and yield incremental update after each piece
@@ -484,6 +485,7 @@ def solve_puzzle_grid(piece_path, template_id, auto_align, template_rotation):
                                 2
                             )
                 except Exception:
+                    # Skip drawing overlay if match result is malformed or drawing fails
                     pass
             
             template_marked_rgb = cv2.cvtColor(template_marked, cv2.COLOR_BGR2RGB)
@@ -527,7 +529,11 @@ DEFAULT_TEMPLATE_SPEC = TEMPLATE_REGISTRY.get(DEFAULT_TEMPLATE_ID)
 
 for spec in TEMPLATE_REGISTRY.templates.values():
     check_template_exists(spec.template_path)
-    preload_template_cache(str(spec.template_path))
+    try:
+        preload_template_cache(str(spec.template_path))
+    except Exception:
+        # Preloading is an optimization; if it fails, templates will load on-demand
+        pass
 
 TEMPLATE_IMAGES = {
     spec.template_id: get_template_image(spec.template_path)
