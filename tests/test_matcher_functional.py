@@ -52,6 +52,7 @@ GRASS_CASES = [
     ("grass_piece_3.jpg", 1, 2, 0, 11, 24),
     ("grass_piece_4.jpg", 0, 0, 0, 28, 13),
     ("grass_piece_5.jpg", 1, 1, 0, 27, 13),
+    ("grass_piece_6.jpg", 0, 2, 0, 19, 12),
 ]
 EXPECTED_LOCATION_CASES = [("sample_puzzle", *case) for case in BASE_CASES] + [
     ("grass_puzzle", *case) for case in GRASS_CASES
