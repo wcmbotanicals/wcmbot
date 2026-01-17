@@ -5,7 +5,7 @@ import os
 import random
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import cv2
 import gradio as gr
@@ -103,7 +103,7 @@ def make_zoomable_plot(image: Optional[np.ndarray]):
 
 
 def _stack_images_vertical(
-    images: list[np.ndarray],
+    images: List[np.ndarray],
     gap: int = 8,
     background: int = 255,
     max_width: int = 0,
@@ -1241,9 +1241,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         if batch_mode:
             yield from result
         else:
-            yield result
+            yield from result
 
-    # Auto-run matching whenever a new piece is uploaded or pasted
+    # Auto-run matching whenever a new piece is uploaded
     piece_input.upload(
         fn=_on_piece_change,
         inputs=[
