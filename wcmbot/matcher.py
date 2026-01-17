@@ -31,10 +31,10 @@ COARSE_PAD_PX = (
     COARSE_PADDING_PIXELS  # Backward-compatible alias; prefer COARSE_PADDING_PIXELS
 )
 COARSE_MIN_SIDE = 240
-GRID_CENTER_WEIGHT = 2.0
-GRID_CENTER_MIN_SCORE = 0.5
-
+GRID_CENTER_WEIGHT = 0.03
 KNOB_WIDTH_FRAC = 1.0 / 3.0
+CROP_X_PX = 0
+CROP_Y_PX = 0
 KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 MATCH_DILATE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
@@ -80,8 +80,9 @@ class MatcherConfig:
     coarse_padding_pixels: int = COARSE_PADDING_PIXELS
     coarse_min_side: int = COARSE_MIN_SIDE
     grid_center_weight: float = GRID_CENTER_WEIGHT
-    grid_center_min_score: float = GRID_CENTER_MIN_SCORE
     knob_width_frac: float = KNOB_WIDTH_FRAC
+    crop_x: int = CROP_X_PX
+    crop_y: int = CROP_Y_PX
     binarize_blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ
     resize_rethreshold: bool = RESIZE_RETHRESHOLD
     match_blur_ksz: Optional[Tuple[int, int]] = MATCH_BLUR_KSZ
@@ -108,8 +109,9 @@ def build_matcher_config(
         "coarse_padding_pixels": COARSE_PADDING_PIXELS,
         "coarse_min_side": COARSE_MIN_SIDE,
         "grid_center_weight": GRID_CENTER_WEIGHT,
-        "grid_center_min_score": GRID_CENTER_MIN_SCORE,
         "knob_width_frac": KNOB_WIDTH_FRAC,
+        "crop_x": CROP_X_PX,
+        "crop_y": CROP_Y_PX,
         "binarize_blur_ksz": BINARIZE_BLUR_KSZ,
         "resize_rethreshold": RESIZE_RETHRESHOLD,
         "match_blur_ksz": MATCH_BLUR_KSZ,
@@ -154,9 +156,13 @@ class TemplateCacheEntry:
     template_bin: np.ndarray
     blur_cache: Dict[Optional[Tuple[int, int]], np.ndarray]
     binarize_blur_ksz: Optional[Tuple[int, int]]
+    crop_x: int = 0
+    crop_y: int = 0
 
 
-_TEMPLATE_CACHE: Dict[Tuple[str, Optional[Tuple[int, int]]], TemplateCacheEntry] = {}
+_TEMPLATE_CACHE: Dict[
+    Tuple[str, Optional[Tuple[int, int]], int, int], TemplateCacheEntry
+] = {}
 
 
 # ---------- helpers ----------
@@ -178,7 +184,10 @@ def _load_image(path: str) -> np.ndarray:
 
 
 def _load_template_cached(
-    path: str, binarize_blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ
+    path: str,
+    binarize_blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ,
+    crop_x: int = CROP_X_PX,
+    crop_y: int = CROP_Y_PX,
 ) -> TemplateCacheEntry:
     """
     Load a template image with caching and mtime-based invalidation.
@@ -200,11 +209,22 @@ def _load_template_cached(
         raise RuntimeError(f"Failed to load image: {path}")
     mtime = os.path.getmtime(path)
     blur_ksz = _normalize_kernel(binarize_blur_ksz)
-    cache_key = (path, blur_ksz)
+    crop_x = int(crop_x)
+    crop_y = int(crop_y)
+    cache_key = (path, blur_ksz, crop_x, crop_y)
     entry = _TEMPLATE_CACHE.get(cache_key)
     if entry and entry.mtime == mtime:
         return entry
     template = _load_image(path)
+    if crop_x < 0 or crop_y < 0:
+        raise ValueError("crop_x and crop_y must be non-negative.")
+    if crop_x or crop_y:
+        h, w = template.shape[:2]
+        if crop_x * 2 >= w or crop_y * 2 >= h:
+            raise ValueError(
+                f"Template crop too large for {w}x{h}: crop_x={crop_x} crop_y={crop_y}"
+            )
+        template = template[crop_y : h - crop_y, crop_x : w - crop_x]
     template_rgb = cv2.cvtColor(template, cv2.COLOR_BGR2RGB)
     template_bin = _binarize_two_color(template, blur_ksz)
     entry = TemplateCacheEntry(
@@ -213,6 +233,8 @@ def _load_template_cached(
         template_bin=template_bin,
         blur_cache={},
         binarize_blur_ksz=blur_ksz,
+        crop_x=crop_x,
+        crop_y=crop_y,
     )
     _TEMPLATE_CACHE[cache_key] = entry
     return entry
@@ -260,6 +282,8 @@ def preload_template_cache(
     template_image_path: str,
     blur_ksz: Optional[Tuple[int, int]] = MATCH_BLUR_KSZ,
     binarize_blur_ksz: Optional[Tuple[int, int]] = BINARIZE_BLUR_KSZ,
+    crop_x: int = CROP_X_PX,
+    crop_y: int = CROP_Y_PX,
 ) -> None:
     """
     Preload a template image and its blurred binary representation into the cache.
@@ -277,7 +301,10 @@ def preload_template_cache(
             binarized template. If None, the unblurred template is cached.
     """
     entry = _load_template_cached(
-        template_image_path, binarize_blur_ksz=binarize_blur_ksz
+        template_image_path,
+        binarize_blur_ksz=binarize_blur_ksz,
+        crop_x=crop_x,
+        crop_y=crop_y,
     )
     _get_template_blur_f32(entry.template_bin, blur_ksz, entry.blur_cache)
 
@@ -713,6 +740,50 @@ def _infer_knob_counts(
     return chosen[1], chosen[2]
 
 
+def _rotate_knob_counts(
+    knobs_x: Optional[int], knobs_y: Optional[int], rotation: int
+) -> Tuple[Optional[int], Optional[int]]:
+    if knobs_x is None or knobs_y is None:
+        return knobs_x, knobs_y
+    if rotation % 180 == 90:
+        return knobs_y, knobs_x
+    return knobs_x, knobs_y
+
+
+def _core_center_from_mask(
+    mask01: np.ndarray,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+) -> Tuple[float, float]:
+    if mask01.size == 0:
+        return 0.0, 0.0
+    mask = (mask01 > 0).astype(np.uint8)
+    mh, mw = mask.shape
+    if mh == 0 or mw == 0:
+        return float(mw) / 2.0, float(mh) / 2.0
+
+    kx = max(0, int(knobs_x)) if knobs_x is not None else 0
+    ky = max(0, int(knobs_y)) if knobs_y is not None else 0
+    max_knobs = min(2, max(kx, ky))
+    ratio = max(0.45, 0.55 - (0.05 * max_knobs))
+
+    col_sum = mask.sum(axis=0)
+    row_sum = mask.sum(axis=1)
+    if col_sum.max() <= 0 or row_sum.max() <= 0:
+        return float(mw) / 2.0, float(mh) / 2.0
+    # Use the widest high-coverage span to drop protruding tabs.
+    col_thresh = ratio * float(col_sum.max())
+    row_thresh = ratio * float(row_sum.max())
+    left = int(np.argmax(col_sum >= col_thresh))
+    right = int(mw - 1 - np.argmax(col_sum[::-1] >= col_thresh))
+    top = int(np.argmax(row_sum >= row_thresh))
+    bottom = int(mh - 1 - np.argmax(row_sum[::-1] >= row_thresh))
+
+    cx = (left + right + 1) / 2.0
+    cy = (top + bottom + 1) / 2.0
+    return cx, cy
+
+
 def _candidate_is_close(candidate: Dict, existing: Dict) -> bool:
     cand_center = candidate["center"]
     cand_w = candidate["br"][0] - candidate["tl"][0]
@@ -811,6 +882,8 @@ def _match_template_multiscale_binary(
     scales: List[float],
     rotations: List[int],
     config: MatcherConfig,
+    knobs_x: Optional[int] = None,
+    knobs_y: Optional[int] = None,
     blur_ksz: Optional[Tuple[int, int]] = (3, 3),
     corr_method: int = cv2.TM_CCORR_NORMED,
     template_blur_f32: Optional[np.ndarray] = None,
@@ -822,7 +895,6 @@ def _match_template_multiscale_binary(
     coarse_padding_pixels = config.coarse_padding_pixels
     coarse_min_side = config.coarse_min_side
     grid_center_weight = config.grid_center_weight
-    grid_center_min_score = config.grid_center_min_score
     if template_blur_f32 is None:
         T = (
             (template_bin_img * 255).astype(np.uint8)
@@ -882,20 +954,25 @@ def _match_template_multiscale_binary(
         hs: int,
         offset_x: int = 0,
         offset_y: int = 0,
+        core_offset_x: Optional[float] = None,
+        core_offset_y: Optional[float] = None,
     ) -> List[Dict]:
         combo_best_local: List[Dict] = []
+        if core_offset_x is None:
+            core_offset_x = ws / 2
+        if core_offset_y is None:
+            core_offset_y = hs / 2
         for idx in order:
             if len(combo_best_local) >= top_match_count:
                 break
             y, x = divmod(int(idx), res_w)
             x0 = x + offset_x
             y0 = y + offset_y
-            cx = x0 + ws / 2
-            cy = y0 + hs / 2
+            cx = x0 + core_offset_x
+            cy = y0 + core_offset_y
             base_score = float(res[y, x])
             proximity = _grid_center_proximity(cx, cy, cell_w, cell_h, cols, rows)
-            boost_scale = max(0.0, base_score - grid_center_min_score)
-            score = base_score + (grid_center_weight * proximity * boost_scale)
+            score = base_score + (grid_center_weight * proximity)
             tl = (int(x0), int(y0))
             br = (int(x0 + ws), int(y0 + hs))
             candidate = {
@@ -924,17 +1001,35 @@ def _match_template_multiscale_binary(
         hs: int,
         offset_x: int = 0,
         offset_y: int = 0,
+        core_offset_x: Optional[float] = None,
+        core_offset_y: Optional[float] = None,
     ) -> List[Dict]:
         flat = res.ravel()
         order = _candidate_order(flat, top_match_count)
         res_w = res.shape[1]
         combo_best = _scan_candidates(
-            res, order, res_w, ws, hs, offset_x=offset_x, offset_y=offset_y
+            res,
+            order,
+            res_w,
+            ws,
+            hs,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            core_offset_x=core_offset_x,
+            core_offset_y=core_offset_y,
         )
         if len(combo_best) < top_match_count and order.size < flat.size:
             order = np.argsort(flat)[::-1]
             combo_best = _scan_candidates(
-                res, order, res_w, ws, hs, offset_x=offset_x, offset_y=offset_y
+                res,
+                order,
+                res_w,
+                ws,
+                hs,
+                offset_x=offset_x,
+                offset_y=offset_y,
+                core_offset_x=core_offset_x,
+                core_offset_y=core_offset_y,
             )
         return combo_best
 
@@ -963,7 +1058,10 @@ def _match_template_multiscale_binary(
     for rot in rotations:
         P_r = _rotate_img(P, rot)
         M_r = _rotate_img(M, rot)
-        M_r = (M_r > 127).astype(np.uint8) * 255
+        M_r_raw01 = (M_r > 127).astype(np.uint8)
+        rot_knobs_x, rot_knobs_y = _rotate_knob_counts(knobs_x, knobs_y, rot)
+        core_center = _core_center_from_mask(M_r_raw01, rot_knobs_x, rot_knobs_y)
+        M_r = (M_r_raw01 > 0).astype(np.uint8) * 255
         M_r = cv2.morphologyEx(M_r, cv2.MORPH_DILATE, dilate_ker, iterations=1)
         M_r01 = (M_r > 127).astype(np.float32)
 
@@ -972,6 +1070,10 @@ def _match_template_multiscale_binary(
             hs = int(round(P_r.shape[0] * scale))
             if ws <= 0 or hs <= 0 or ws >= tw or hs >= th:
                 continue
+            scale_x = ws / float(P_r.shape[1])
+            scale_y = hs / float(P_r.shape[0])
+            core_offset_x = core_center[0] * scale_x
+            core_offset_y = core_center[1] * scale_y
 
             patt_s = _resize_for_match(
                 P_r, ws, hs, rethreshold=config.resize_rethreshold
@@ -1027,7 +1129,13 @@ def _match_template_multiscale_binary(
                             if res.size == 0:
                                 continue
                             combo_best = _collect_matches(
-                                res, ws, hs, offset_x=x0, offset_y=y0
+                                res,
+                                ws,
+                                hs,
+                                offset_x=x0,
+                                offset_y=y0,
+                                core_offset_x=core_offset_x,
+                                core_offset_y=core_offset_y,
                             )
                             if combo_best:
                                 combo_candidates.extend(combo_best)
@@ -1039,7 +1147,13 @@ def _match_template_multiscale_binary(
                 if res.size == 0:
                     continue
 
-                combo_best = _collect_matches(res, ws, hs)
+                combo_best = _collect_matches(
+                    res,
+                    ws,
+                    hs,
+                    core_offset_x=core_offset_x,
+                    core_offset_y=core_offset_y,
+                )
                 combo_candidates.extend(combo_best)
 
     if not combo_candidates:
@@ -1322,7 +1436,10 @@ def find_piece_in_template(
         marks: List[Tuple[str, float]] = []
 
     template_entry = _load_template_cached(
-        template_image_path, config.binarize_blur_ksz
+        template_image_path,
+        config.binarize_blur_ksz,
+        crop_x=config.crop_x,
+        crop_y=config.crop_y,
     )
     if profile:
         marks.append(("template", time.perf_counter()))
@@ -1427,6 +1544,8 @@ def find_piece_in_template(
         scales,
         config.rotations,
         config,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
         blur_ksz=config.match_blur_ksz,
         corr_method=cv2.TM_CCORR_NORMED,
         template_blur_f32=template_blur_f32,
