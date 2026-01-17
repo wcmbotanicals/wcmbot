@@ -4,6 +4,7 @@ import base64
 import os
 import random
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -75,6 +76,8 @@ GRID_COLORS_BGR = [
 ]
 
 MULTIPIECE_DEFAULT = True
+MAX_BATCH_PIECES = 20
+BATCH_BUTTON_SPACER_PX = 308
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
@@ -557,9 +560,11 @@ def _views_to_outputs(
     summary: str,
     state,
     idx: int,
+    batch_state,
 ):
     ordered = [views.get(key) for key in VIEW_KEYS]
-    return (*ordered, location, summary, state, idx)
+    batch_style = _build_batch_button_style(batch_state)
+    return (*ordered, location, summary, state, idx, batch_state, batch_style)
 
 
 def _blank_outputs(message: str, template_id: str, template_rotation: int):
@@ -571,7 +576,7 @@ def _blank_outputs(message: str, template_id: str, template_rotation: int):
     blank_views["zoom_template"] = make_zoomable_plot(rotated_template)
     blank_views["zoom_pair"] = None
     location = "Run the matcher to infer a row and column."
-    return _views_to_outputs(blank_views, location, message, None, 0)
+    return _views_to_outputs(blank_views, location, message, None, 0, None)
 
 
 def _format_match_location(payload, idx: int) -> str:
@@ -586,7 +591,244 @@ def _render_match_payload(payload, idx: int):
     views["zoom_template"] = make_zoomable_plot(views.get("zoom_template"))
     location = _format_match_location(payload, idx)
     summary = format_match_summary(payload, idx)
-    return _views_to_outputs(views, location, summary, payload, idx)
+    return _views_to_outputs(views, location, summary, payload, idx, None)
+
+
+def _clamp_match_index(payload, idx: int) -> int:
+    if payload is None or not getattr(payload, "matches", None):
+        return 0
+    return max(0, min(idx, len(payload.matches) - 1))
+
+
+def _format_multipiece_table(piece_states, total: int) -> str:
+    coord_lines = [
+        "| Piece | Row | Col |",
+        "|-------|-----|-----|",
+    ]
+    colors_rgb = [(b, g, r) for (b, g, r) in GRID_COLORS_BGR]
+    for idx in range(total):
+        piece_color = colors_rgb[idx % len(colors_rgb)]
+        piece_num_html = (
+            f'<span style="color: rgb({piece_color[0]}, '
+            f'{piece_color[1]}, {piece_color[2]})">**{idx + 1}**</span>'
+        )
+        state = piece_states[idx] if idx < len(piece_states) else None
+        if not state:
+            coord_lines.append(f"| {piece_num_html} | - | - |")
+            continue
+        if state.get("error"):
+            coord_lines.append(f"| {piece_num_html} | Error | Error |")
+            continue
+        payload = state.get("payload")
+        match_index = _clamp_match_index(payload, state.get("match_index", 0))
+        if not payload or not getattr(payload, "matches", None):
+            coord_lines.append(f"| {piece_num_html} | - | - |")
+            continue
+        match = payload.matches[match_index]
+        coord_lines.append(
+            f"| {piece_num_html} | {match.get('row', '-')} | {match.get('col', '-')} |"
+        )
+    return "\n".join(coord_lines)
+
+
+def _build_multipiece_views_from_state(batch_state, last_result=None):
+    if not batch_state:
+        return {key: None for key in VIEW_KEYS}
+
+    piece_states = batch_state.get("piece_states") or []
+    grid_overview = batch_state.get("grid_overview")
+    template_rgb = batch_state.get("template_rgb")
+    template_id = batch_state.get("template_id")
+    rotation = batch_state.get("rotation", 0)
+
+    latest_zoom = None
+    latest_pair = None
+    latest_piece = None
+    if last_result is not None:
+        outputs = list(last_result)
+        zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
+        latest_zoom = outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
+        zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
+        latest_pair = outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
+        zoom_piece_idx = VIEW_KEYS.index("zoom_piece")
+        latest_piece = (
+            outputs[zoom_piece_idx] if zoom_piece_idx < len(outputs) else None
+        )
+
+    template_view = None
+    if template_rgb is not None:
+        template_marked = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR).copy()
+        for pidx, state in enumerate(piece_states):
+            payload = state.get("payload") if state else None
+            if not payload or not getattr(payload, "matches", None):
+                continue
+            match_index = _clamp_match_index(payload, state.get("match_index", 0))
+            match = payload.matches[match_index]
+            color = GRID_COLORS_BGR[pidx % len(GRID_COLORS_BGR)]
+
+            piece_rgb = getattr(payload, "piece_rgb", None)
+            piece_bin = getattr(payload, "piece_bin", None)
+            if piece_rgb is not None and piece_bin is not None:
+                piece_bgr = cv2.cvtColor(piece_rgb, cv2.COLOR_RGB2BGR)
+                _overlay_piece_on_template(template_marked, piece_bgr, piece_bin, match)
+
+            contours = match.get("contours", [])
+            if contours:
+                for cnt in contours:
+                    cnt = np.asarray(cnt).reshape(-1, 2).astype(np.int32)
+                    cv2.polylines(template_marked, [cnt], True, color, 2)
+            else:
+                tlx, tly = match.get("tl", (0, 0))
+                brx, bry = match.get("br", (0, 0))
+                cv2.rectangle(template_marked, (tlx, tly), (brx, bry), color, 2)
+
+            tlx, tly = match.get("tl", (0, 0))
+            brx, bry = match.get("br", (tlx, tly))
+            label = f"{pidx + 1}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            thickness = 2
+            text_size, _ = cv2.getTextSize(label, font, font_scale, thickness)
+            text_w, text_h = text_size
+            center = match.get("center")
+            if center and len(center) == 2:
+                center_x, center_y = center
+            else:
+                center_x = tlx + (brx - tlx) // 2
+                center_y = tly + (bry - tly) // 2
+            x = int(center_x - text_w / 2)
+            y = int(center_y + text_h / 2)
+            cv2.putText(
+                template_marked,
+                label,
+                (x, y),
+                font,
+                font_scale,
+                (0, 0, 0),
+                thickness + 2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                template_marked,
+                label,
+                (x, y),
+                font,
+                font_scale,
+                color,
+                thickness,
+                cv2.LINE_AA,
+            )
+
+        template_marked_rgb = cv2.cvtColor(template_marked, cv2.COLOR_BGR2RGB)
+        template_view = make_zoomable_plot(template_marked_rgb)
+
+    views = {key: None for key in VIEW_KEYS}
+    views["grid_overview"] = grid_overview
+    views["zoom_focus"] = (
+        latest_zoom
+        if isinstance(latest_zoom, np.ndarray)
+        else np.zeros((200, 200, 3), dtype=np.uint8)
+    )
+    views["zoom_pair"] = (
+        latest_pair
+        if isinstance(latest_pair, np.ndarray)
+        else np.zeros((200, 200, 3), dtype=np.uint8)
+    )
+    views["zoom_piece"] = (
+        latest_piece
+        if isinstance(latest_piece, np.ndarray)
+        else np.zeros((200, 200, 3), dtype=np.uint8)
+    )
+    multipiece_pairs = []
+    for pidx, state in enumerate(piece_states):
+        payload = state.get("payload") if state else None
+        if not payload or not getattr(payload, "matches", None):
+            continue
+        match_index = _clamp_match_index(payload, state.get("match_index", 0))
+        try:
+            pair_view = render_primary_views(payload, match_index).get("zoom_pair")
+        except Exception:
+            pair_view = None
+        if isinstance(pair_view, np.ndarray):
+            labeled = _annotate_pair_image(pair_view, f"Piece {pidx + 1}")
+            multipiece_pairs.append(labeled)
+    if multipiece_pairs:
+        views["zoom_pair"] = _stack_images_vertical(multipiece_pairs)
+    views["zoom_template"] = (
+        template_view if template_view is not None else make_zoomable_plot(None)
+    )
+    rotated_template = _rotate_template_preview(
+        TEMPLATE_IMAGES.get(template_id), rotation
+    )
+    views["template_color"] = rotated_template
+    return views
+
+
+def _advance_multipiece_candidate(piece_index: int, batch_state):
+    if not batch_state or "piece_states" not in batch_state:
+        blank_views = {key: None for key in VIEW_KEYS}
+        return _views_to_outputs(
+            blank_views,
+            "Run the matcher once a piece is uploaded.",
+            "",
+            None,
+            0,
+            batch_state,
+        )
+    piece_states = batch_state.get("piece_states") or []
+    total = int(batch_state.get("total") or len(piece_states))
+    if piece_index < 0 or piece_index >= len(piece_states):
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            f"Piece {piece_index + 1} is not available yet.",
+            None,
+            0,
+            batch_state,
+        )
+    state = piece_states[piece_index]
+    if not state or state.get("payload") is None:
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            f"Piece {piece_index + 1} is not available yet.",
+            None,
+            0,
+            batch_state,
+        )
+    payload = state.get("payload")
+    if not payload or not getattr(payload, "matches", None):
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            f"Piece {piece_index + 1} has no matches.",
+            None,
+            0,
+            batch_state,
+        )
+    match_index = _clamp_match_index(payload, state.get("match_index", 0))
+    next_index = (match_index + 1) % len(payload.matches)
+    state["match_index"] = next_index
+
+    views = _build_multipiece_views_from_state(batch_state)
+    coord_markdown = _format_multipiece_table(piece_states, total)
+    summary = (
+        f"Piece {piece_index + 1}: candidate {next_index + 1}/{len(payload.matches)}."
+    )
+    return _views_to_outputs(
+        views,
+        coord_markdown,
+        summary,
+        None,
+        0,
+        batch_state,
+    )
 
 
 def _change_match(
@@ -694,10 +936,8 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
 
     total = len(regions)
     all_results = []
+    piece_states = [None] * total
     colors = GRID_COLORS_BGR
-
-    # Convert BGR to RGB for HTML display
-    colors_rgb = [(b, g, r) for (b, g, r) in colors]
 
     grid_overview = _build_multipiece_overview(grid_bgr, regions, colors)
     # Get template RGB for overlay
@@ -709,154 +949,14 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
             )
             break
 
-    def _build_multipiece_views(last_result=None):
-        latest_zoom = None
-        latest_pair = None
-        latest_piece = None
-        if last_result is not None:
-            outputs = list(last_result)
-            zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
-            latest_zoom = (
-                outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
-            )
-            zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
-            latest_pair = (
-                outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
-            )
-            zoom_piece_idx = VIEW_KEYS.index("zoom_piece")
-            latest_piece = (
-                outputs[zoom_piece_idx] if zoom_piece_idx < len(outputs) else None
-            )
-
-        template_view = None
-        if template_rgb is not None:
-            template_marked = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR).copy()
-
-            for pidx, region, presult in all_results:
-                if presult is None:
-                    continue
-                try:
-                    outputs = list(presult)
-                    state_idx = len(VIEW_KEYS) + 2
-                    if state_idx < len(outputs):
-                        payload = outputs[state_idx]
-                        if payload and hasattr(payload, "matches") and payload.matches:
-                            match = payload.matches[0]
-                            color = colors[pidx % len(colors)]
-
-                            piece_rgb = getattr(payload, "piece_rgb", None)
-                            piece_bin = getattr(payload, "piece_bin", None)
-                            if piece_rgb is not None and piece_bin is not None:
-                                piece_bgr = cv2.cvtColor(piece_rgb, cv2.COLOR_RGB2BGR)
-                                _overlay_piece_on_template(
-                                    template_marked, piece_bgr, piece_bin, match
-                                )
-
-                            contours = match.get("contours", [])
-                            if contours:
-                                for cnt in contours:
-                                    cnt = (
-                                        np.asarray(cnt).reshape(-1, 2).astype(np.int32)
-                                    )
-                                    cv2.polylines(
-                                        template_marked, [cnt], True, color, 2
-                                    )
-                            else:
-                                tlx, tly = match.get("tl", (0, 0))
-                                brx, bry = match.get("br", (0, 0))
-                                cv2.rectangle(
-                                    template_marked,
-                                    (tlx, tly),
-                                    (brx, bry),
-                                    color,
-                                    2,
-                                )
-
-                            tlx, tly = match.get("tl", (0, 0))
-                            brx, bry = match.get("br", (tlx, tly))
-                            label = f"{pidx + 1}"
-                            font = cv2.FONT_HERSHEY_SIMPLEX
-                            font_scale = 0.8
-                            thickness = 2
-                            text_size, _ = cv2.getTextSize(
-                                label, font, font_scale, thickness
-                            )
-                            text_w, text_h = text_size
-                            center = match.get("center")
-                            if center and len(center) == 2:
-                                center_x, center_y = center
-                            else:
-                                center_x = tlx + (brx - tlx) // 2
-                                center_y = tly + (bry - tly) // 2
-                            x = int(center_x - text_w / 2)
-                            y = int(center_y + text_h / 2)
-                            cv2.putText(
-                                template_marked,
-                                label,
-                                (x, y),
-                                font,
-                                font_scale,
-                                (0, 0, 0),
-                                thickness + 2,
-                                cv2.LINE_AA,
-                            )
-                            cv2.putText(
-                                template_marked,
-                                label,
-                                (x, y),
-                                font,
-                                font_scale,
-                                color,
-                                thickness,
-                                cv2.LINE_AA,
-                            )
-                except Exception:
-                    # Skip drawing overlay if match result is malformed or drawing fails
-                    pass
-
-            template_marked_rgb = cv2.cvtColor(template_marked, cv2.COLOR_BGR2RGB)
-            template_view = make_zoomable_plot(template_marked_rgb)
-
-        views = {key: None for key in VIEW_KEYS}
-        views["grid_overview"] = grid_overview
-        views["zoom_focus"] = (
-            latest_zoom
-            if isinstance(latest_zoom, np.ndarray)
-            else np.zeros((200, 200, 3), dtype=np.uint8)
-        )
-        views["zoom_pair"] = (
-            latest_pair
-            if isinstance(latest_pair, np.ndarray)
-            else np.zeros((200, 200, 3), dtype=np.uint8)
-        )
-        views["zoom_piece"] = (
-            latest_piece
-            if isinstance(latest_piece, np.ndarray)
-            else np.zeros((200, 200, 3), dtype=np.uint8)
-        )
-        multipiece_pairs = []
-        for pidx, _, presult in all_results:
-            if presult is None:
-                continue
-            outputs = list(presult)
-            zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
-            pair_value = (
-                outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
-            )
-            if isinstance(pair_value, np.ndarray):
-                labeled = _annotate_pair_image(pair_value, f"Piece {pidx + 1}")
-                multipiece_pairs.append(labeled)
-        # Only overwrite the fallback/previous zoom_pair view if we have multipiece pairs
-        if multipiece_pairs:
-            views["zoom_pair"] = _stack_images_vertical(multipiece_pairs)
-        views["zoom_template"] = (
-            template_view if template_view is not None else make_zoomable_plot(None)
-        )
-        rotated_template = _rotate_template_preview(
-            TEMPLATE_IMAGES.get(template_id), rotation
-        )
-        views["template_color"] = rotated_template
-        return views
+    batch_state = {
+        "template_id": template_id,
+        "rotation": rotation,
+        "grid_overview": grid_overview,
+        "template_rgb": template_rgb,
+        "piece_states": piece_states,
+        "total": total,
+    }
 
     for idx, region in enumerate(regions):
         x, y, w, h = region["bbox"]
@@ -874,8 +974,16 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         try:
             result = solve_puzzle(tmp_path, template_id, auto_align, rotation)
             all_results.append((idx, region, result))
+            payload = None
+            if result is not None:
+                outputs = list(result)
+                state_idx = len(VIEW_KEYS) + 2
+                if state_idx < len(outputs):
+                    payload = outputs[state_idx]
+            piece_states[idx] = {"payload": payload, "match_index": 0}
         except Exception:
             all_results.append((idx, region, None))
+            piece_states[idx] = {"payload": None, "match_index": 0, "error": True}
         finally:
             try:
                 os.remove(tmp_path)
@@ -883,45 +991,12 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
                 # Ignore errors if temporary file already deleted or inaccessible
                 pass
 
-        coord_lines = [
-            "| Piece | Row | Col |",
-            "|-------|-----|-----|",
-        ]
-        for i, (pidx, region, presult) in enumerate(all_results):
-            piece_color = colors_rgb[pidx % len(colors_rgb)]
-            piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{pidx + 1}**</span>'
-            if presult is None:
-                coord_lines.append(f"| {piece_num_html} | Error | Error |")
-                continue
-            outputs = list(presult)
-            location_idx = len(VIEW_KEYS)
-            location_text = (
-                str(outputs[location_idx]) if location_idx < len(outputs) else ""
-            )
-            try:
-                if "**Row:**" in location_text and "**Col:**" in location_text:
-                    row_match = (
-                        location_text.split("**Row:**")[1].split("**")[0].strip()
-                    )
-                    col_match = (
-                        location_text.split("**Col:**")[1].split("\n")[0].strip()
-                    )
-                    coord_lines.append(
-                        f"| {piece_num_html} | {row_match} | {col_match} |"
-                    )
-                else:
-                    coord_lines.append(f"| {piece_num_html} | - | - |")
-            except (IndexError, AttributeError):
-                coord_lines.append(f"| {piece_num_html} | - | - |")
-
-        remaining = total - len(all_results)
-        for _ in range(remaining):
-            coord_lines.append("| - | - | - |")
-
-        coord_markdown = "\n".join(coord_lines)
+        coord_markdown = _format_multipiece_table(piece_states, total)
 
         last_result = all_results[-1][2] if all_results else None
-        streamed_views = _build_multipiece_views(last_result=last_result)
+        streamed_views = _build_multipiece_views_from_state(
+            batch_state, last_result=last_result
+        )
         last_summary = ""
         if last_result is not None:
             outputs = list(last_result)
@@ -937,21 +1012,19 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
             ),
             None,
             0,
+            batch_state,
         )
 
-    for i in range(idx + 1, total):
-        piece_color = colors_rgb[i % len(colors_rgb)]
-        piece_num_html = f'<span style="color: rgb({piece_color[0]}, {piece_color[1]}, {piece_color[2]})">**{i + 1}**</span>'
-        coord_lines.append(f"| {piece_num_html} | ... | ... |")
+    combined_location = _format_multipiece_table(piece_states, total)
 
-    combined_location = "\n".join(coord_lines)
-
-    final_views = _build_multipiece_views(
-        last_result=all_results[-1][2] if all_results else None
+    final_views = _build_multipiece_views_from_state(
+        batch_state, last_result=all_results[-1][2] if all_results else None
     )
 
     summary = f"Processed {len(all_results)}/{total} pieces."
-    yield _views_to_outputs(final_views, combined_location, summary, None, 0)
+    yield _views_to_outputs(
+        final_views, combined_location, summary, None, 0, batch_state
+    )
 
 
 def solve_single_or_batch(
@@ -959,11 +1032,10 @@ def solve_single_or_batch(
 ):
     """Dispatch to single-piece solve or streamed multipiece mode."""
     if batch_mode:
-        yield from solve_puzzle_multipiece(
+        return solve_puzzle_multipiece(
             piece_path, template_id, auto_align, template_rotation
         )
-    else:
-        yield solve_puzzle(piece_path, template_id, auto_align, template_rotation)
+    return solve_puzzle(piece_path, template_id, auto_align, template_rotation)
 
 
 def goto_previous_match(state, current_index, template_id, template_rotation):
@@ -1038,11 +1110,17 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     demo.load(fn=get_random_ad, outputs=ad_banner)
 
     gr.HTML(
-        """
+        f"""
     <style>
-    #primary-template-view img {
+    #primary-template-view img {{
         cursor: zoom-in;
-    }
+    }}
+    .batch-next-button {{
+        width: 100%;
+    }}
+    .batch-button-spacer {{
+        height: {BATCH_BUTTON_SPACER_PX}px;
+    }}
     </style>
     """
     )
@@ -1081,7 +1159,18 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 batch_grid_checkbox = gr.Checkbox(
                     label="Multipiece mode (batch)",
                     value=MULTIPIECE_DEFAULT,
-                    info="If checked, detect multiple pieces in the upload and solve each in sequence.",
+                    info=(
+                        "If checked, detect multiple pieces in the upload and solve "
+                        "each in sequence."
+                    ),
+                )
+                show_batch_buttons_checkbox = gr.Checkbox(
+                    label="Show per-piece candidate buttons",
+                    value=True,
+                    info=(
+                        "Show a Next-candidate button for each detected piece when "
+                        "multipiece mode is enabled."
+                    ),
                 )
                 diagnostic_mode_checkbox = gr.Checkbox(
                     label="Show diagnostic visualizations",
@@ -1117,11 +1206,25 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             gr.Markdown("Use the controls to zoom and pan the image.")
 
     gr.Markdown("### Best match (side-by-side)")
-    image_components["zoom_pair"] = gr.Image(
-        label="Piece + template match (outline)",
-        type="numpy",
-        interactive=False,
-    )
+    with gr.Row():
+        with gr.Column(scale=3):
+            image_components["zoom_pair"] = gr.Image(
+                label="Piece + template match (outline)",
+                type="numpy",
+                interactive=False,
+            )
+        batch_buttons_column = gr.Column(scale=1, visible=MULTIPIECE_DEFAULT)
+        with batch_buttons_column:
+            gr.Markdown("### Next candidate")
+            batch_next_buttons = []
+            for i in range(MAX_BATCH_PIECES):
+                button = gr.Button(
+                    f"Next candidate (Piece {i + 1})",
+                    elem_classes=["batch-next-button"],
+                )
+                batch_next_buttons.append(button)
+                if i < MAX_BATCH_PIECES - 1:
+                    gr.HTML('<div class="batch-button-spacer"></div>')
     with gr.Row(visible=False):
         image_components["zoom_piece"] = gr.Image(
             label="Piece (masked + rotated)",
@@ -1181,6 +1284,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
 
     match_state = gr.State()
     match_index = gr.State(0)
+    batch_state = gr.State()
 
     ordered_components = [image_components[key] for key in VIEW_KEYS]
 
@@ -1204,16 +1308,31 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         ],
     )
 
-    def _toggle_grid_overview(show_grid):
+    def _toggle_grid_overview(show_grid, show_buttons):
+        show_buttons = bool(show_grid) and bool(show_buttons)
         return {
             grid_overview_header: gr.update(visible=show_grid),
             image_components["grid_overview"]: gr.update(visible=show_grid),
+            batch_buttons_column: gr.update(visible=show_buttons),
         }
 
     batch_grid_checkbox.change(
         fn=_toggle_grid_overview,
-        inputs=[batch_grid_checkbox],
-        outputs=[grid_overview_header, image_components["grid_overview"]],
+        inputs=[batch_grid_checkbox, show_batch_buttons_checkbox],
+        outputs=[
+            grid_overview_header,
+            image_components["grid_overview"],
+            batch_buttons_column,
+        ],
+    )
+    show_batch_buttons_checkbox.change(
+        fn=_toggle_grid_overview,
+        inputs=[batch_grid_checkbox, show_batch_buttons_checkbox],
+        outputs=[
+            grid_overview_header,
+            image_components["grid_overview"],
+            batch_buttons_column,
+        ],
     )
 
     def _on_template_change(selected_template):
@@ -1240,16 +1359,18 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_summary,
             match_state,
             match_index,
+            batch_state,
         ],
     )
 
-    def _no_update_outputs(state, idx):
+    def _no_update_outputs(state, idx, batch_state):
         return (
             *([gr.update()] * len(VIEW_KEYS)),
             gr.update(),
             gr.update(),
             state,
             idx,
+            batch_state,
         )
 
     def _on_piece_change(
@@ -1260,9 +1381,10 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         batch_mode,
         state,
         idx,
+        batch_state,
     ):
         if not piece_path:
-            yield _no_update_outputs(state, idx)
+            yield _no_update_outputs(state, idx, batch_state)
             return
         result = solve_single_or_batch(
             piece_path, template_id, auto_align, template_rotation, batch_mode
@@ -1283,6 +1405,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             batch_grid_checkbox,
             match_state,
             match_index,
+            batch_state,
         ],
         outputs=[
             *ordered_components,
@@ -1290,6 +1413,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_summary,
             match_state,
             match_index,
+            batch_state,
         ],
     )
 
@@ -1308,6 +1432,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_summary,
             match_state,
             match_index,
+            batch_state,
         ],
     )
     prev_button.click(
@@ -1319,6 +1444,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_summary,
             match_state,
             match_index,
+            batch_state,
         ],
     )
     next_button.click(
@@ -1330,8 +1456,23 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_summary,
             match_state,
             match_index,
+            batch_state,
         ],
     )
+
+    for i, button in enumerate(batch_next_buttons):
+        button.click(
+            fn=partial(_advance_multipiece_candidate, i),
+            inputs=[batch_state],
+            outputs=[
+                *ordered_components,
+                match_location,
+                match_summary,
+                match_state,
+                match_index,
+                batch_state,
+            ],
+        )
 
     gr.Markdown(
         """
