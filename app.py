@@ -825,7 +825,9 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
             if isinstance(pair_value, np.ndarray):
                 labeled = _annotate_pair_image(pair_value, f"Piece {pidx + 1}")
                 multipiece_pairs.append(labeled)
-        views["zoom_pair"] = _stack_images_vertical(multipiece_pairs)
+        # Only overwrite the fallback/previous zoom_pair view if we have multipiece pairs
+        if multipiece_pairs:
+            views["zoom_pair"] = _stack_images_vertical(multipiece_pairs)
         views["zoom_template"] = (
             template_view if template_view is not None else make_zoomable_plot(None)
         )
