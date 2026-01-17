@@ -2,8 +2,7 @@
 
 import numpy as np
 import pytest
-import cv2
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 import tempfile
 from PIL import Image
@@ -129,7 +128,7 @@ class TestAnnotatePairImage:
         img = np.ones((200, 200, 3), dtype=np.uint8) * 128
         img_copy = img.copy()
         label = "Test"
-        result = _annotate_pair_image(img, label)
+        _annotate_pair_image(img, label)
         assert np.array_equal(img, img_copy)
 
     def test_annotate_with_long_label(self):
@@ -182,7 +181,7 @@ class TestOnPieceChange:
         # Based on _no_update_outputs, we need VIEW_KEYS outputs + 3 more
         from app import VIEW_KEYS
         import gradio as gr
-        
+
         num_views = len(VIEW_KEYS)
         # Return tuple: (*view_updates, location, summary, state, idx)
         return (
@@ -196,7 +195,7 @@ class TestOnPieceChange:
     def test_empty_piece_path_yields_no_update(self, mock_solve_function):
         """Test that empty piece_path yields no update outputs"""
         from app import _on_piece_change
-        
+
         # Mock parameters
         piece_path = None
         template_id = "test_template"
@@ -205,39 +204,47 @@ class TestOnPieceChange:
         batch_mode = False
         state = {}
         idx = 0
-        
+
         # Call the generator
         gen = _on_piece_change(
-            piece_path, template_id, auto_align, template_rotation, batch_mode, state, idx
+            piece_path,
+            template_id,
+            auto_align,
+            template_rotation,
+            batch_mode,
+            state,
+            idx,
         )
-        
-        # Get the result
-        result = next(gen)
-        
+
+        # Get the result and verify it's not None
+        next(gen)
+
         # Verify solve was not called
         mock_solve_function.assert_not_called()
-        
+
         # Verify generator stops after one yield
         with pytest.raises(StopIteration):
             next(gen)
 
-    def test_single_piece_mode_yields_from_result(self, mock_solve_function, sample_outputs):
+    def test_single_piece_mode_yields_from_result(
+        self, mock_solve_function, sample_outputs
+    ):
         """Test that single piece mode properly unpacks generator results"""
         from app import _on_piece_change
-        
+
         # Create a temporary test image
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             img = Image.new("RGB", (100, 100), (200, 200, 255))
             img.save(tmp.name)
             piece_path = tmp.name
-        
+
         try:
             # Mock solve_single_or_batch to return a generator that yields one result
             def mock_generator():
                 yield sample_outputs
-            
+
             mock_solve_function.return_value = mock_generator()
-            
+
             # Parameters
             template_id = "test_template"
             auto_align = False
@@ -245,16 +252,22 @@ class TestOnPieceChange:
             batch_mode = False
             state = {}
             idx = 0
-            
+
             # Call the function
             gen = _on_piece_change(
-                piece_path, template_id, auto_align, template_rotation, batch_mode, state, idx
+                piece_path,
+                template_id,
+                auto_align,
+                template_rotation,
+                batch_mode,
+                state,
+                idx,
             )
-            
+
             # Verify it yields the result from the generator
             result = next(gen)
             assert result == sample_outputs
-            
+
             # Verify solve was called with correct parameters
             mock_solve_function.assert_called_once_with(
                 piece_path, template_id, auto_align, template_rotation, batch_mode
@@ -265,21 +278,21 @@ class TestOnPieceChange:
     def test_batch_mode_yields_from_result(self, mock_solve_function, sample_outputs):
         """Test that batch mode properly unpacks generator results"""
         from app import _on_piece_change
-        
+
         # Create a temporary test image
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             img = Image.new("RGB", (100, 100), (200, 200, 255))
             img.save(tmp.name)
             piece_path = tmp.name
-        
+
         try:
             # Mock solve_single_or_batch to return a generator that yields multiple results
             def mock_generator():
                 yield sample_outputs
                 yield sample_outputs
-            
+
             mock_solve_function.return_value = mock_generator()
-            
+
             # Parameters
             template_id = "test_template"
             auto_align = False
@@ -287,18 +300,24 @@ class TestOnPieceChange:
             batch_mode = True
             state = {}
             idx = 0
-            
+
             # Call the function
             gen = _on_piece_change(
-                piece_path, template_id, auto_align, template_rotation, batch_mode, state, idx
+                piece_path,
+                template_id,
+                auto_align,
+                template_rotation,
+                batch_mode,
+                state,
+                idx,
             )
-            
+
             # Verify it yields all results from the generator
             result1 = next(gen)
             assert result1 == sample_outputs
             result2 = next(gen)
             assert result2 == sample_outputs
-            
+
             # Verify solve was called with correct parameters
             mock_solve_function.assert_called_once_with(
                 piece_path, template_id, auto_align, template_rotation, batch_mode
@@ -311,28 +330,27 @@ class TestOnPieceChange:
         # This test ensures that both batch_mode=True and batch_mode=False
         # use 'yield from' to properly unpack the generator
         from app import _on_piece_change
-        
+
         # Create a temporary test image
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             img = Image.new("RGB", (100, 100), (200, 200, 255))
             img.save(tmp.name)
             piece_path = tmp.name
-        
+
         try:
             with patch("app.solve_single_or_batch") as mock_solve:
                 # Mock to return a generator
                 def mock_gen():
                     yield ("result",)
-                
+
                 mock_solve.return_value = mock_gen()
-                
+
                 # Test single mode
                 gen = _on_piece_change(piece_path, "test", False, 0, False, {}, 0)
                 result = next(gen)
-                
+
                 # Should yield the tuple directly, not the generator
                 assert isinstance(result, tuple)
                 assert result == ("result",)
         finally:
             Path(piece_path).unlink(missing_ok=True)
-
