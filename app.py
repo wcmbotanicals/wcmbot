@@ -63,16 +63,18 @@ VIEW_LABELS = {
 TEMPLATE_ROTATION_OPTIONS = [0, 90, 180, 270]
 
 GRID_COLORS_BGR = [
-    (0, 0, 255),      # Red
-    (255, 0, 0),      # Blue
-    (0, 165, 255),    # Orange
-    (255, 0, 255),    # Magenta
-    (255, 255, 0),    # Cyan
-    (0, 255, 255),    # Yellow
-    (128, 0, 255),    # Pink
-    (255, 128, 0),    # Light blue
-    (128, 255, 0),    # Green-cyan
+    (0, 0, 255),  # Red
+    (255, 0, 0),  # Blue
+    (0, 165, 255),  # Orange
+    (255, 0, 255),  # Magenta
+    (255, 255, 0),  # Cyan
+    (0, 255, 255),  # Yellow
+    (128, 0, 255),  # Pink
+    (255, 128, 0),  # Light blue
+    (128, 255, 0),  # Green-cyan
 ]
+
+MULTIPIECE_DEFAULT = True
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
@@ -98,6 +100,72 @@ def make_zoomable_plot(image: Optional[np.ndarray]):
         scaleratio=1,
     )
     return fig
+
+
+def _stack_images_vertical(
+    images: list[np.ndarray],
+    gap: int = 8,
+    background: int = 255,
+    max_width: int = 0,
+) -> Optional[np.ndarray]:
+    if not images:
+        return None
+
+    prepared = []
+    for img in images:
+        if img is None:
+            continue
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        if img.dtype != np.uint8:
+            img = np.clip(img, 0, 255).astype(np.uint8)
+        prepared.append(img)
+
+    if not prepared:
+        return None
+
+    widths = [img.shape[1] for img in prepared]
+    max_w = max(widths)
+    if max_width and max_w > max_width:
+        scale = max_width / max_w
+        resized = []
+        for img in prepared:
+            h, w = img.shape[:2]
+            resized.append(cv2.resize(img, (int(w * scale), int(h * scale))))
+        prepared = resized
+        widths = [img.shape[1] for img in prepared]
+        max_w = max(widths)
+
+    heights = [img.shape[0] for img in prepared]
+    total_h = sum(heights) + gap * (len(prepared) - 1)
+    out = np.full((total_h, max_w, 3), background, dtype=np.uint8)
+    y = 0
+    for img in prepared:
+        h, w = img.shape[:2]
+        out[y : y + h, :w] = img
+        y += h + gap
+    return out
+
+
+def _annotate_pair_image(image: np.ndarray, label: str) -> np.ndarray:
+    annotated = image.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.8
+    thickness = 2
+    text_size, _ = cv2.getTextSize(label, font, font_scale, thickness)
+    text_w, text_h = text_size
+    pad = 6
+    x = pad
+    y = pad + text_h
+    cv2.rectangle(
+        annotated,
+        (x - pad, y - text_h - pad),
+        (x + text_w + pad, y + pad),
+        (255, 255, 255),
+        -1,
+    )
+    cv2.putText(annotated, label, (x, y), font, font_scale, (0, 0, 0), thickness)
+    return annotated
 
 
 def _annotate_grid_image(
@@ -196,8 +264,12 @@ def _overlay_piece_on_template(
     rot_mask = _rotate_image(
         mask01, rot, interpolation=cv2.INTER_NEAREST, border_value=0
     )
-    piece_rs = cv2.resize(rot_piece, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-    mask_rs = cv2.resize(rot_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    piece_rs = cv2.resize(
+        rot_piece, (target_w, target_h), interpolation=cv2.INTER_LINEAR
+    )
+    mask_rs = cv2.resize(
+        rot_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST
+    )
 
     tmpl_h, tmpl_w = template_bgr.shape[:2]
     src_x0 = max(0, -tlx)
@@ -224,9 +296,9 @@ def _overlay_piece_on_template(
     if mask_norm.ndim == 2:
         mask_norm = mask_norm[:, :, np.newaxis]
     mask_norm = np.clip(mask_norm * alpha, 0.0, 1.0)
-    blended_patch = (
-        template_patch * (1 - mask_norm) + piece_patch * mask_norm
-    ).astype(np.uint8)
+    blended_patch = (template_patch * (1 - mask_norm) + piece_patch * mask_norm).astype(
+        np.uint8
+    )
     template_bgr[dst_y0:dst_y1, dst_x0:dst_x1] = blended_patch
 
 
@@ -244,9 +316,7 @@ def _rotate_template_preview(
 def _cleanup_mask(
     mask: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
 ) -> np.ndarray:
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
-    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     if open_iters > 0:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iters)
     if close_iters > 0:
@@ -294,9 +364,7 @@ def _find_multipiece_regions(
 ):
     mask01 = _compute_multipiece_mask(image_bgr, matcher_config)
     mask255 = (mask01 > 0).astype(np.uint8) * 255
-    contours, _ = cv2.findContours(
-        mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return [], mask01
 
@@ -486,6 +554,7 @@ def _blank_outputs(message: str, template_id: str, template_rotation: int):
     )
     blank_views["template_color"] = rotated_template
     blank_views["zoom_template"] = make_zoomable_plot(rotated_template)
+    blank_views["zoom_pair"] = None
     location = "Run the matcher to infer a row and column."
     return _views_to_outputs(blank_views, location, message, None, 0)
 
@@ -666,9 +735,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
                             if contours:
                                 for cnt in contours:
                                     cnt = (
-                                        np.asarray(cnt)
-                                        .reshape(-1, 2)
-                                        .astype(np.int32)
+                                        np.asarray(cnt).reshape(-1, 2).astype(np.int32)
                                     )
                                     cv2.polylines(
                                         template_marked, [cnt], True, color, 2
@@ -746,6 +813,21 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
             if isinstance(latest_piece, np.ndarray)
             else np.zeros((200, 200, 3), dtype=np.uint8)
         )
+        multipiece_pairs = []
+        for pidx, _, presult in all_results:
+            if presult is None:
+                continue
+            outputs = list(presult)
+            zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
+            pair_value = (
+                outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
+            )
+            if isinstance(pair_value, np.ndarray):
+                labeled = _annotate_pair_image(pair_value, f"Piece {pidx + 1}")
+                multipiece_pairs.append(labeled)
+        # Only overwrite the fallback/previous zoom_pair view if we have multipiece pairs
+        if multipiece_pairs:
+            views["zoom_pair"] = _stack_images_vertical(multipiece_pairs)
         views["zoom_template"] = (
             template_view if template_view is not None else make_zoomable_plot(None)
         )
@@ -947,7 +1029,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 elem_id="piece-upload",
             )
             grid_overview_header = gr.Markdown(
-                "### Multipiece overview (numbered)", visible=False
+                "### Multipiece overview (numbered)", visible=MULTIPIECE_DEFAULT
             )
             image_components = {}
             image_components["grid_overview"] = gr.Image(
@@ -955,7 +1037,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 type="numpy",
                 interactive=False,
                 height=300,
-                visible=False,
+                visible=MULTIPIECE_DEFAULT,
             )
             with gr.Accordion("Settings", open=False):
                 template_selector = gr.Dropdown(
@@ -969,7 +1051,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 )
                 batch_grid_checkbox = gr.Checkbox(
                     label="Multipiece mode (batch)",
-                    value=False,
+                    value=MULTIPIECE_DEFAULT,
                     info="If checked, detect multiple pieces in the upload and solve each in sequence.",
                 )
                 diagnostic_mode_checkbox = gr.Checkbox(
@@ -1010,7 +1092,6 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         label="Piece + template match (outline)",
         type="numpy",
         interactive=False,
-        height=300,
     )
     with gr.Row(visible=False):
         image_components["zoom_piece"] = gr.Image(
@@ -1032,7 +1113,13 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         key
         for key in VIEW_KEYS
         if key
-        not in ("zoom_template", "zoom_focus", "zoom_piece", "zoom_pair", "grid_overview")
+        not in (
+            "zoom_template",
+            "zoom_focus",
+            "zoom_piece",
+            "zoom_pair",
+            "grid_overview",
+        )
     ]
 
     diagnostic_row1 = gr.Row(visible=False)
@@ -1127,15 +1214,46 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         ],
     )
 
+    def _no_update_outputs(state, idx):
+        return (
+            *([gr.update()] * len(VIEW_KEYS)),
+            gr.update(),
+            gr.update(),
+            state,
+            idx,
+        )
+
+    def _on_piece_change(
+        piece_path,
+        template_id,
+        auto_align,
+        template_rotation,
+        batch_mode,
+        state,
+        idx,
+    ):
+        if not piece_path:
+            yield _no_update_outputs(state, idx)
+            return
+        result = solve_single_or_batch(
+            piece_path, template_id, auto_align, template_rotation, batch_mode
+        )
+        if batch_mode:
+            yield from result
+        else:
+            yield result
+
     # Auto-run matching whenever a new piece is uploaded or pasted
-    piece_input.change(
-        fn=solve_single_or_batch,
+    piece_input.upload(
+        fn=_on_piece_change,
         inputs=[
             piece_input,
             template_selector,
             auto_align_checkbox,
             template_rotation,
             batch_grid_checkbox,
+            match_state,
+            match_index,
         ],
         outputs=[
             *ordered_components,
