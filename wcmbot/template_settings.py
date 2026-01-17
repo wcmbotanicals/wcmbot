@@ -19,6 +19,8 @@ class TemplateSpec:
     template_path: Path
     rows: int
     cols: int
+    crop_x: int = 0
+    crop_y: int = 0
     default_rotation: int = 0
     auto_align_default: bool = True
     piece_dirs: Tuple[Path, ...] = field(default_factory=tuple)
@@ -71,6 +73,8 @@ def load_template_registry(
             template_path=template_path,
             rows=int(entry["rows"]),
             cols=int(entry["cols"]),
+            crop_x=int(entry.get("crop_x", 0)),
+            crop_y=int(entry.get("crop_y", 0)),
             default_rotation=int(entry.get("default_rotation", 0)),
             auto_align_default=bool(entry.get("auto_align_default", True)),
             piece_dirs=piece_dirs,

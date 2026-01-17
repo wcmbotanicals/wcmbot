@@ -116,6 +116,8 @@ def test_find_piece_expected_location(
         {
             "rows": spec.rows,
             "cols": spec.cols,
+            "crop_x": spec.crop_x,
+            "crop_y": spec.crop_y,
             **spec.matcher_overrides,
         }
     )

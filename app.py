@@ -529,10 +529,25 @@ def check_template_exists(template_path: Path):
         )
 
 
-def get_template_image(template_path: Path) -> Optional[np.ndarray]:
+def get_template_image(
+    template_path: Path, *, crop_x: int, crop_y: int
+) -> Optional[np.ndarray]:
     """Get the template image."""
     if template_path.exists():
-        return np.array(Image.open(template_path))
+        img = np.array(Image.open(template_path))
+        crop_x = int(crop_x)
+        crop_y = int(crop_y)
+        if crop_x < 0 or crop_y < 0:
+            raise ValueError("crop_x and crop_y must be non-negative.")
+        if crop_x or crop_y:
+            h, w = img.shape[:2]
+            if crop_x * 2 >= w or crop_y * 2 >= h:
+                raise ValueError(
+                    f"Template crop too large for {w}x{h}: "
+                    f"crop_x={crop_x} crop_y={crop_y}"
+                )
+            img = img[crop_y : h - crop_y, crop_x : w - crop_x]
+        return img
     return None
 
 
@@ -613,6 +628,8 @@ def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
             {
                 "rows": template_spec.rows,
                 "cols": template_spec.cols,
+                "crop_x": template_spec.crop_x,
+                "crop_y": template_spec.crop_y,
                 **template_spec.matcher_overrides,
             }
         )
@@ -661,6 +678,8 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         {
             "rows": template_spec.rows,
             "cols": template_spec.cols,
+            "crop_x": template_spec.crop_x,
+            "crop_y": template_spec.crop_y,
             **template_spec.matcher_overrides,
         }
     )
@@ -685,7 +704,9 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
     template_rgb = None
     for spec in TEMPLATE_REGISTRY.templates.values():
         if spec.template_id == template_id:
-            template_rgb = get_template_image(spec.template_path)
+            template_rgb = get_template_image(
+                spec.template_path, crop_x=spec.crop_x, crop_y=spec.crop_y
+            )
             break
 
     def _build_multipiece_views(last_result=None):
@@ -966,15 +987,23 @@ for spec in TEMPLATE_REGISTRY.templates.values():
                 str(spec.template_path),
                 blur_ksz=overrides.get("match_blur_ksz"),
                 binarize_blur_ksz=overrides.get("binarize_blur_ksz"),
+                crop_x=spec.crop_x,
+                crop_y=spec.crop_y,
             )
         else:
-            preload_template_cache(str(spec.template_path))
+            preload_template_cache(
+                str(spec.template_path),
+                crop_x=spec.crop_x,
+                crop_y=spec.crop_y,
+            )
     except Exception:
         # Preloading is an optimization; if it fails, templates will load on-demand
         pass
 
 TEMPLATE_IMAGES = {
-    spec.template_id: get_template_image(spec.template_path)
+    spec.template_id: get_template_image(
+        spec.template_path, crop_x=spec.crop_x, crop_y=spec.crop_y
+    )
     for spec in TEMPLATE_REGISTRY.templates.values()
 }
 DEFAULT_TEMPLATE_PREVIEW = _rotate_template_preview(
