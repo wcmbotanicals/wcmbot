@@ -140,6 +140,9 @@ def test_piece_upload_and_match(page, gradio_app):
     page.wait_for_selector("input[aria-label='Template']", timeout=10000)
     page.locator("input[aria-label='Template']").click()
     page.get_by_role("option", name="Sample Puzzle", exact=True).click()
+    batch_checkbox = page.get_by_label("Multipiece mode (batch)")
+    if batch_checkbox.is_checked():
+        batch_checkbox.uncheck()
 
     # Create a test piece image
     project_dir = Path(__file__).resolve().parents[1]

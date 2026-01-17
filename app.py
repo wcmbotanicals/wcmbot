@@ -63,15 +63,15 @@ VIEW_LABELS = {
 TEMPLATE_ROTATION_OPTIONS = [0, 90, 180, 270]
 
 GRID_COLORS_BGR = [
-    (0, 0, 255),      # Red
-    (255, 0, 0),      # Blue
-    (0, 165, 255),    # Orange
-    (255, 0, 255),    # Magenta
-    (255, 255, 0),    # Cyan
-    (0, 255, 255),    # Yellow
-    (128, 0, 255),    # Pink
-    (255, 128, 0),    # Light blue
-    (128, 255, 0),    # Green-cyan
+    (0, 0, 255),  # Red
+    (255, 0, 0),  # Blue
+    (0, 165, 255),  # Orange
+    (255, 0, 255),  # Magenta
+    (255, 255, 0),  # Cyan
+    (0, 255, 255),  # Yellow
+    (128, 0, 255),  # Pink
+    (255, 128, 0),  # Light blue
+    (128, 255, 0),  # Green-cyan
 ]
 
 MULTIPIECE_DEFAULT = True
@@ -166,8 +166,6 @@ def _annotate_pair_image(image: np.ndarray, label: str) -> np.ndarray:
     )
     cv2.putText(annotated, label, (x, y), font, font_scale, (0, 0, 0), thickness)
     return annotated
-
-
 
 
 def _annotate_grid_image(
@@ -266,8 +264,12 @@ def _overlay_piece_on_template(
     rot_mask = _rotate_image(
         mask01, rot, interpolation=cv2.INTER_NEAREST, border_value=0
     )
-    piece_rs = cv2.resize(rot_piece, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-    mask_rs = cv2.resize(rot_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    piece_rs = cv2.resize(
+        rot_piece, (target_w, target_h), interpolation=cv2.INTER_LINEAR
+    )
+    mask_rs = cv2.resize(
+        rot_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST
+    )
 
     tmpl_h, tmpl_w = template_bgr.shape[:2]
     src_x0 = max(0, -tlx)
@@ -294,9 +296,9 @@ def _overlay_piece_on_template(
     if mask_norm.ndim == 2:
         mask_norm = mask_norm[:, :, np.newaxis]
     mask_norm = np.clip(mask_norm * alpha, 0.0, 1.0)
-    blended_patch = (
-        template_patch * (1 - mask_norm) + piece_patch * mask_norm
-    ).astype(np.uint8)
+    blended_patch = (template_patch * (1 - mask_norm) + piece_patch * mask_norm).astype(
+        np.uint8
+    )
     template_bgr[dst_y0:dst_y1, dst_x0:dst_x1] = blended_patch
 
 
@@ -314,9 +316,7 @@ def _rotate_template_preview(
 def _cleanup_mask(
     mask: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
 ) -> np.ndarray:
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
-    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     if open_iters > 0:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iters)
     if close_iters > 0:
@@ -364,9 +364,7 @@ def _find_multipiece_regions(
 ):
     mask01 = _compute_multipiece_mask(image_bgr, matcher_config)
     mask255 = (mask01 > 0).astype(np.uint8) * 255
-    contours, _ = cv2.findContours(
-        mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return [], mask01
 
@@ -737,9 +735,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
                             if contours:
                                 for cnt in contours:
                                     cnt = (
-                                        np.asarray(cnt)
-                                        .reshape(-1, 2)
-                                        .astype(np.int32)
+                                        np.asarray(cnt).reshape(-1, 2).astype(np.int32)
                                     )
                                     cv2.polylines(
                                         template_marked, [cnt], True, color, 2
@@ -823,7 +819,9 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
                 continue
             outputs = list(presult)
             zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
-            pair_value = outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
+            pair_value = (
+                outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
+            )
             if isinstance(pair_value, np.ndarray):
                 labeled = _annotate_pair_image(pair_value, f"Piece {pidx + 1}")
                 multipiece_pairs.append(labeled)
@@ -1113,7 +1111,13 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         key
         for key in VIEW_KEYS
         if key
-        not in ("zoom_template", "zoom_focus", "zoom_piece", "zoom_pair", "grid_overview")
+        not in (
+            "zoom_template",
+            "zoom_focus",
+            "zoom_piece",
+            "zoom_pair",
+            "grid_overview",
+        )
     ]
 
     diagnostic_row1 = gr.Row(visible=False)
