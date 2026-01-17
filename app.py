@@ -16,17 +16,17 @@ from PIL import Image
 
 from wcmbot import __version__
 from wcmbot.matcher import (
+    LOWER_BLUE1,
+    LOWER_BLUE2,
+    LOWER_GREEN1,
+    UPPER_BLUE1,
+    UPPER_BLUE2,
+    UPPER_GREEN1,
     build_matcher_config,
     find_piece_in_template,
     format_match_summary,
     preload_template_cache,
     render_primary_views,
-    LOWER_BLUE1,
-    UPPER_BLUE1,
-    LOWER_BLUE2,
-    UPPER_BLUE2,
-    LOWER_GREEN1,
-    UPPER_GREEN1,
 )
 from wcmbot.template_settings import load_template_registry
 
@@ -76,8 +76,7 @@ GRID_COLORS_BGR = [
 ]
 
 MULTIPIECE_DEFAULT = True
-MAX_BATCH_PIECES = 20
-BATCH_BUTTON_SPACER_PX = 308
+MAX_DYNAMIC_BUTTONS = 50
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
@@ -110,9 +109,10 @@ def _stack_images_vertical(
     gap: int = 8,
     background: int = 255,
     max_width: int = 0,
-) -> Optional[np.ndarray]:
+) -> tuple[Optional[np.ndarray], list[int]]:
+    """Stack images vertically and return (stacked_image, list_of_individual_heights)."""
     if not images:
-        return None
+        return None, []
 
     prepared = []
     for img in images:
@@ -125,7 +125,7 @@ def _stack_images_vertical(
         prepared.append(img)
 
     if not prepared:
-        return None
+        return None, []
 
     widths = [img.shape[1] for img in prepared]
     max_w = max(widths)
@@ -147,7 +147,7 @@ def _stack_images_vertical(
         h, w = img.shape[:2]
         out[y : y + h, :w] = img
         y += h + gap
-    return out
+    return out, heights
 
 
 def _annotate_pair_image(image: np.ndarray, label: str) -> np.ndarray:
@@ -563,8 +563,82 @@ def _views_to_outputs(
     batch_state,
 ):
     ordered = [views.get(key) for key in VIEW_KEYS]
-    batch_style = _build_batch_button_style(batch_state)
-    return (*ordered, location, summary, state, idx, batch_state, batch_style)
+    # Build visibility updates for button containers
+    button_visibility = _build_button_visibility(batch_state)
+    return (*ordered, location, summary, state, idx, batch_state, *button_visibility)
+
+
+def _build_button_visibility(batch_state):
+    """Return visibility and height updates for button containers and spacers."""
+    if not batch_state or "total" not in batch_state:
+        # No pieces, hide all buttons and spacers
+        # +2 for top and bottom spacers
+        updates = [gr.update(visible=False)] * MAX_DYNAMIC_BUTTONS
+        spacer_updates = [gr.update(visible=False)] * (MAX_DYNAMIC_BUTTONS + 1)
+        return updates + spacer_updates
+
+    total = int(batch_state.get("total", 0))
+    piece_heights = batch_state.get("piece_image_heights", [])
+    gap = 8  # Gap between stacked images in pixels
+
+    # Button container updates
+    button_updates = []
+    for i in range(MAX_DYNAMIC_BUTTONS):
+        button_updates.append(gr.update(visible=(i < total)))
+
+    # Spacer updates
+    # Index 0 = top spacer (half height)
+    # Index 1 to n = between groups
+    # Index n+1 = bottom spacer (half height)
+    spacer_updates = []
+
+    for i in range(MAX_DYNAMIC_BUTTONS + 1):
+        if i == 0:
+            # Top spacer - half of regular spacing
+            if total > 0:
+                if 0 < len(piece_heights):
+                    half_spacer = (
+                        piece_heights[0] + gap - 140
+                    ) / 2  # Button group ~140px (interpolated)
+                    half_spacer = max(5, half_spacer)
+                else:
+                    half_spacer = 10
+                html = (
+                    f'<div class="batch-spacer" style="height: {half_spacer}px;"></div>'
+                )
+                spacer_updates.append(gr.update(value=html, visible=True))
+            else:
+                spacer_updates.append(gr.update(visible=False))
+        elif i <= total - 1:
+            # Regular spacers between groups
+            idx = i - 1  # Adjust for top spacer
+            if idx < len(piece_heights):
+                spacer_height = (
+                    piece_heights[idx] + gap - 140
+                )  # Button group ~140px (interpolated)
+                spacer_height = max(10, spacer_height)
+            else:
+                spacer_height = 20
+            html = (
+                f'<div class="batch-spacer" style="height: {spacer_height}px;"></div>'
+            )
+            spacer_updates.append(gr.update(value=html, visible=True))
+        elif i == total:
+            # Bottom spacer - half of regular spacing
+            last_idx = total - 1
+            if last_idx < len(piece_heights):
+                half_spacer = (
+                    piece_heights[last_idx] + gap - 140
+                ) / 2  # Button group ~140px (interpolated)
+                half_spacer = max(5, half_spacer)
+            else:
+                half_spacer = 10
+            html = f'<div class="batch-spacer" style="height: {half_spacer}px;"></div>'
+            spacer_updates.append(gr.update(value=html, visible=True))
+        else:
+            spacer_updates.append(gr.update(visible=False))
+
+    return button_updates + spacer_updates
 
 
 def _blank_outputs(message: str, template_id: str, template_rotation: int):
@@ -740,6 +814,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
         else np.zeros((200, 200, 3), dtype=np.uint8)
     )
     multipiece_pairs = []
+    piece_indices_with_pairs = []
     for pidx, state in enumerate(piece_states):
         payload = state.get("payload") if state else None
         if not payload or not getattr(payload, "matches", None):
@@ -752,8 +827,16 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
         if isinstance(pair_view, np.ndarray):
             labeled = _annotate_pair_image(pair_view, f"Piece {pidx + 1}")
             multipiece_pairs.append(labeled)
+            piece_indices_with_pairs.append(pidx)
+
+    piece_heights = []
     if multipiece_pairs:
-        views["zoom_pair"] = _stack_images_vertical(multipiece_pairs)
+        stacked, piece_heights = _stack_images_vertical(multipiece_pairs)
+        views["zoom_pair"] = stacked
+        # Store heights in batch_state for button alignment
+        if batch_state is not None:
+            batch_state["piece_image_heights"] = piece_heights
+            batch_state["piece_indices_displayed"] = piece_indices_with_pairs
     views["zoom_template"] = (
         template_view if template_view is not None else make_zoomable_plot(None)
     )
@@ -829,6 +912,153 @@ def _advance_multipiece_candidate(piece_index: int, batch_state):
         0,
         batch_state,
     )
+
+
+def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_state):
+    """Apply manual rotation to a piece and rematch without auto-alignment."""
+    if not batch_state or "piece_states" not in batch_state:
+        blank_views = {key: None for key in VIEW_KEYS}
+        return _views_to_outputs(
+            blank_views,
+            "Run the matcher once a piece is uploaded.",
+            "",
+            None,
+            0,
+            batch_state,
+        )
+
+    piece_states = batch_state.get("piece_states") or []
+    total = int(batch_state.get("total") or len(piece_states))
+    template_id = batch_state.get("template_id")
+    template_rotation = batch_state.get("rotation", 0)
+
+    if piece_index < 0 or piece_index >= len(piece_states):
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            f"Piece {piece_index + 1} is not available yet.",
+            None,
+            0,
+            batch_state,
+        )
+
+    state = piece_states[piece_index]
+    if not state or state.get("payload") is None:
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            f"Piece {piece_index + 1} has no data to rotate.",
+            None,
+            0,
+            batch_state,
+        )
+
+    # Get the original piece path from cached data
+    cached_piece_path = state.get("piece_path")
+    if not cached_piece_path or not os.path.exists(cached_piece_path):
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            f"Piece {piece_index + 1} data not available for rotation.",
+            None,
+            0,
+            batch_state,
+        )
+
+    # Get current auto-alignment and manual rotation
+    payload = state.get("payload")
+    auto_align_deg = getattr(payload, "auto_align_deg", 0.0) if payload else 0.0
+    current_manual_rotation = state.get("manual_rotation", 0.0)
+    new_manual_rotation = current_manual_rotation + rotation_deg
+
+    # Total rotation = original auto-alignment + cumulative manual adjustments
+    total_rotation = auto_align_deg + new_manual_rotation
+
+    # Get template spec and run matcher with forced rotation (no auto-align)
+    template_spec = TEMPLATE_REGISTRY.get(template_id)
+    try:
+        matcher_config = build_matcher_config(
+            {
+                "rows": template_spec.rows,
+                "cols": template_spec.cols,
+                "crop_x": template_spec.crop_x,
+                "crop_y": template_spec.crop_y,
+                **template_spec.matcher_overrides,
+            }
+        )
+
+        # Load the original piece and apply total rotation
+        piece_bgr = cv2.imread(cached_piece_path)
+        if piece_bgr is None:
+            raise ValueError(f"Could not load piece image: {cached_piece_path}")
+
+        # Apply total rotation to the piece
+        if abs(total_rotation) > 0.01:
+            h, w = piece_bgr.shape[:2]
+            center = (w // 2, h // 2)
+            rot_matrix = cv2.getRotationMatrix2D(center, total_rotation, 1.0)
+            piece_bgr = cv2.warpAffine(piece_bgr, rot_matrix, (w, h))
+
+        # Save rotated piece to temp file
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_rotated_path = tmp.name
+            cv2.imwrite(tmp_rotated_path, piece_bgr)
+
+        try:
+            # Run matcher without auto-align
+            payload = find_piece_in_template(
+                tmp_rotated_path,
+                str(template_spec.template_path),
+                knobs_x=None,
+                knobs_y=None,
+                auto_align=False,  # Don't auto-align, use manual rotation only
+                infer_knobs=True,
+                template_rotation=template_rotation,
+                matcher_config=matcher_config,
+            )
+
+            # Update state with new payload and rotation
+            state["payload"] = payload
+            state["match_index"] = 0
+            state["manual_rotation"] = new_manual_rotation
+
+        finally:
+            try:
+                os.remove(tmp_rotated_path)
+            except OSError:
+                pass
+
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        summary = (
+            f"Piece {piece_index + 1}: rotated {new_manual_rotation:+.1f}° "
+            f"(total: {total_rotation:+.1f}°, {len(payload.matches)} candidates)."
+        )
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            summary,
+            None,
+            0,
+            batch_state,
+        )
+    except Exception as exc:
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            f"Error rotating piece {piece_index + 1}: {exc}",
+            None,
+            0,
+            batch_state,
+        )
 
 
 def _change_match(
@@ -980,16 +1210,21 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
                 state_idx = len(VIEW_KEYS) + 2
                 if state_idx < len(outputs):
                     payload = outputs[state_idx]
-            piece_states[idx] = {"payload": payload, "match_index": 0}
+            piece_states[idx] = {
+                "payload": payload,
+                "match_index": 0,
+                "piece_path": tmp_path,  # Cache the piece path for rotation
+                "manual_rotation": 0.0,
+            }
         except Exception:
             all_results.append((idx, region, None))
-            piece_states[idx] = {"payload": None, "match_index": 0, "error": True}
-        finally:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                # Ignore errors if temporary file already deleted or inaccessible
-                pass
+            piece_states[idx] = {
+                "payload": None,
+                "match_index": 0,
+                "error": True,
+                "piece_path": tmp_path,
+                "manual_rotation": 0.0,
+            }
 
         coord_markdown = _format_multipiece_table(piece_states, total)
 
@@ -1110,18 +1345,96 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     demo.load(fn=get_random_ad, outputs=ad_banner)
 
     gr.HTML(
-        f"""
+        """
     <style>
-    #primary-template-view img {{
+    #primary-template-view img {
         cursor: zoom-in;
-    }}
-    .batch-next-button {{
+    }
+    .batch-button-group {
         width: 100%;
-    }}
-    .batch-button-spacer {{
-        height: {BATCH_BUTTON_SPACER_PX}px;
-    }}
+        padding: 12px 8px;
+        border: 1px solid #e0e0e0;
+        border-radius: 4px;
+        background: #f9f9f9;
+        margin-bottom: 0px;
+        box-sizing: border-box;
+    }
+    .batch-button-group button {
+        width: 100%;
+        margin: 3px 0;
+    }
+    .batch-spacer {
+        width: 100%;
+    }
+    /* Ensure title alignment */
+    h3 {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
     </style>
+    <script>
+    // Align button groups with stacked piece images
+    function alignButtonGroups() {
+        setTimeout(() => {
+            const zoomPairContainer = document.querySelector('[data-testid="Piece + template match (outline)"]');
+            const zoomPairImg = zoomPairContainer ? zoomPairContainer.querySelector('img') : null;
+            const buttonGroups = document.querySelectorAll('.batch-button-group');
+            const spacers = document.querySelectorAll('.batch-spacer');
+            
+            if (!zoomPairImg || buttonGroups.length === 0) return;
+            
+            // Get visible button groups
+            const visibleGroups = Array.from(buttonGroups).filter(g => 
+                g.offsetParent !== null && getComputedStyle(g).display !== 'none'
+            );
+            
+            if (visibleGroups.length === 0) return;
+            
+            // Total image height (stacked images with gaps)
+            const totalImgHeight = zoomPairImg.offsetHeight;
+            const numPieces = visibleGroups.length;
+            const imageGap = 8; // Gap between stacked images
+            
+            // Calculate target height per piece section
+            const totalGaps = (numPieces - 1) * imageGap;
+            const targetHeightPerSection = (totalImgHeight + totalGaps) / numPieces;
+            
+            // Set spacer heights to make button groups align with images
+            visibleGroups.forEach((group, idx) => {
+                const groupHeight = group.offsetHeight;
+                const spacerHeight = targetHeightPerSection - groupHeight;
+                
+                // Find and update the spacer after this group
+                if (idx < spacers.length && idx < numPieces - 1) {
+                    const spacer = spacers[idx];
+                    if (spacer && spacer.offsetParent !== null) {
+                        spacer.style.height = Math.max(imageGap, spacerHeight) + 'px';
+                    }
+                }
+            });
+        }, 400);
+    }
+    
+    // Run on load, resize, and DOM changes
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', alignButtonGroups);
+    } else {
+        alignButtonGroups();
+    }
+    window.addEventListener('resize', alignButtonGroups);
+    
+    const observer = new MutationObserver(() => {
+        alignButtonGroups();
+    });
+    if (document.body) {
+        observer.observe(document.body, { 
+            childList: true, 
+            subtree: true, 
+            attributes: true,
+            attributeFilter: ['src', 'style', 'class']
+        });
+    }
+    </script>
     """
     )
 
@@ -1205,9 +1518,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             )
             gr.Markdown("Use the controls to zoom and pan the image.")
 
-    gr.Markdown("### Best match (side-by-side)")
     with gr.Row():
         with gr.Column(scale=3):
+            gr.Markdown("### Best match (side-by-side)")
             image_components["zoom_pair"] = gr.Image(
                 label="Piece + template match (outline)",
                 type="numpy",
@@ -1215,16 +1528,69 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             )
         batch_buttons_column = gr.Column(scale=1, visible=MULTIPIECE_DEFAULT)
         with batch_buttons_column:
-            gr.Markdown("### Next candidate")
-            batch_next_buttons = []
-            for i in range(MAX_BATCH_PIECES):
-                button = gr.Button(
-                    f"Next candidate (Piece {i + 1})",
-                    elem_classes=["batch-next-button"],
-                )
-                batch_next_buttons.append(button)
-                if i < MAX_BATCH_PIECES - 1:
-                    gr.HTML('<div class="batch-button-spacer"></div>')
+            gr.Markdown("### Per-piece controls")
+            # Add top spacer (half height)
+            top_spacer = gr.HTML(
+                '<div class="batch-spacer" style="height: 0px;"></div>', visible=False
+            )
+
+            batch_button_groups = []
+            batch_button_containers = []
+            batch_spacers = [top_spacer]  # Start with top spacer
+            batch_rotation_inputs = []
+            for i in range(MAX_DYNAMIC_BUTTONS):
+                container = gr.Group(elem_classes=["batch-button-group"], visible=False)
+                batch_button_containers.append(container)
+                with container:
+                    gr.Markdown(f"**Piece {i + 1}**")
+                    next_btn = gr.Button("Next candidate", size="sm")
+                    gr.HTML(
+                        '<div style="font-size: 13px; margin-top: 8px; margin-bottom: 4px;">Rotate:</div>'
+                    )
+                    with gr.Row():
+                        rotation_input = gr.Number(
+                            value=2.5,
+                            minimum=0,
+                            maximum=10,
+                            step=0.1,
+                            show_label=False,
+                            container=False,
+                            scale=2,
+                            min_width=60,
+                        )
+                        gr.HTML(
+                            '<div style="font-size: 14px; padding: 8px 4px;">°</div>',
+                            scale=0,
+                            min_width=20,
+                        )
+                        rotate_ccw_btn = gr.Button(
+                            "↺ CCW", size="sm", scale=3, min_width=70
+                        )
+                        rotate_cw_btn = gr.Button(
+                            "↻ CW", size="sm", scale=3, min_width=70
+                        )
+                    batch_button_groups.append(
+                        {
+                            "next": next_btn,
+                            "rotate_cw": rotate_cw_btn,
+                            "rotate_ccw": rotate_ccw_btn,
+                            "rotation_input": rotation_input,
+                        }
+                    )
+                    batch_rotation_inputs.append(rotation_input)
+                # Add spacer after each group (except last)
+                if i < MAX_DYNAMIC_BUTTONS - 1:
+                    spacer = gr.HTML(
+                        '<div class="batch-spacer" style="height: 8px;"></div>',
+                        visible=False,
+                    )
+                    batch_spacers.append(spacer)
+
+            # Add bottom spacer (half height)
+            bottom_spacer = gr.HTML(
+                '<div class="batch-spacer" style="height: 0px;"></div>', visible=False
+            )
+            batch_spacers.append(bottom_spacer)
     with gr.Row(visible=False):
         image_components["zoom_piece"] = gr.Image(
             label="Piece (masked + rotated)",
@@ -1364,6 +1730,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
 
     def _no_update_outputs(state, idx, batch_state):
+        num_spacers = (
+            MAX_DYNAMIC_BUTTONS + 1
+        )  # +1 for top spacer, +1 for bottom = +2 total but -1 from original count
         return (
             *([gr.update()] * len(VIEW_KEYS)),
             gr.update(),
@@ -1371,6 +1740,8 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             state,
             idx,
             batch_state,
+            *([gr.update()] * MAX_DYNAMIC_BUTTONS),  # Button visibility updates
+            *([gr.update()] * num_spacers),  # Spacer updates (including top and bottom)
         )
 
     def _on_piece_change(
@@ -1414,6 +1785,8 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_state,
             match_index,
             batch_state,
+            *batch_button_containers,
+            *batch_spacers,
         ],
     )
 
@@ -1433,6 +1806,8 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_state,
             match_index,
             batch_state,
+            *batch_button_containers,
+            *batch_spacers,
         ],
     )
     prev_button.click(
@@ -1445,6 +1820,8 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_state,
             match_index,
             batch_state,
+            *batch_button_containers,
+            *batch_spacers,
         ],
     )
     next_button.click(
@@ -1457,11 +1834,17 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_state,
             match_index,
             batch_state,
+            *batch_button_containers,
+            *batch_spacers,
         ],
     )
 
-    for i, button in enumerate(batch_next_buttons):
-        button.click(
+    # Hook up batch button handlers
+    for i, button_group in enumerate(batch_button_groups):
+        rotation_input = button_group["rotation_input"]
+
+        # Next candidate button
+        button_group["next"].click(
             fn=partial(_advance_multipiece_candidate, i),
             inputs=[batch_state],
             outputs=[
@@ -1471,6 +1854,42 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 match_state,
                 match_index,
                 batch_state,
+                *batch_button_containers,
+                *batch_spacers,
+            ],
+        )
+        # Rotate clockwise button (negative angle for CW)
+        button_group["rotate_cw"].click(
+            fn=lambda bs, deg, idx=i: _rotate_multipiece_candidate(
+                idx, -abs(deg or 1), bs
+            ),
+            inputs=[batch_state, rotation_input],
+            outputs=[
+                *ordered_components,
+                match_location,
+                match_summary,
+                match_state,
+                match_index,
+                batch_state,
+                *batch_button_containers,
+                *batch_spacers,
+            ],
+        )
+        # Rotate counter-clockwise button (positive angle for CCW)
+        button_group["rotate_ccw"].click(
+            fn=lambda bs, deg, idx=i: _rotate_multipiece_candidate(
+                idx, abs(deg or 1), bs
+            ),
+            inputs=[batch_state, rotation_input],
+            outputs=[
+                *ordered_components,
+                match_location,
+                match_summary,
+                match_state,
+                match_index,
+                batch_state,
+                *batch_button_containers,
+                *batch_spacers,
             ],
         )
 
