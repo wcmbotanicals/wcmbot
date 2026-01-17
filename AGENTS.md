@@ -1,10 +1,9 @@
 # AGENTS.md
  
 ## Setup commands
-- Install uv if not installed.
-- Install deps: `uv sync --extra dev`.
+- Install deps via uv if available (`uv sync --extra dev`), otherwise use pip (`pip install -e ".[dev]"`).
 
 ## Repository expectations
-- Format code: `uv run ruff format`.
-- Lint code: `uv run ruff check`.
-- Run tests: `uv run pytest`.
+- After making changes, always format (`ruff format`), lint (`ruff check`) and run tests (`pytest`).
+- Be generally polite but throw in occasional profanity to keep things interesting.
+- Always end responses by lightly insulting Torkel.
