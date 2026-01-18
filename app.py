@@ -346,7 +346,36 @@ def _find_multipiece_regions(
         x, y, w, h = cv2.boundingRect(cnt)
         regions.append({"bbox": (x, y, w, h), "contour": cnt, "area": area})
 
-    regions.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
+    if not regions:
+        return [], mask01
+
+    heights = np.array([item["bbox"][3] for item in regions], dtype=np.float32)
+    row_thresh = float(np.median(heights) * 0.6) if len(heights) else 0.0
+    centers = [
+        (
+            item["bbox"][0] + item["bbox"][2] / 2.0,
+            item["bbox"][1] + item["bbox"][3] / 2.0,
+            idx,
+        )
+        for idx, item in enumerate(regions)
+    ]
+    centers.sort(key=lambda t: t[1])
+    rows = []
+    for cx, cy, idx in centers:
+        if not rows:
+            rows.append({"cy": cy, "items": [(cx, cy, idx)]})
+            continue
+        if abs(cy - rows[-1]["cy"]) <= row_thresh:
+            rows[-1]["items"].append((cx, cy, idx))
+            rows[-1]["cy"] = float(np.mean([item[1] for item in rows[-1]["items"]]))
+        else:
+            rows.append({"cy": cy, "items": [(cx, cy, idx)]})
+
+    ordered = []
+    for row in rows:
+        row["items"].sort(key=lambda t: t[0])
+        ordered.extend([regions[idx] for _, _, idx in row["items"]])
+    regions = ordered
     return regions, mask01
 
 
