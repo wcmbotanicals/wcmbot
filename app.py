@@ -72,11 +72,6 @@ GRID_COLORS_BGR = [
 
 MULTIPIECE_DEFAULT = True
 MAX_DYNAMIC_BUTTONS = 50
-# Approximate height in pixels of each dynamic button group as rendered by Gradio.
-# Measured on the default Gradio theme at 100% browser zoom with standard font sizes.
-# If the UI styling, theme, or zoom level changes significantly, this value may need
-# to be re-measured and updated. It is used only for approximate layout calculations.
-BUTTON_GROUP_HEIGHT = 145
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
@@ -563,69 +558,19 @@ def _views_to_outputs(
 
 
 def _build_button_visibility(batch_state):
-    """Return visibility and height updates for button containers and spacers."""
+    """Return visibility updates for button containers; spacers stay hidden."""
     if not batch_state or "total" not in batch_state:
-        # No pieces, hide all buttons and spacers
-        # There are MAX_DYNAMIC_BUTTONS + 1 spacers (top, between groups, bottom)
-        updates = [gr.update(visible=False)] * MAX_DYNAMIC_BUTTONS
-        spacer_updates = [gr.update(visible=False)] * (MAX_DYNAMIC_BUTTONS + 1)
-        return updates + spacer_updates
+        button_updates = [gr.update(visible=False)] * MAX_DYNAMIC_BUTTONS
+        spacer_updates = [gr.update(visible=False, value="")] * (
+            MAX_DYNAMIC_BUTTONS + 1
+        )
+        return button_updates + spacer_updates
 
     total = int(batch_state.get("total", 0))
-    piece_heights = batch_state.get("piece_image_heights", [])
-    gap = 8  # Gap between stacked images in pixels
-
-    # Button container updates
-    button_updates = []
-    for i in range(MAX_DYNAMIC_BUTTONS):
-        button_updates.append(gr.update(visible=(i < total)))
-
-    # Spacer updates
-    # Index 0 = top spacer (half height)
-    # Index 1 to n = between groups
-    # Index n+1 = bottom spacer (half height)
-    spacer_updates = []
-
-    for i in range(MAX_DYNAMIC_BUTTONS + 1):
-        if i == 0:
-            # Top spacer - half of regular spacing
-            if total > 0:
-                if 0 < len(piece_heights):
-                    half_spacer = (piece_heights[0] + gap - BUTTON_GROUP_HEIGHT) / 2
-                    half_spacer = max(5, half_spacer)
-                else:
-                    half_spacer = 10
-                html = (
-                    f'<div class="batch-spacer" style="height: {half_spacer}px;"></div>'
-                )
-                spacer_updates.append(gr.update(value=html, visible=True))
-            else:
-                spacer_updates.append(gr.update(visible=False))
-        elif i <= total - 1:
-            # Regular spacers between groups
-            idx = i - 1  # Adjust for top spacer
-            if idx < len(piece_heights):
-                spacer_height = piece_heights[idx] + gap - BUTTON_GROUP_HEIGHT
-                spacer_height = max(10, spacer_height)
-            else:
-                spacer_height = 20
-            html = (
-                f'<div class="batch-spacer" style="height: {spacer_height}px;"></div>'
-            )
-            spacer_updates.append(gr.update(value=html, visible=True))
-        elif i == total:
-            # Bottom spacer - half of regular spacing
-            last_idx = total - 1
-            if last_idx < len(piece_heights):
-                half_spacer = (piece_heights[last_idx] + gap - BUTTON_GROUP_HEIGHT) / 2
-                half_spacer = max(5, half_spacer)
-            else:
-                half_spacer = 10
-            html = f'<div class="batch-spacer" style="height: {half_spacer}px;"></div>'
-            spacer_updates.append(gr.update(value=html, visible=True))
-        else:
-            spacer_updates.append(gr.update(visible=False))
-
+    button_updates = [
+        gr.update(visible=(i < total)) for i in range(MAX_DYNAMIC_BUTTONS)
+    ]
+    spacer_updates = [gr.update(visible=False, value="")] * (MAX_DYNAMIC_BUTTONS + 1)
     return button_updates + spacer_updates
 
 
@@ -1363,83 +1308,12 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         width: 100%;
         margin: 3px 0;
     }
-    .batch-spacer {
-        width: 100%;
-    }
     /* Ensure title alignment */
     h3 {
         margin-top: 0 !important;
         padding-top: 0 !important;
     }
     </style>
-    <script>
-    // Align button groups with stacked piece images
-    function alignButtonGroups() {
-        setTimeout(() => {
-            const zoomPairContainer = document.querySelector('[data-testid="Piece + template match (outline)"]');
-            const zoomPairImg = zoomPairContainer ? zoomPairContainer.querySelector('img') : null;
-            const buttonGroups = document.querySelectorAll('.batch-button-group');
-            const spacers = document.querySelectorAll('.batch-spacer');
-            
-            if (!zoomPairImg || buttonGroups.length === 0) return;
-            
-            // Get visible button groups
-            const visibleGroups = Array.from(buttonGroups).filter(g => 
-                g.offsetParent !== null && getComputedStyle(g).display !== 'none'
-            );
-            
-            if (visibleGroups.length === 0) return;
-            
-            // Total image height (stacked images with gaps)
-            const totalImgHeight = zoomPairImg.offsetHeight;
-            const numPieces = visibleGroups.length;
-            const imageGap = 8; // Gap between stacked images
-            
-            // Calculate target height per piece section
-            const totalGaps = (numPieces - 1) * imageGap;
-            const targetHeightPerSection = (totalImgHeight + totalGaps) / numPieces;
-            
-            // Set spacer heights to make button groups align with images
-            visibleGroups.forEach((group, idx) => {
-                const groupHeight = group.offsetHeight;
-                const spacerHeight = targetHeightPerSection - groupHeight;
-                
-                // Find and update the spacer after this group
-                if (idx < spacers.length && idx < numPieces - 1) {
-                    const spacer = spacers[idx];
-                    if (spacer && spacer.offsetParent !== null) {
-                        spacer.style.height = Math.max(imageGap, spacerHeight) + 'px';
-                    }
-                }
-            });
-        }, 400);
-    }
-    
-    // Run on load, resize, and DOM changes
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', alignButtonGroups);
-    } else {
-        alignButtonGroups();
-    }
-    window.addEventListener('resize', alignButtonGroups);
-    
-    // Debounce the mutation observer callback to reduce overhead
-    let mutationTimeout = null;
-    const observer = new MutationObserver(() => {
-        if (mutationTimeout) {
-            clearTimeout(mutationTimeout);
-        }
-        mutationTimeout = setTimeout(alignButtonGroups, 100);
-    });
-    if (document.body) {
-        observer.observe(document.body, { 
-            childList: true, 
-            subtree: true, 
-            attributes: true,
-            attributeFilter: ['src', 'style', 'class']
-        });
-    }
-    </script>
     """
     )
 
@@ -1535,9 +1409,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         with batch_buttons_column:
             gr.Markdown("### Per-piece controls")
             # Add top spacer (half height)
-            top_spacer = gr.HTML(
-                '<div class="batch-spacer" style="height: 0px;"></div>', visible=False
-            )
+            top_spacer = gr.HTML("", visible=False)
 
             batch_button_groups = []
             batch_button_containers = []
@@ -1585,16 +1457,11 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                     batch_rotation_inputs.append(rotation_input)
                 # Add spacer after each group (except last)
                 if i < MAX_DYNAMIC_BUTTONS - 1:
-                    spacer = gr.HTML(
-                        '<div class="batch-spacer" style="height: 8px;"></div>',
-                        visible=False,
-                    )
+                    spacer = gr.HTML("", visible=False)
                     batch_spacers.append(spacer)
 
             # Add bottom spacer (half height)
-            bottom_spacer = gr.HTML(
-                '<div class="batch-spacer" style="height: 0px;"></div>', visible=False
-            )
+            bottom_spacer = gr.HTML("", visible=False)
             batch_spacers.append(bottom_spacer)
     with gr.Row(visible=False):
         image_components["zoom_piece"] = gr.Image(
