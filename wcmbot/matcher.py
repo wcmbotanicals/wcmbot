@@ -49,18 +49,20 @@ OPEN_ITERS = 2
 CLOSE_ITERS = 2
 MIN_MASK_AREA_FRAC = 0.0005
 AUTO_ALIGN_MIN_DEG = 0.0
-AUTO_ALIGN_MAX_DEG = 20.0
+AUTO_ALIGN_MAX_DEG = 45.0
 AUTO_ALIGN_MIN_LINES = 4
 AUTO_ALIGN_MIN_AREA_FRAC = -0.1  # only reject if bbox gets substantially worse
-AUTO_ALIGN_HOUGH_THRESHOLD = 50
-AUTO_ALIGN_HOUGH_MIN_LINE = 40
-AUTO_ALIGN_HOUGH_MAX_GAP = 20
+AUTO_ALIGN_REFERENCE_SIZE = 1024  # Reference size for normalizing images before masking
+AUTO_ALIGN_HOUGH_THRESHOLD_FRAC = 0.035
+AUTO_ALIGN_HOUGH_MIN_LINE_FRAC = 0.028
+AUTO_ALIGN_HOUGH_MAX_GAP_FRAC = 0.014
 INFER_KNOBS_TIE_EPS = 0.01
 INFER_KNOBS_LOW_FILL = 0.50
 INFER_KNOBS_HIGH_FILL = 0.65
 BINARIZE_BLUR_KSZ = (5, 5)
 MATCH_BLUR_KSZ = (3, 3)
 RESIZE_RETHRESHOLD = False
+PIECE_BG_PAD_FRAC = 0.03
 
 
 # ---------- helper dataclasses ----------
@@ -398,11 +400,27 @@ def _cleanup_mask(
     mask: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
 ) -> np.ndarray:
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0:
+        return mask
+    h, w = mask.shape[:2]
+    pad = max(1, kernel_size)
+    y0 = max(0, ys.min() - pad)
+    y1 = min(h, ys.max() + 1 + pad)
+    x0 = max(0, xs.min() - pad)
+    x1 = min(w, xs.max() + 1 + pad)
+    cropped = mask[y0:y1, x0:x1]
     if open_iters > 0:
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iters)
+        cropped = cv2.morphologyEx(
+            cropped, cv2.MORPH_OPEN, kernel, iterations=open_iters
+        )
     if close_iters > 0:
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_iters)
-    return mask
+        cropped = cv2.morphologyEx(
+            cropped, cv2.MORPH_CLOSE, kernel, iterations=close_iters
+        )
+    out = np.zeros_like(mask)
+    out[y0:y1, x0:x1] = cropped
+    return out
 
 
 def _mask_by_blue(
@@ -481,7 +499,7 @@ def compute_piece_mask(
     """Compute a binary mask for a puzzle piece based on color mode.
 
     Supports "blue", "green", or "hsv"/"hsv_ranges" modes. Returns a binary
-    mask (0 or 1) with the piece foreground isolated.
+    mask (0 or 1) with the piece foreground isolated at the input image size.
 
     Args:
         piece_bgr: BGR image of the piece.
@@ -520,6 +538,67 @@ def compute_piece_mask(
     raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
 
 
+def crop_image_to_mask(
+    img_bgr: np.ndarray, mask01: np.ndarray, pad_frac: float = 0.05, min_pad: int = 0
+) -> np.ndarray:
+    """Crop image tightly to the mask content with optional padding.
+
+    Args:
+        img_bgr: Input image.
+        mask01: Binary mask (0 or 1) indicating foreground.
+        pad_frac: Fraction of bounding box to add as padding.
+        min_pad: Minimum padding in pixels.
+
+    Returns:
+        np.ndarray: Cropped image containing only the masked region with padding.
+
+    Raises:
+        RuntimeError: If the provided mask contains no foreground pixels.
+    """
+    ys, xs = np.where(mask01 > 0)
+    if len(xs) == 0:
+        raise RuntimeError(
+            "Empty mask passed to crop_image_to_mask; no foreground pixels found."
+        )
+
+    y_min, y_max = ys.min(), ys.max() + 1
+    x_min, x_max = xs.min(), xs.max() + 1
+
+    bbox_h = y_max - y_min
+    bbox_w = x_max - x_min
+    pad = max(min_pad, int(round(min(bbox_h, bbox_w) * pad_frac)))
+
+    y_start = max(0, y_min - pad)
+    y_end = min(img_bgr.shape[0], y_max + pad)
+    x_start = max(0, x_min - pad)
+    x_end = min(img_bgr.shape[1], x_max + pad)
+
+    return img_bgr[y_start:y_end, x_start:x_end]
+
+
+def _compute_piece_mask_for_alignment(
+    piece_bgr: np.ndarray, config: MatcherConfig, keep_largest_component: bool = True
+) -> np.ndarray:
+    """Compute a normalized mask for auto-alignment.
+
+    Resizes the input so the shortest side equals AUTO_ALIGN_REFERENCE_SIZE before
+    masking. The returned mask is at the normalized size to keep Hough parameters
+    consistent regardless of the original image dimensions.
+    """
+    h, w = piece_bgr.shape[:2]
+    min_dim = max(1, min(h, w))
+    if min_dim != AUTO_ALIGN_REFERENCE_SIZE:
+        scale = AUTO_ALIGN_REFERENCE_SIZE / min_dim
+        new_h = max(1, int(round(h * scale)))
+        new_w = max(1, int(round(w * scale)))
+        piece_bgr = cv2.resize(
+            piece_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+        )
+    return compute_piece_mask(
+        piece_bgr, config, keep_largest_component=keep_largest_component
+    )
+
+
 def _background_bgr(img_bgr: np.ndarray) -> Tuple[int, int, int]:
     h, w = img_bgr.shape[:2]
     samples = np.array(
@@ -537,6 +616,27 @@ def _background_bgr(img_bgr: np.ndarray) -> Tuple[int, int, int]:
     )
     median = np.median(samples, axis=0).round().astype(np.uint8)
     return int(median[0]), int(median[1]), int(median[2])
+
+
+def _pad_piece_image(
+    piece_bgr: np.ndarray,
+    pad_frac: float = PIECE_BG_PAD_FRAC,
+    min_pad: int = 4,
+) -> np.ndarray:
+    h, w = piece_bgr.shape[:2]
+    if h == 0 or w == 0:
+        return piece_bgr
+    pad_px = max(min_pad, int(round(min(h, w) * pad_frac)))
+    bg = _background_bgr(piece_bgr)
+    return cv2.copyMakeBorder(
+        piece_bgr,
+        pad_px,
+        pad_px,
+        pad_px,
+        pad_px,
+        cv2.BORDER_CONSTANT,
+        value=bg,
+    )
 
 
 def _rotate_img(
@@ -592,18 +692,26 @@ def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
     """
     Estimate tilt angle using Hough line detection on mask edges.
 
-    Uses a weighted mean of detected line angles, where weights are the
-    line lengths. Longer lines are more reliable edge detections than short
-    segments, so this approach is more robust than using a median or unweighted mean.
+    The mask is expected to be normalized to a reference size by the caller
+    (for example via _compute_piece_mask_for_alignment()), so proportional
+    Hough parameters produce consistent results regardless of original image size.
+    Detected line angles are aggregated using a mean with IQR-based outlier
+    rejection to obtain a robust tilt estimate.
     """
     edges = cv2.Canny(mask01.astype(np.uint8) * 255, 50, 150)
+    h, w = mask01.shape[:2]
+    min_dim = max(1, min(h, w))
+    min_line = max(1, int(round(min_dim * AUTO_ALIGN_HOUGH_MIN_LINE_FRAC)))
+    max_gap = max(1, int(round(min_dim * AUTO_ALIGN_HOUGH_MAX_GAP_FRAC)))
+    threshold = max(1, int(round(min_dim * AUTO_ALIGN_HOUGH_THRESHOLD_FRAC)))
+
     lines = cv2.HoughLinesP(
         edges,
         1,
         np.pi / 180,
-        threshold=AUTO_ALIGN_HOUGH_THRESHOLD,
-        minLineLength=AUTO_ALIGN_HOUGH_MIN_LINE,
-        maxLineGap=AUTO_ALIGN_HOUGH_MAX_GAP,
+        threshold=threshold,
+        minLineLength=min_line,
+        maxLineGap=max_gap,
     )
     if lines is None:
         return None, 0
@@ -613,7 +721,7 @@ def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
         dx = x2 - x1
         dy = y2 - y1
         length = float(np.hypot(dx, dy))
-        if length < AUTO_ALIGN_HOUGH_MIN_LINE * 0.5:
+        if length < min_line * 0.5:
             continue
         angle = np.degrees(np.arctan2(dy, dx))
         angle = ((angle + 45) % 90) - 45
@@ -646,8 +754,24 @@ def _estimate_alignment_from_mask(mask01: np.ndarray) -> float:
     3. The angle is within reasonable bounds
     """
 
-    # Crop mask to bounding box before estimating tilt
-    angle, line_count = _estimate_mask_tilt(mask01)
+    # Crop mask to bounding box before estimating tilt to reduce empty-border bias
+    ys, xs = np.where(mask01 > 0)
+    if len(xs) == 0:
+        return 0.0
+    mask_crop = mask01[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+    # Normalize cropped mask to reference size so Hough parameters are consistent.
+    crop_h, crop_w = mask_crop.shape[:2]
+    crop_min = max(1, min(crop_h, crop_w))
+    if crop_min != AUTO_ALIGN_REFERENCE_SIZE:
+        scale = AUTO_ALIGN_REFERENCE_SIZE / crop_min
+        norm_h = max(1, int(round(crop_h * scale)))
+        norm_w = max(1, int(round(crop_w * scale)))
+        mask_for_tilt = cv2.resize(
+            mask_crop, (norm_w, norm_h), interpolation=cv2.INTER_NEAREST
+        )
+    else:
+        mask_for_tilt = mask_crop
+    angle, line_count = _estimate_mask_tilt(mask_for_tilt)
 
     # Need at least a few lines to be confident
     if angle is None or line_count < AUTO_ALIGN_MIN_LINES:
@@ -1480,6 +1604,7 @@ def find_piece_in_template(
         marks.append(("template", time.perf_counter()))
 
     piece = _load_image(piece_image_path)
+    piece = _pad_piece_image(piece)
     if profile:
         marks.append(("piece", time.perf_counter()))
 
@@ -1523,7 +1648,8 @@ def find_piece_in_template(
     auto_align_enabled = auto_align
     auto_align_deg = 0.0
     if auto_align_enabled:
-        correction = _estimate_alignment_from_mask(piece_mask_crop)
+        align_mask = _compute_piece_mask_for_alignment(piece, config)
+        correction = _estimate_alignment_from_mask(align_mask)
         if abs(correction) >= AUTO_ALIGN_MIN_DEG:
             bg = _background_bgr(piece)
             piece = _rotate_img(

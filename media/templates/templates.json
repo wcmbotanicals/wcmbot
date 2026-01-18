@@ -60,10 +60,7 @@
               60
             ]
           ]
-        ],
-        "mask_kernel_size": 5,
-        "mask_open_iters": 2,
-        "mask_close_iters": 2
+        ]
       }
     }
   ]
