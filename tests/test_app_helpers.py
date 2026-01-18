@@ -102,7 +102,9 @@ class TestStackImagesVertical:
         img1 = np.ones((10, 10, 3), dtype=np.uint8) * 100
         img2 = np.ones((10, 10, 3), dtype=np.uint8) * 100
         background = 200
-        result, heights = _stack_images_vertical([img1, img2], gap=5, background=background)
+        result, heights = _stack_images_vertical(
+            [img1, img2], gap=5, background=background
+        )
         assert result is not None
         # Check that gap area has background color
         gap_row = result[12, 0, :]  # Row in the gap area
