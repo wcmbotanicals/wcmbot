@@ -77,6 +77,9 @@ GRID_COLORS_BGR = [
 
 MULTIPIECE_DEFAULT = True
 MAX_DYNAMIC_BUTTONS = 50
+BUTTON_GROUP_HEIGHT = (
+    145  # Height in pixels of each button group (interpolated from UI)
+)
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
@@ -572,7 +575,7 @@ def _build_button_visibility(batch_state):
     """Return visibility and height updates for button containers and spacers."""
     if not batch_state or "total" not in batch_state:
         # No pieces, hide all buttons and spacers
-        # +2 for top and bottom spacers
+        # There are MAX_DYNAMIC_BUTTONS + 1 spacers (top, between groups, bottom)
         updates = [gr.update(visible=False)] * MAX_DYNAMIC_BUTTONS
         spacer_updates = [gr.update(visible=False)] * (MAX_DYNAMIC_BUTTONS + 1)
         return updates + spacer_updates
@@ -597,7 +600,7 @@ def _build_button_visibility(batch_state):
             # Top spacer - half of regular spacing
             if total > 0:
                 if 0 < len(piece_heights):
-                    half_spacer = (piece_heights[0] + gap - 145) / 2
+                    half_spacer = (piece_heights[0] + gap - BUTTON_GROUP_HEIGHT) / 2
                     half_spacer = max(5, half_spacer)
                 else:
                     half_spacer = 10
@@ -611,7 +614,7 @@ def _build_button_visibility(batch_state):
             # Regular spacers between groups
             idx = i - 1  # Adjust for top spacer
             if idx < len(piece_heights):
-                spacer_height = piece_heights[idx] + gap - 145
+                spacer_height = piece_heights[idx] + gap - BUTTON_GROUP_HEIGHT
                 spacer_height = max(10, spacer_height)
             else:
                 spacer_height = 20
@@ -623,7 +626,7 @@ def _build_button_visibility(batch_state):
             # Bottom spacer - half of regular spacing
             last_idx = total - 1
             if last_idx < len(piece_heights):
-                half_spacer = (piece_heights[last_idx] + gap - 145) / 2
+                half_spacer = (piece_heights[last_idx] + gap - BUTTON_GROUP_HEIGHT) / 2
                 half_spacer = max(5, half_spacer)
             else:
                 half_spacer = 10
@@ -1026,6 +1029,7 @@ def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_st
             try:
                 os.remove(tmp_rotated_path)
             except OSError:
+                # Best-effort cleanup: ignoring failures to delete the temporary file
                 pass
 
         views = _build_multipiece_views_from_state(batch_state)
@@ -1417,8 +1421,13 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     }
     window.addEventListener('resize', alignButtonGroups);
     
+    // Debounce the mutation observer callback to reduce overhead
+    let mutationTimeout = null;
     const observer = new MutationObserver(() => {
-        alignButtonGroups();
+        if (mutationTimeout) {
+            clearTimeout(mutationTimeout);
+        }
+        mutationTimeout = setTimeout(alignButtonGroups, 100);
     });
     if (document.body) {
         observer.observe(document.body, { 
@@ -1720,13 +1729,15 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_state,
             match_index,
             batch_state,
+            *batch_button_containers,
+            *batch_spacers,
         ],
     )
 
     def _no_update_outputs(state, idx, batch_state):
         num_spacers = (
             MAX_DYNAMIC_BUTTONS + 1
-        )  # +1 for top spacer, +1 for bottom = +2 total but -1 from original count
+        )  # One top spacer, MAX_DYNAMIC_BUTTONS-1 between button groups, and one bottom spacer
         return (
             *([gr.update()] * len(VIEW_KEYS)),
             gr.update(),
@@ -1754,10 +1765,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         result = solve_single_or_batch(
             piece_path, template_id, auto_align, template_rotation, batch_mode
         )
-        if batch_mode:
-            yield from result
-        else:
-            yield result
+        yield from result
 
     # Auto-run matching whenever a new piece is uploaded or pasted
     piece_input.upload(
@@ -1852,11 +1860,17 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 *batch_spacers,
             ],
         )
+
         # Rotate clockwise button (negative angle for CW)
+        def make_rotate_cw_handler(piece_idx):
+            def handler(batch_state, rotation_deg):
+                deg = 1 if rotation_deg is None else rotation_deg
+                return _rotate_multipiece_candidate(piece_idx, -abs(deg), batch_state)
+
+            return handler
+
         button_group["rotate_cw"].click(
-            fn=lambda bs, deg, idx=i: _rotate_multipiece_candidate(
-                idx, -abs(deg or 1), bs
-            ),
+            fn=make_rotate_cw_handler(i),
             inputs=[batch_state, rotation_input],
             outputs=[
                 *ordered_components,
@@ -1869,11 +1883,17 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 *batch_spacers,
             ],
         )
+
         # Rotate counter-clockwise button (positive angle for CCW)
+        def make_rotate_ccw_handler(piece_idx):
+            def handler(batch_state, rotation_deg):
+                deg = 1 if rotation_deg is None else rotation_deg
+                return _rotate_multipiece_candidate(piece_idx, abs(deg), batch_state)
+
+            return handler
+
         button_group["rotate_ccw"].click(
-            fn=lambda bs, deg, idx=i: _rotate_multipiece_candidate(
-                idx, abs(deg or 1), bs
-            ),
+            fn=make_rotate_ccw_handler(i),
             inputs=[batch_state, rotation_input],
             outputs=[
                 *ordered_components,
