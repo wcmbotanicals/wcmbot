@@ -72,9 +72,11 @@ GRID_COLORS_BGR = [
 
 MULTIPIECE_DEFAULT = True
 MAX_DYNAMIC_BUTTONS = 50
-BUTTON_GROUP_HEIGHT = (
-    145  # Height in pixels of each button group (interpolated from UI)
-)
+# Approximate height in pixels of each dynamic button group as rendered by Gradio.
+# Measured on the default Gradio theme at 100% browser zoom with standard font sizes.
+# If the UI styling, theme, or zoom level changes significantly, this value may need
+# to be re-measured and updated. It is used only for approximate layout calculations.
+BUTTON_GROUP_HEIGHT = 145
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
