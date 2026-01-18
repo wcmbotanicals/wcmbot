@@ -16,13 +16,8 @@ from PIL import Image
 
 from wcmbot import __version__
 from wcmbot.matcher import (
-    LOWER_BLUE1,
-    LOWER_BLUE2,
-    LOWER_GREEN1,
-    UPPER_BLUE1,
-    UPPER_BLUE2,
-    UPPER_GREEN1,
     build_matcher_config,
+    compute_piece_mask,
     find_piece_in_template,
     format_match_summary,
     preload_template_cache,
@@ -319,44 +314,9 @@ def _rotate_template_preview(
     return np.rot90(image, k=k)
 
 
-def _cleanup_mask(
-    mask: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
-) -> np.ndarray:
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    if open_iters > 0:
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iters)
-    if close_iters > 0:
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_iters)
-    return mask
-
-
 def _compute_multipiece_mask(piece_bgr: np.ndarray, matcher_config) -> np.ndarray:
-    mask_mode = (matcher_config.mask_mode or "blue").lower()
-    kernel_size = int(matcher_config.mask_kernel_size)
-    open_iters = int(matcher_config.mask_open_iters)
-    close_iters = int(matcher_config.mask_close_iters)
-    hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
-    mask = None
-
-    if mask_mode == "blue":
-        m1 = cv2.inRange(hsv, LOWER_BLUE1, UPPER_BLUE1)
-        m2 = cv2.inRange(hsv, LOWER_BLUE2, UPPER_BLUE2)
-        mask = cv2.bitwise_or(m1, m2)
-    elif mask_mode == "green":
-        mask = cv2.inRange(hsv, LOWER_GREEN1, UPPER_GREEN1)
-    elif mask_mode in ("hsv", "hsv_ranges"):
-        if not matcher_config.mask_hsv_ranges:
-            raise RuntimeError("mask_hsv_ranges must be set for hsv mask mode.")
-        for lower, upper in matcher_config.mask_hsv_ranges:
-            curr = cv2.inRange(hsv, np.array(lower), np.array(upper))
-            mask = curr if mask is None else cv2.bitwise_or(mask, curr)
-        if mask is None:
-            raise RuntimeError("mask_hsv_ranges must contain at least one range.")
-    else:
-        raise RuntimeError(f"Unknown mask_mode: {matcher_config.mask_mode}")
-
-    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
-    mask01 = (mask > 0).astype(np.uint8)
+    """Compute binary mask for multipiece segmentation with optional background inversion."""
+    mask01 = compute_piece_mask(piece_bgr, matcher_config, keep_largest_component=False)
 
     # Invert if segmentation captured mostly background.
     if mask01.sum() > 0.5 * mask01.size:
