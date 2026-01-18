@@ -617,12 +617,12 @@ def _format_match_location(payload, idx: int) -> str:
     return f"**Row:** {match['row']}  **Col:** {match['col']}"
 
 
-def _render_match_payload(payload, idx: int):
+def _render_match_payload(payload, idx: int, batch_state=None):
     views = render_primary_views(payload, idx)
     views["zoom_template"] = make_zoomable_plot(views.get("zoom_template"))
     location = _format_match_location(payload, idx)
     summary = format_match_summary(payload, idx)
-    return _views_to_outputs(views, location, summary, payload, idx, None)
+    return _views_to_outputs(views, location, summary, payload, idx, batch_state)
 
 
 def _clamp_match_index(payload, idx: int) -> int:
@@ -1025,6 +1025,7 @@ def _change_match(
     current_index: int,
     template_id: str,
     template_rotation: int,
+    batch_state=None,
 ):
     if payload is None or not getattr(payload, "matches", None):
         return _blank_outputs(
@@ -1037,7 +1038,7 @@ def _change_match(
         return _blank_outputs("No matches available.", template_id, template_rotation)
     idx = (current_index or 0) + step
     idx %= total
-    return _render_match_payload(payload, idx)
+    return _render_match_payload(payload, idx, batch_state)
 
 
 def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
@@ -1231,12 +1232,20 @@ def solve_single_or_batch(
     return solve_puzzle(piece_path, template_id, auto_align, template_rotation)
 
 
-def goto_previous_match(state, current_index, template_id, template_rotation):
-    return _change_match(-1, state, current_index, template_id, template_rotation)
+def goto_previous_match(
+    state, current_index, template_id, template_rotation, batch_state=None
+):
+    return _change_match(
+        -1, state, current_index, template_id, template_rotation, batch_state
+    )
 
 
-def goto_next_match(state, current_index, template_id, template_rotation):
-    return _change_match(1, state, current_index, template_id, template_rotation)
+def goto_next_match(
+    state, current_index, template_id, template_rotation, batch_state=None
+):
+    return _change_match(
+        1, state, current_index, template_id, template_rotation, batch_state
+    )
 
 
 TEMPLATE_REGISTRY = load_template_registry()
@@ -1774,7 +1783,13 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
     prev_button.click(
         fn=goto_previous_match,
-        inputs=[match_state, match_index, template_selector, template_rotation],
+        inputs=[
+            match_state,
+            match_index,
+            template_selector,
+            template_rotation,
+            batch_state,
+        ],
         outputs=[
             *ordered_components,
             match_location,
@@ -1788,7 +1803,13 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
     next_button.click(
         fn=goto_next_match,
-        inputs=[match_state, match_index, template_selector, template_rotation],
+        inputs=[
+            match_state,
+            match_index,
+            template_selector,
+            template_rotation,
+            batch_state,
+        ],
         outputs=[
             *ordered_components,
             match_location,
