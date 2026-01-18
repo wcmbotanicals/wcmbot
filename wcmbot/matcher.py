@@ -586,7 +586,9 @@ def _compute_piece_mask_for_alignment(
         scale = AUTO_ALIGN_REFERENCE_SIZE / min_dim
         new_h = max(1, int(round(h * scale)))
         new_w = max(1, int(round(w * scale)))
-        piece_bgr = cv2.resize(piece_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        piece_bgr = cv2.resize(
+            piece_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+        )
     return compute_piece_mask(
         piece_bgr, config, keep_largest_component=keep_largest_component
     )
