@@ -1226,10 +1226,12 @@ def solve_single_or_batch(
 ):
     """Dispatch to single-piece solve or streamed multipiece mode."""
     if batch_mode:
-        return solve_puzzle_multipiece(
+        yield from solve_puzzle_multipiece(
             piece_path, template_id, auto_align, template_rotation
         )
-    return solve_puzzle(piece_path, template_id, auto_align, template_rotation)
+    else:
+        result = solve_puzzle(piece_path, template_id, auto_align, template_rotation)
+        yield result
 
 
 def goto_previous_match(
