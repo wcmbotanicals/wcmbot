@@ -597,9 +597,7 @@ def _build_button_visibility(batch_state):
             # Top spacer - half of regular spacing
             if total > 0:
                 if 0 < len(piece_heights):
-                    half_spacer = (
-                        piece_heights[0] + gap - 140
-                    ) / 2  # Button group ~140px (interpolated)
+                    half_spacer = (piece_heights[0] + gap - 145) / 2
                     half_spacer = max(5, half_spacer)
                 else:
                     half_spacer = 10
@@ -613,9 +611,7 @@ def _build_button_visibility(batch_state):
             # Regular spacers between groups
             idx = i - 1  # Adjust for top spacer
             if idx < len(piece_heights):
-                spacer_height = (
-                    piece_heights[idx] + gap - 140
-                )  # Button group ~140px (interpolated)
+                spacer_height = piece_heights[idx] + gap - 145
                 spacer_height = max(10, spacer_height)
             else:
                 spacer_height = 20
@@ -627,9 +623,7 @@ def _build_button_visibility(batch_state):
             # Bottom spacer - half of regular spacing
             last_idx = total - 1
             if last_idx < len(piece_heights):
-                half_spacer = (
-                    piece_heights[last_idx] + gap - 140
-                ) / 2  # Button group ~140px (interpolated)
+                half_spacer = (piece_heights[last_idx] + gap - 145) / 2
                 half_spacer = max(5, half_spacer)
             else:
                 half_spacer = 10
