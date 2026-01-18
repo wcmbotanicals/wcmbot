@@ -484,10 +484,15 @@ def compute_piece_mask(
     mask (0 or 1) with the piece foreground isolated.
 
     Args:
-        piece_bgr: BGR image of the piece
-        config: MatcherConfig with mask settings
+        piece_bgr: BGR image of the piece.
+        config: MatcherConfig with mask settings.
         keep_largest_component: If True, keep only the largest connected component.
                                If False, keep all detected foreground. Defaults to True.
+
+    Returns:
+        np.ndarray: Binary mask of the same height and width as ``piece_bgr``,
+            with ``dtype`` ``uint8`` and values 0 or 1, where 1 indicates the
+            piece foreground and 0 indicates background.
     """
     mask_mode = (config.mask_mode or "blue").lower()
     kernel_size = int(config.mask_kernel_size)

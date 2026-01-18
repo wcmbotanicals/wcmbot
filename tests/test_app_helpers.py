@@ -102,7 +102,9 @@ class TestStackImagesVertical:
         img1 = np.ones((10, 10, 3), dtype=np.uint8) * 100
         img2 = np.ones((10, 10, 3), dtype=np.uint8) * 100
         background = 200
-        result, heights = _stack_images_vertical([img1, img2], gap=5, background=background)
+        result, heights = _stack_images_vertical(
+            [img1, img2], gap=5, background=background
+        )
         assert result is not None
         # Check that gap area has background color
         gap_row = result[12, 0, :]  # Row in the gap area
@@ -190,19 +192,36 @@ class TestOnPieceChange:
     @pytest.fixture
     def sample_outputs(self):
         """Sample outputs that match the expected structure"""
-        # Based on _no_update_outputs, we need VIEW_KEYS outputs + 3 more
-        from app import VIEW_KEYS
+        # Start from _no_update_outputs to get the correct overall shape,
+        # then override location, summary, state, and idx for testing.
+        from app import VIEW_KEYS, MAX_DYNAMIC_BUTTONS
         import gradio as gr
 
         num_views = len(VIEW_KEYS)
-        # Return tuple: (*view_updates, location, summary, state, idx)
-        return (
-            *([gr.update()] * num_views),
-            "Row: 1, Col: 2",
-            "Match summary",
-            {"some": "state"},
-            1,
+        num_spacers = MAX_DYNAMIC_BUTTONS + 1
+
+        # Base structure from _no_update_outputs:
+        # (*view_updates, location, summary, state, idx, batch_state, *button_visibility, *spacers)
+        base_outputs = list(
+            [gr.update()] * num_views  # view updates
+            + [gr.update(), gr.update()]  # location, summary placeholders
+            + [{"some": "state"}, 1, {}]  # state, idx, batch_state
+            + [gr.update()] * MAX_DYNAMIC_BUTTONS  # button visibility
+            + [gr.update()] * num_spacers  # spacers
         )
+
+        # Override the values we want to test
+        location_idx = num_views
+        summary_idx = num_views + 1
+        state_idx = num_views + 2
+        idx_idx = num_views + 3
+
+        base_outputs[location_idx] = "Row: 1, Col: 2"
+        base_outputs[summary_idx] = "Match summary"
+        base_outputs[state_idx] = {"some": "state"}
+        base_outputs[idx_idx] = 1
+
+        return tuple(base_outputs)
 
     def test_empty_piece_path_yields_no_update(self, mock_solve_function):
         """Test that empty piece_path yields no update outputs"""
