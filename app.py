@@ -1754,10 +1754,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         result = solve_single_or_batch(
             piece_path, template_id, auto_align, template_rotation, batch_mode
         )
-        if batch_mode:
-            yield from result
-        else:
-            yield result
+        yield from result
 
     # Auto-run matching whenever a new piece is uploaded or pasted
     piece_input.upload(
