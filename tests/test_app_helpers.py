@@ -16,97 +16,111 @@ class TestStackImagesVertical:
 
     def test_empty_list_returns_none(self):
         """Test that empty list returns None"""
-        result = _stack_images_vertical([])
+        result, heights = _stack_images_vertical([])
         assert result is None
+        assert heights == []
 
     def test_list_with_all_none_images_returns_none(self):
         """Test that list with all None images returns None"""
-        result = _stack_images_vertical([None, None, None])
+        result, heights = _stack_images_vertical([None, None, None])
         assert result is None
+        assert heights == []
 
     def test_single_rgb_image(self):
         """Test stacking a single RGB image"""
         img = np.ones((100, 50, 3), dtype=np.uint8) * 128
-        result = _stack_images_vertical([img])
+        result, heights = _stack_images_vertical([img])
         assert result is not None
         assert result.shape == (100, 50, 3)
         assert result.dtype == np.uint8
+        assert heights == [100]
 
     def test_single_grayscale_image_converted_to_rgb(self):
         """Test that grayscale image is converted to RGB"""
         img = np.ones((100, 50), dtype=np.uint8) * 128
-        result = _stack_images_vertical([img])
+        result, heights = _stack_images_vertical([img])
         assert result is not None
         assert result.shape == (100, 50, 3)
         assert result.dtype == np.uint8
+        assert heights == [100]
 
     def test_multiple_images_stacked_with_gap(self):
         """Test that multiple images are stacked with proper gap"""
         img1 = np.ones((100, 50, 3), dtype=np.uint8) * 128
         img2 = np.ones((80, 50, 3), dtype=np.uint8) * 64
         gap = 10
-        result = _stack_images_vertical([img1, img2], gap=gap)
+        result, heights = _stack_images_vertical([img1, img2], gap=gap)
         assert result is not None
         # Total height should be sum of heights + gap
         assert result.shape[0] == 100 + 80 + gap
         # Width should be max width
         assert result.shape[1] == 50
         assert result.shape[2] == 3
+        assert heights == [100, 80]
 
     def test_images_with_different_widths_aligned_left(self):
         """Test that images with different widths are left-aligned"""
         img1 = np.ones((100, 50, 3), dtype=np.uint8) * 128
         img2 = np.ones((80, 30, 3), dtype=np.uint8) * 64
-        result = _stack_images_vertical([img1, img2])
+        result, heights = _stack_images_vertical([img1, img2])
         assert result is not None
         # Width should be max width
         assert result.shape[1] == 50
+        assert heights == [100, 80]
 
     def test_images_resized_when_exceeding_max_width(self):
         """Test that images are resized when exceeding max_width"""
         img1 = np.ones((100, 200, 3), dtype=np.uint8) * 128
         img2 = np.ones((80, 150, 3), dtype=np.uint8) * 64
         max_width = 100
-        result = _stack_images_vertical([img1, img2], max_width=max_width)
+        result, heights = _stack_images_vertical([img1, img2], max_width=max_width)
         assert result is not None
         # Width should be scaled to max_width
         assert result.shape[1] == max_width
+        # Heights should be scaled proportionally (100/2=50, 80/1.5≈53)
+        assert len(heights) == 2
 
     def test_float_images_converted_to_uint8(self):
         """Test that float images are converted to uint8"""
         img = np.ones((100, 50, 3), dtype=np.float32) * 128.0
-        result = _stack_images_vertical([img])
+        result, heights = _stack_images_vertical([img])
         assert result is not None
         assert result.dtype == np.uint8
+        assert heights == [100]
 
     def test_images_clipped_to_valid_range(self):
         """Test that images are clipped to [0, 255] range"""
         img = np.ones((100, 50, 3), dtype=np.float32) * 300.0  # Out of range
-        result = _stack_images_vertical([img])
+        result, heights = _stack_images_vertical([img])
         assert result is not None
         assert np.all(result <= 255)
         assert np.all(result >= 0)
+        assert heights == [100]
 
     def test_custom_background_color(self):
         """Test that custom background color is used for gaps"""
         img1 = np.ones((10, 10, 3), dtype=np.uint8) * 100
         img2 = np.ones((10, 10, 3), dtype=np.uint8) * 100
         background = 200
-        result = _stack_images_vertical([img1, img2], gap=5, background=background)
+        result, heights = _stack_images_vertical(
+            [img1, img2], gap=5, background=background
+        )
         assert result is not None
         # Check that gap area has background color
         gap_row = result[12, 0, :]  # Row in the gap area
         assert np.all(gap_row == background)
+        assert heights == [10, 10]
 
     def test_mixed_none_and_valid_images(self):
         """Test that None images are skipped in the list"""
         img1 = np.ones((100, 50, 3), dtype=np.uint8) * 128
         img2 = None
         img3 = np.ones((80, 50, 3), dtype=np.uint8) * 64
-        result = _stack_images_vertical([img1, img2, img3])
+        result, heights = _stack_images_vertical([img1, img2, img3])
         assert result is not None
         # Should only stack img1 and img3
         assert result.shape[0] == 100 + 80 + 8  # default gap is 8
+        assert heights == [100, 80]
 
 
 class TestAnnotatePairImage:
@@ -178,19 +192,36 @@ class TestOnPieceChange:
     @pytest.fixture
     def sample_outputs(self):
         """Sample outputs that match the expected structure"""
-        # Based on _no_update_outputs, we need VIEW_KEYS outputs + 3 more
-        from app import VIEW_KEYS
+        # Start from _no_update_outputs to get the correct overall shape,
+        # then override location, summary, state, and idx for testing.
+        from app import VIEW_KEYS, MAX_DYNAMIC_BUTTONS
         import gradio as gr
 
         num_views = len(VIEW_KEYS)
-        # Return tuple: (*view_updates, location, summary, state, idx)
-        return (
-            *([gr.update()] * num_views),
-            "Row: 1, Col: 2",
-            "Match summary",
-            {"some": "state"},
-            1,
+        num_spacers = MAX_DYNAMIC_BUTTONS + 1
+
+        # Base structure from _no_update_outputs:
+        # (*view_updates, location, summary, state, idx, batch_state, *button_visibility, *spacers)
+        base_outputs = list(
+            [gr.update()] * num_views  # view updates
+            + [gr.update(), gr.update()]  # location, summary placeholders
+            + [{"some": "state"}, 1, {}]  # state, idx, batch_state
+            + [gr.update()] * MAX_DYNAMIC_BUTTONS  # button visibility
+            + [gr.update()] * num_spacers  # spacers
         )
+
+        # Override the values we want to test
+        location_idx = num_views
+        summary_idx = num_views + 1
+        state_idx = num_views + 2
+        idx_idx = num_views + 3
+
+        base_outputs[location_idx] = "Row: 1, Col: 2"
+        base_outputs[summary_idx] = "Match summary"
+        base_outputs[state_idx] = {"some": "state"}
+        base_outputs[idx_idx] = 1
+
+        return tuple(base_outputs)
 
     def test_empty_piece_path_yields_no_update(self, mock_solve_function):
         """Test that empty piece_path yields no update outputs"""
@@ -214,6 +245,7 @@ class TestOnPieceChange:
             batch_mode,
             state,
             idx,
+            {},  # batch_state
         )
 
         # Get the result and verify it's not None
@@ -262,6 +294,7 @@ class TestOnPieceChange:
                 batch_mode,
                 state,
                 idx,
+                {},  # batch_state
             )
 
             # Verify it yields the result from the generator
@@ -310,6 +343,7 @@ class TestOnPieceChange:
                 batch_mode,
                 state,
                 idx,
+                {},  # batch_state
             )
 
             # Verify it yields all results from the generator
@@ -346,7 +380,7 @@ class TestOnPieceChange:
                 mock_solve.return_value = mock_gen()
 
                 # Test single mode
-                gen = _on_piece_change(piece_path, "test", False, 0, False, {}, 0)
+                gen = _on_piece_change(piece_path, "test", False, 0, False, {}, 0, {})
                 result = next(gen)
 
                 # Should yield the tuple directly, not the generator

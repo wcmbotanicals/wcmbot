@@ -406,7 +406,11 @@ def _cleanup_mask(
 
 
 def _mask_by_blue(
-    piece_bgr: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
+    piece_bgr: np.ndarray,
+    kernel_size: int,
+    open_iters: int,
+    close_iters: int,
+    keep_largest_component: bool = True,
 ) -> np.ndarray:
     hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
     m1 = cv2.inRange(hsv, LOWER_BLUE1, UPPER_BLUE1)
@@ -414,7 +418,8 @@ def _mask_by_blue(
     mask = cv2.bitwise_or(m1, m2)
     mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
     mask01 = (mask > 0).astype(np.uint8)
-    mask01 = _keep_largest_component(mask01)
+    if keep_largest_component:
+        mask01 = _keep_largest_component(mask01)
     if mask01.sum() == 0:
         raise RuntimeError(
             "Blue segmentation produced empty mask - tune HSV ranges or check image"
@@ -423,13 +428,18 @@ def _mask_by_blue(
 
 
 def _mask_by_green(
-    piece_bgr: np.ndarray, kernel_size: int, open_iters: int, close_iters: int
+    piece_bgr: np.ndarray,
+    kernel_size: int,
+    open_iters: int,
+    close_iters: int,
+    keep_largest_component: bool = True,
 ) -> np.ndarray:
     hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, LOWER_GREEN1, UPPER_GREEN1)
     mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
     mask01 = (mask > 0).astype(np.uint8)
-    mask01 = _keep_largest_component(mask01)
+    if keep_largest_component:
+        mask01 = _keep_largest_component(mask01)
     if mask01.sum() == 0:
         raise RuntimeError(
             "Green segmentation produced empty mask - tune HSV ranges or check image"
@@ -443,6 +453,7 @@ def _mask_by_hsv_ranges(
     kernel_size: int,
     open_iters: int,
     close_iters: int,
+    keep_largest_component: bool = True,
 ) -> np.ndarray:
     hsv = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2HSV)
     mask = None
@@ -455,7 +466,8 @@ def _mask_by_hsv_ranges(
         raise RuntimeError("HSV segmentation requires at least one range.")
     mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
     mask01 = (mask > 0).astype(np.uint8)
-    mask01 = _keep_largest_component(mask01)
+    if keep_largest_component:
+        mask01 = _keep_largest_component(mask01)
     if mask01.sum() == 0:
         raise RuntimeError(
             "HSV segmentation produced empty mask - tune HSV ranges or check image"
@@ -463,15 +475,37 @@ def _mask_by_hsv_ranges(
     return mask01
 
 
-def _compute_piece_mask(piece_bgr: np.ndarray, config: MatcherConfig) -> np.ndarray:
+def compute_piece_mask(
+    piece_bgr: np.ndarray, config: MatcherConfig, keep_largest_component: bool = True
+) -> np.ndarray:
+    """Compute a binary mask for a puzzle piece based on color mode.
+
+    Supports "blue", "green", or "hsv"/"hsv_ranges" modes. Returns a binary
+    mask (0 or 1) with the piece foreground isolated.
+
+    Args:
+        piece_bgr: BGR image of the piece.
+        config: MatcherConfig with mask settings.
+        keep_largest_component: If True, keep only the largest connected component.
+                               If False, keep all detected foreground. Defaults to True.
+
+    Returns:
+        np.ndarray: Binary mask of the same height and width as ``piece_bgr``,
+            with ``dtype`` ``uint8`` and values 0 or 1, where 1 indicates the
+            piece foreground and 0 indicates background.
+    """
     mask_mode = (config.mask_mode or "blue").lower()
     kernel_size = int(config.mask_kernel_size)
     open_iters = int(config.mask_open_iters)
     close_iters = int(config.mask_close_iters)
     if mask_mode == "blue":
-        return _mask_by_blue(piece_bgr, kernel_size, open_iters, close_iters)
+        return _mask_by_blue(
+            piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
+        )
     if mask_mode == "green":
-        return _mask_by_green(piece_bgr, kernel_size, open_iters, close_iters)
+        return _mask_by_green(
+            piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
+        )
     if mask_mode in ("hsv", "hsv_ranges"):
         if not config.mask_hsv_ranges:
             raise RuntimeError("mask_hsv_ranges must be set for hsv mask mode.")
@@ -481,6 +515,7 @@ def _compute_piece_mask(piece_bgr: np.ndarray, config: MatcherConfig) -> np.ndar
             kernel_size,
             open_iters,
             close_iters,
+            keep_largest_component,
         )
     raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
 
@@ -1457,7 +1492,7 @@ def find_piece_in_template(
         template_bin = _rotate_template_quadrant(template_bin, rotation)
         template_blur_cache = {}
 
-    piece_mask = _compute_piece_mask(piece, config)
+    piece_mask = compute_piece_mask(piece, config)
     if profile:
         marks.append(("mask", time.perf_counter()))
 
@@ -1498,7 +1533,7 @@ def find_piece_in_template(
                 border_value=bg,
             )
             auto_align_deg = correction
-            piece_mask = _compute_piece_mask(piece, config)
+            piece_mask = compute_piece_mask(piece, config)
             y0, y1, x0, x1 = _mask_bbox(piece_mask)
             piece_crop = piece[y0:y1, x0:x1].copy()
             piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
