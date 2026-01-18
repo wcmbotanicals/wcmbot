@@ -550,11 +550,16 @@ def crop_image_to_mask(
         min_pad: Minimum padding in pixels.
 
     Returns:
-        Cropped image containing only the masked region with padding.
+        np.ndarray: Cropped image containing only the masked region with padding.
+
+    Raises:
+        RuntimeError: If the provided mask contains no foreground pixels.
     """
     ys, xs = np.where(mask01 > 0)
     if len(xs) == 0:
-        return img_bgr
+        raise RuntimeError(
+            "Empty mask passed to crop_image_to_mask; no foreground pixels found."
+        )
 
     y_min, y_max = ys.min(), ys.max() + 1
     x_min, x_max = xs.min(), xs.max() + 1
@@ -622,8 +627,6 @@ def _pad_piece_image(
     if h == 0 or w == 0:
         return piece_bgr
     pad_px = max(min_pad, int(round(min(h, w) * pad_frac)))
-    if pad_px <= 0:
-        return piece_bgr
     bg = _background_bgr(piece_bgr)
     return cv2.copyMakeBorder(
         piece_bgr,
@@ -689,11 +692,11 @@ def _estimate_mask_tilt(mask01: np.ndarray) -> Tuple[Optional[float], int]:
     """
     Estimate tilt angle using Hough line detection on mask edges.
 
-    The mask is expected to be normalized to a reference size by compute_piece_mask(),
-    so proportional Hough parameters produce consistent results regardless of
-    original image size.
-    Longer lines are more reliable edge detections than short segments,
-    so this approach is more robust than using a median or unweighted mean.
+    The mask is expected to be normalized to a reference size by the caller
+    (for example via _compute_piece_mask_for_alignment()), so proportional
+    Hough parameters produce consistent results regardless of original image size.
+    Detected line angles are aggregated using a mean with IQR-based outlier
+    rejection to obtain a robust tilt estimate.
     """
     edges = cv2.Canny(mask01.astype(np.uint8) * 255, 50, 150)
     h, w = mask01.shape[:2]

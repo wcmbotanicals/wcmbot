@@ -350,7 +350,7 @@ def _find_multipiece_regions(
         return [], mask01
 
     heights = np.array([item["bbox"][3] for item in regions], dtype=np.float32)
-    row_thresh = float(np.median(heights) * 0.6) if len(heights) else 0.0
+    row_thresh = float(np.median(heights) * 0.6)
     centers = [
         (
             item["bbox"][0] + item["bbox"][2] / 2.0,
