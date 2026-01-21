@@ -7,7 +7,7 @@ by the UI layer (app.py) and by benchmarks/scripts.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -26,8 +26,9 @@ def _compute_piece_mask_keep_all(
     compute_piece_mask_fn: Callable,
     image_bgr: np.ndarray,
     matcher_config,
-    template_bgr: np.ndarray | None = None,
-    template_mask: np.ndarray | None = None,
+    *,
+    template_bgr: Optional[np.ndarray] = None,
+    template_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Call a compute_piece_mask-like function with best-effort compatibility."""
     try:
@@ -39,21 +40,23 @@ def _compute_piece_mask_keep_all(
             template_mask=template_mask,
         )
     except TypeError:
-        try:
-            return compute_piece_mask_fn(
-                image_bgr,
-                matcher_config,
-                keep_largest_component=False,
-                template_bgr=template_bgr,
-            )
-        except TypeError:
+        if template_bgr is not None:
             try:
                 return compute_piece_mask_fn(
-                    image_bgr, matcher_config, keep_largest_component=False
+                    image_bgr,
+                    matcher_config,
+                    keep_largest_component=False,
+                    template_bgr=template_bgr,
                 )
             except TypeError:
-                # Older signatures may not accept keep_largest_component.
-                return compute_piece_mask_fn(image_bgr, matcher_config)
+                pass
+        try:
+            return compute_piece_mask_fn(
+                image_bgr, matcher_config, keep_largest_component=False
+            )
+        except TypeError:
+            # Older signatures may not accept keep_largest_component.
+            return compute_piece_mask_fn(image_bgr, matcher_config)
 
 
 def compute_multipiece_mask(
@@ -62,12 +65,13 @@ def compute_multipiece_mask(
     *,
     compute_piece_mask_fn: Callable = compute_piece_mask,
     invert_background: bool = True,
-    template_bgr: np.ndarray | None = None,
-    template_mask: np.ndarray | None = None,
+    template_bgr: Optional[np.ndarray] = None,
+    template_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Compute a binary mask for separating multiple pieces.
 
-    If the mask selects mostly background, it is optionally inverted.
+    If the mask selects mostly background, it is optionally inverted. Template
+    imagery can be supplied to support template-aware segmentation.
     """
     mask01 = _compute_piece_mask_keep_all(
         compute_piece_mask_fn,
@@ -89,8 +93,8 @@ def find_multipiece_regions(
     *,
     compute_piece_mask_fn: Callable = compute_piece_mask,
     min_area_frac: float = 0.002,
-    template_bgr: np.ndarray | None = None,
-    template_mask: np.ndarray | None = None,
+    template_bgr: Optional[np.ndarray] = None,
+    template_mask: Optional[np.ndarray] = None,
 ) -> tuple[list[MultipieceRegion], np.ndarray]:
     """Find candidate piece regions via contour detection.
 
@@ -166,6 +170,8 @@ def find_multipiece_region_dicts(
     matcher_config,
     *,
     compute_piece_mask_fn: Callable = compute_piece_mask,
+    template_bgr: Optional[np.ndarray] = None,
+    template_mask: Optional[np.ndarray] = None,
     min_area_frac: float = 0.002,
     template_bgr: np.ndarray | None = None,
     template_mask: np.ndarray | None = None,
@@ -182,6 +188,8 @@ def find_multipiece_region_dicts(
         image_bgr,
         matcher_config,
         compute_piece_mask_fn=compute_piece_mask_fn,
+        template_bgr=template_bgr,
+        template_mask=template_mask,
         min_area_frac=min_area_frac,
         template_bgr=template_bgr,
         template_mask=template_mask,

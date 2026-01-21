@@ -98,6 +98,7 @@ MANY_PIECES_EXPECTED = {
     25: (12, 3),
 }
 
+
 ROTATION_SWEEP_DEGREES = [-15, -10, -5, -2.5, 0, 2.5, 5, 10, 15]
 TEMPLATE_ROTATION_CASE = ("piece_5.jpg", 0, 2, 180, 11, 6)
 

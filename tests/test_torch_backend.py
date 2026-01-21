@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-import pytest
 
 
 def test_torch_ccorr_normed_matches_opencv_cpu() -> None:
