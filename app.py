@@ -1103,12 +1103,12 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         }
     )
     template_rgb = None
-    for spec in TEMPLATE_REGISTRY.templates.values():
-        if spec.template_id == template_id:
-            template_rgb = get_template_image(
-                spec.template_path, crop_x=spec.crop_x, crop_y=spec.crop_y
-            )
-            break
+    if template_spec is not None:
+        template_rgb = get_template_image(
+            template_spec.template_path,
+            crop_x=template_spec.crop_x,
+            crop_y=template_spec.crop_y,
+        )
     template_bgr = (
         cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
         if template_rgb is not None
