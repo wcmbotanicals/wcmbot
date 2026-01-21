@@ -100,6 +100,11 @@ class MatcherConfig:
     mask_kernel_size: int = 7
     mask_open_iters: int = OPEN_ITERS
     mask_close_iters: int = CLOSE_ITERS
+    mask_shape_refine: bool = False
+    template_cluster_k: int = 4
+    template_cluster_percentile: float = 98.0
+    template_cluster_scale: float = 1.15
+    render_full_res: bool = True
 
 
 def build_matcher_config(
@@ -131,6 +136,11 @@ def build_matcher_config(
         "mask_kernel_size": 7,
         "mask_open_iters": OPEN_ITERS,
         "mask_close_iters": CLOSE_ITERS,
+        "mask_shape_refine": False,
+        "template_cluster_k": 4,
+        "template_cluster_percentile": 98.0,
+        "template_cluster_scale": 1.15,
+        "render_full_res": True,
     }
     if not overrides:
         return MatcherConfig(**payload)
@@ -158,6 +168,7 @@ class MatchPayload:
     knobs_y: Optional[int] = None
     knobs_inferred: bool = False
     resize_rethreshold: bool = False
+    render_full_res: bool = True
 
 
 @dataclass
@@ -469,6 +480,203 @@ def _cleanup_mask(
     return out
 
 
+def _fill_mask_holes(mask01: np.ndarray) -> np.ndarray:
+    mask255 = (mask01 > 0).astype(np.uint8) * 255
+    padded = cv2.copyMakeBorder(mask255, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    h, w = padded.shape[:2]
+    flood = padded.copy()
+    flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    cv2.floodFill(flood, flood_mask, (0, 0), 255)
+    flood_inv = cv2.bitwise_not(flood)
+    filled = cv2.bitwise_or(padded, flood_inv)
+    filled = filled[1:-1, 1:-1]
+    return (filled > 0).astype(np.uint8)
+
+
+def _smooth_mask_edges(mask01: np.ndarray, kernel_size: int) -> np.ndarray:
+    k = max(3, min(5, int(kernel_size)))
+    if k % 2 == 0:
+        k += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    mask255 = (mask01 > 0).astype(np.uint8) * 255
+    mask255 = cv2.morphologyEx(mask255, cv2.MORPH_CLOSE, kernel, iterations=1)
+    mask255 = cv2.morphologyEx(mask255, cv2.MORPH_OPEN, kernel, iterations=1)
+    return (mask255 > 0).astype(np.uint8)
+
+
+def _background_distance_from_border(
+    img_bgr: np.ndarray,
+) -> Tuple[Optional[np.ndarray], Optional[int]]:
+    h, w = img_bgr.shape[:2]
+    border_px = int(max(6, min(24, round(min(h, w) * 0.04))))
+    border_mask = np.zeros((h, w), dtype=np.uint8)
+    border_mask[:border_px, :] = 1
+    border_mask[-border_px:, :] = 1
+    border_mask[:, :border_px] = 1
+    border_mask[:, -border_px:] = 1
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    border_pixels = lab[border_mask == 1]
+    if border_pixels.size == 0:
+        return None, None
+    bg_color = np.median(border_pixels, axis=0)
+    dist = np.linalg.norm(lab - bg_color, axis=2)
+    dist_u8 = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    dist_u8 = cv2.GaussianBlur(dist_u8, (3, 3), 0)
+    otsu, _ = cv2.threshold(dist_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return dist_u8, int(otsu)
+
+
+def _recover_piece_edges(
+    piece_bgr: np.ndarray, mask01: np.ndarray, kernel_size: int
+) -> np.ndarray:
+    dist_u8, otsu = _background_distance_from_border(piece_bgr)
+    if dist_u8 is None or otsu is None:
+        return mask01
+    k = max(3, min(7, int(kernel_size)))
+    if k % 2 == 0:
+        k += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    dilated = cv2.morphologyEx(
+        mask01.astype(np.uint8), cv2.MORPH_DILATE, kernel, iterations=1
+    )
+    eroded = cv2.morphologyEx(
+        mask01.astype(np.uint8), cv2.MORPH_ERODE, kernel, iterations=1
+    )
+    edge_band = (dilated > 0) & (eroded == 0)
+    add = edge_band & (dist_u8 >= max(0, otsu - 8))
+    out = (mask01 > 0) | add
+    return out.astype(np.uint8)
+
+
+def _smooth_piece_contour(mask01: np.ndarray) -> np.ndarray:
+    mask255 = (mask01 > 0).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return mask01
+    cnt = max(contours, key=cv2.contourArea)
+    arc = cv2.arcLength(cnt, True)
+    epsilon = max(2.0, 0.01 * arc)
+    approx = cv2.approxPolyDP(cnt, epsilon, True)
+    smoothed = np.zeros_like(mask255)
+    cv2.drawContours(smoothed, [approx], -1, 255, -1)
+    merged = cv2.bitwise_or(mask255, smoothed)
+    return (merged > 0).astype(np.uint8)
+
+
+def _template_color_clusters(
+    template_bgr: np.ndarray,
+    template_mask: Optional[np.ndarray] = None,
+    k: int = 4,
+    percentile: float = 98.0,
+    scale: float = 1.15,
+) -> Tuple[np.ndarray, np.ndarray]:
+    template_lab = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    if template_mask is None or template_mask.sum() == 0:
+        fg = template_lab.reshape(-1, 3)
+    else:
+        fg = template_lab[template_mask > 0]
+    fg_ab = fg[:, 1:3]
+    if fg_ab.shape[0] > 200_000:
+        idx = np.linspace(0, fg_ab.shape[0] - 1, num=200_000).astype(int)
+        fg_ab = fg_ab[idx]
+    if fg_ab.shape[0] < k:
+        mean_ab = np.median(fg_ab, axis=0, keepdims=True)
+        dist_fg = np.linalg.norm(fg_ab - mean_ab[0], axis=1)
+        thresh = float(np.percentile(dist_fg, percentile)) * scale
+        return mean_ab, np.array([thresh], dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.2)
+    _, labels, centers = cv2.kmeans(
+        fg_ab.astype(np.float32),
+        k,
+        None,
+        criteria,
+        3,
+        cv2.KMEANS_PP_CENTERS,
+    )
+    centers = centers.astype(np.float32)
+    thresholds = []
+    for idx in range(k):
+        cluster = fg_ab[labels.ravel() == idx]
+        if cluster.size == 0:
+            thresholds.append(0.0)
+            continue
+        dist = np.linalg.norm(cluster - centers[idx], axis=1)
+        thresholds.append(float(np.percentile(dist, percentile)) * scale)
+    return centers, np.array(thresholds, dtype=np.float32)
+
+
+def _apply_template_cluster_mask(
+    piece_bgr: np.ndarray, centers: np.ndarray, thresholds: np.ndarray
+) -> np.ndarray:
+    piece_lab = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    piece_ab = piece_lab[:, :, 1:3]
+    mask = np.zeros(piece_ab.shape[:2], dtype=np.uint8)
+    for center, thresh in zip(centers, thresholds):
+        if thresh <= 0:
+            continue
+        dist_piece = np.linalg.norm(piece_ab - center, axis=2)
+        mask |= (dist_piece <= thresh).astype(np.uint8)
+    return mask
+
+
+def _background_color_clusters(
+    piece_bgr: np.ndarray,
+    k: int = 3,
+    percentile: float = 98.0,
+    scale: float = 1.1,
+) -> Tuple[np.ndarray, np.ndarray]:
+    h, w = piece_bgr.shape[:2]
+    border_px = int(max(8, min(40, round(min(h, w) * 0.06))))
+    border_mask = np.zeros((h, w), dtype=np.uint8)
+    border_mask[:border_px, :] = 1
+    border_mask[-border_px:, :] = 1
+    border_mask[:, :border_px] = 1
+    border_mask[:, -border_px:] = 1
+    lab = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    bg = lab[border_mask == 1][:, 1:3]
+    if bg.shape[0] > 200_000:
+        idx = np.linspace(0, bg.shape[0] - 1, num=200_000).astype(int)
+        bg = bg[idx]
+    if bg.shape[0] < k:
+        mean_ab = np.median(bg, axis=0, keepdims=True)
+        dist_bg = np.linalg.norm(bg - mean_ab[0], axis=1)
+        thresh = float(np.percentile(dist_bg, percentile)) * scale
+        return mean_ab, np.array([thresh], dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.2)
+    _, labels, centers = cv2.kmeans(
+        bg.astype(np.float32),
+        k,
+        None,
+        criteria,
+        3,
+        cv2.KMEANS_PP_CENTERS,
+    )
+    centers = centers.astype(np.float32)
+    thresholds = []
+    for idx in range(k):
+        cluster = bg[labels.ravel() == idx]
+        if cluster.size == 0:
+            thresholds.append(0.0)
+            continue
+        dist = np.linalg.norm(cluster - centers[idx], axis=1)
+        thresholds.append(float(np.percentile(dist, percentile)) * scale)
+    return centers, np.array(thresholds, dtype=np.float32)
+
+
+def _apply_background_cluster_mask(
+    piece_bgr: np.ndarray, centers: np.ndarray, thresholds: np.ndarray
+) -> np.ndarray:
+    piece_lab = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    piece_ab = piece_lab[:, :, 1:3]
+    mask = np.zeros(piece_ab.shape[:2], dtype=np.uint8)
+    for center, thresh in zip(centers, thresholds):
+        if thresh <= 0:
+            continue
+        dist_piece = np.linalg.norm(piece_ab - center, axis=2)
+        mask |= (dist_piece <= thresh).astype(np.uint8)
+    return mask
+
+
 def _mask_by_blue(
     piece_bgr: np.ndarray,
     kernel_size: int,
@@ -540,7 +748,11 @@ def _mask_by_hsv_ranges(
 
 
 def compute_piece_mask(
-    piece_bgr: np.ndarray, config: MatcherConfig, keep_largest_component: bool = True
+    piece_bgr: np.ndarray,
+    config: MatcherConfig,
+    keep_largest_component: bool = True,
+    template_bgr: Optional[np.ndarray] = None,
+    template_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Compute a binary mask for a puzzle piece based on color mode.
 
@@ -563,17 +775,17 @@ def compute_piece_mask(
     open_iters = int(config.mask_open_iters)
     close_iters = int(config.mask_close_iters)
     if mask_mode == "blue":
-        return _mask_by_blue(
+        mask01 = _mask_by_blue(
             piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
         )
-    if mask_mode == "green":
-        return _mask_by_green(
+    elif mask_mode == "green":
+        mask01 = _mask_by_green(
             piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
         )
-    if mask_mode in ("hsv", "hsv_ranges"):
+    elif mask_mode in ("hsv", "hsv_ranges"):
         if not config.mask_hsv_ranges:
             raise RuntimeError("mask_hsv_ranges must be set for hsv mask mode.")
-        return _mask_by_hsv_ranges(
+        mask01 = _mask_by_hsv_ranges(
             piece_bgr,
             config.mask_hsv_ranges,
             kernel_size,
@@ -581,7 +793,84 @@ def compute_piece_mask(
             close_iters,
             keep_largest_component,
         )
-    raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
+    else:
+        raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
+
+    if template_bgr is not None and mask_mode in ("hsv", "hsv_ranges"):
+        try:
+            y0, y1, x0, x1 = _mask_bbox(mask01)
+            bbox_area = max(1, (y1 - y0) * (x1 - x0))
+            fill_ratio = float(mask01.sum()) / float(bbox_area)
+        except RuntimeError:
+            fill_ratio = 0.0
+        cluster_scale = float(config.template_cluster_scale)
+        if fill_ratio < 0.84:
+            cluster_scale *= 1.0 + min(0.35, (0.84 - fill_ratio) * 0.8)
+        centers, thresholds = _template_color_clusters(
+            template_bgr,
+            template_mask=template_mask,
+            k=int(config.template_cluster_k),
+            percentile=float(config.template_cluster_percentile),
+            scale=cluster_scale,
+        )
+        template_mask01 = _apply_template_cluster_mask(piece_bgr, centers, thresholds)
+        bg_centers, bg_thresholds = _background_color_clusters(piece_bgr)
+        bg_mask01 = _apply_background_cluster_mask(piece_bgr, bg_centers, bg_thresholds)
+        seed_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (max(3, kernel_size), max(3, kernel_size))
+        )
+        seed = cv2.morphologyEx(
+            (mask01 > 0).astype(np.uint8) * 255,
+            cv2.MORPH_DILATE,
+            seed_kernel,
+            iterations=2,
+        )
+        template_mask01 = (template_mask01 > 0).astype(np.uint8)
+        template_mask01 = np.where(bg_mask01 > 0, 0, template_mask01).astype(np.uint8)
+        mask01 = np.where(seed > 0, (mask01 | template_mask01), mask01).astype(np.uint8)
+        allow_growth = fill_ratio < 0.86
+        if allow_growth:
+            dist_u8, otsu = _background_distance_from_border(piece_bgr)
+            if dist_u8 is None or otsu is None:
+                bg_dist_mask = np.zeros_like(mask01)
+            else:
+                bg_dist_mask = (dist_u8 >= max(0, otsu + 2)).astype(np.uint8)
+            candidate = (template_mask01 | bg_dist_mask).astype(np.uint8)
+            candidate = np.where(bg_mask01 > 0, 0, candidate).astype(np.uint8)
+            mask01 = np.where(seed > 0, (mask01 | candidate), mask01).astype(np.uint8)
+            if fill_ratio < 0.9:
+                dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                dilated = cv2.morphologyEx(
+                    (mask01 > 0).astype(np.uint8) * 255,
+                    cv2.MORPH_DILATE,
+                    dil_kernel,
+                    iterations=1,
+                )
+                dilated01 = (dilated > 0).astype(np.uint8)
+                constrained = (dilated01 > 0) & (candidate > 0)
+                mask01 = np.where(constrained, 1, mask01).astype(np.uint8)
+        if config.mask_shape_refine:
+            mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
+            mask01 = _smooth_piece_contour(mask01)
+            mask01 = _fill_mask_holes(mask01)
+            mask01 = _smooth_mask_edges(mask01, kernel_size)
+        else:
+            if fill_ratio < 0.86:
+                mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
+            mask01 = _fill_mask_holes(mask01)
+            mask01 = _smooth_mask_edges(mask01, kernel_size)
+        mask01 = _cleanup_mask(mask01 * 255, kernel_size, open_iters, close_iters)
+        mask01 = (mask01 > 0).astype(np.uint8)
+        if keep_largest_component:
+            mask01 = _keep_largest_component(mask01)
+
+    if config.mask_shape_refine:
+        mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
+        mask01 = _smooth_piece_contour(mask01)
+        mask01 = _smooth_mask_edges(mask01, kernel_size)
+        mask01 = _fill_mask_holes(mask01)
+
+    return mask01
 
 
 def crop_image_to_mask(
@@ -903,13 +1192,32 @@ def _infer_knob_counts(
     template_shape: Tuple[int, int],
     config: MatcherConfig,
 ) -> Tuple[int, int]:
-    mh, mw = piece_mask.shape
+    mask01 = (piece_mask > 0).astype(np.uint8)
+    mh, mw = mask01.shape
     if mw == 0 or mh == 0:
         return 0, 0
 
-    piece_area_px = float(piece_mask.sum())
+    piece_area_px = float(mask01.sum())
     if piece_area_px <= 0:
         return 0, 0
+
+    col_sum = mask01.sum(axis=0)
+    row_sum = mask01.sum(axis=1)
+    if col_sum.max() > 0 and row_sum.max() > 0:
+        col_thresh = 0.55 * float(col_sum.max())
+        row_thresh = 0.55 * float(row_sum.max())
+        left = int(np.argmax(col_sum >= col_thresh))
+        right = int(mw - 1 - np.argmax(col_sum[::-1] >= col_thresh))
+        top = int(np.argmax(row_sum >= row_thresh))
+        bottom = int(mh - 1 - np.argmax(row_sum[::-1] >= row_thresh))
+        core_w = max(1, right - left + 1)
+        core_h = max(1, bottom - top + 1)
+        if core_w >= 0.7 * mw and core_h >= 0.7 * mh:
+            mask01 = mask01[top : bottom + 1, left : right + 1]
+            mw = core_w
+            mh = core_h
+            piece_area_px = float(mask01.sum())
+
     fill_ratio = piece_area_px / float(mw * mh)
 
     th, tw = template_shape
@@ -1727,20 +2035,28 @@ def _create_resized_preview(
     piece_mask: np.ndarray,
     match: Dict,
     rethreshold: bool = False,
+    render_full_res: bool = True,
 ) -> np.ndarray:
     rot = match["rot"]
     rot_bin = _rotate_img(_binary_to_uint8(piece_bin), rot)
     rot_mask = _rotate_img(_binary_to_uint8(piece_mask), rot)
-    ws = max(1, match["br"][0] - match["tl"][0])
-    hs = max(1, match["br"][1] - match["tl"][1])
-    rv = _resize_for_match(rot_bin, ws, hs, rethreshold=rethreshold)
-    rv_mask = _resize_for_match(rot_mask, ws, hs)
+    if render_full_res:
+        rv = rot_bin
+        rv_mask = rot_mask
+    else:
+        ws = max(1, match["br"][0] - match["tl"][0])
+        hs = max(1, match["br"][1] - match["tl"][1])
+        rv = _resize_for_match(rot_bin, ws, hs, rethreshold=rethreshold)
+        rv_mask = _resize_for_match(rot_mask, ws, hs)
     rv = (rv * (rv_mask > 127)).astype(np.uint8)
     return rv
 
 
 def _render_masked_piece_view(
-    piece_rgb: np.ndarray, piece_mask: np.ndarray, match: Dict
+    piece_rgb: np.ndarray,
+    piece_mask: np.ndarray,
+    match: Dict,
+    render_full_res: bool = True,
 ) -> np.ndarray:
     rot = match["rot"]
     mask01 = (piece_mask > 0).astype(np.uint8)
@@ -1761,7 +2077,9 @@ def _render_masked_piece_view(
 
     target_h = max(1, match["br"][1] - match["tl"][1])
     target_w = max(1, match["br"][0] - match["tl"][0])
-    if rot_rgb.shape[0] != target_h or rot_rgb.shape[1] != target_w:
+    if not render_full_res and (
+        rot_rgb.shape[0] != target_h or rot_rgb.shape[1] != target_w
+    ):
         interp = (
             cv2.INTER_AREA
             if rot_rgb.shape[0] > target_h or rot_rgb.shape[1] > target_w
@@ -1982,7 +2300,17 @@ def find_piece_in_template(
         template_bin = _rotate_template_quadrant(template_bin, rotation)
         template_blur_cache = {}
 
-    piece_mask = compute_piece_mask(piece, config)
+    template_bgr = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
+    template_mask01 = (template_bin > 0).astype(np.uint8)
+    piece_mask = compute_piece_mask(
+        piece,
+        config,
+        template_bgr=template_bgr,
+        template_mask=template_mask01,
+    )
+    knob_mask: Optional[np.ndarray] = None
+    if (config.mask_mode or "blue").lower() in ("hsv", "hsv_ranges"):
+        knob_mask = compute_piece_mask(piece, config)
     if profile:
         marks.append(("mask", time.perf_counter()))
 
@@ -2024,7 +2352,14 @@ def find_piece_in_template(
                 border_value=bg,
             )
             auto_align_deg = correction
-            piece_mask = compute_piece_mask(piece, config)
+            piece_mask = compute_piece_mask(
+                piece,
+                config,
+                template_bgr=template_bgr,
+                template_mask=template_mask01,
+            )
+            if knob_mask is not None:
+                knob_mask = compute_piece_mask(piece, config)
             y0, y1, x0, x1 = _mask_bbox(piece_mask)
             piece_crop = piece[y0:y1, x0:x1].copy()
             piece_mask_crop = piece_mask[y0:y1, x0:x1].copy()
@@ -2040,8 +2375,12 @@ def find_piece_in_template(
 
     knobs_inferred = False
     if infer_knobs_enabled:
+        knob_mask_crop = piece_mask_crop
+        if knob_mask is not None:
+            ky0, ky1, kx0, kx1 = _mask_bbox(knob_mask)
+            knob_mask_crop = knob_mask[ky0:ky1, kx0:kx1].copy()
         knobs_x, knobs_y = _infer_knob_counts(
-            piece_mask_crop,
+            knob_mask_crop,
             template_bin.shape,
             config,
         )
@@ -2115,6 +2454,7 @@ def find_piece_in_template(
         knobs_y=knobs_y,
         knobs_inferred=knobs_inferred,
         resize_rethreshold=config.resize_rethreshold,
+        render_full_res=config.render_full_res,
     )
 
 
@@ -2145,6 +2485,7 @@ def render_primary_views(
             payload.piece_mask,
             match,
             rethreshold=payload.resize_rethreshold,
+            render_full_res=payload.render_full_res,
         )
     )
     zoom = _render_zoom_image(
@@ -2155,7 +2496,12 @@ def render_primary_views(
         match,
         zoom=98,
     )
-    piece_view = _render_masked_piece_view(payload.piece_rgb, payload.piece_mask, match)
+    piece_view = _render_masked_piece_view(
+        payload.piece_rgb,
+        payload.piece_mask,
+        match,
+        render_full_res=payload.render_full_res,
+    )
     zoom_pair_view = _render_zoom_image(
         payload.template_rgb,
         payload.template_shape,
@@ -2167,8 +2513,8 @@ def render_primary_views(
     zoom_pair = _combine_side_by_side(
         piece_view,
         zoom_pair_view,
-        min_height=300,
-        max_width=900,
+        min_height=0 if payload.render_full_res else 300,
+        max_width=0 if payload.render_full_res else 900,
     )
     zoom_full = _render_zoom_image(
         payload.template_rgb,

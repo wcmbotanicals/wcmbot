@@ -311,9 +311,18 @@ def _rotate_template_preview(
     return np.rot90(image, k=k)
 
 
-def _compute_multipiece_mask(piece_bgr: np.ndarray, matcher_config) -> np.ndarray:
+def _compute_multipiece_mask(
+    piece_bgr: np.ndarray,
+    matcher_config,
+    template_bgr: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """Compute binary mask for multipiece segmentation with optional background inversion."""
-    mask01 = compute_piece_mask(piece_bgr, matcher_config, keep_largest_component=False)
+    mask01 = compute_piece_mask(
+        piece_bgr,
+        matcher_config,
+        keep_largest_component=False,
+        template_bgr=template_bgr,
+    )
 
     # Invert if segmentation captured mostly background.
     if mask01.sum() > 0.5 * mask01.size:
@@ -323,9 +332,12 @@ def _compute_multipiece_mask(piece_bgr: np.ndarray, matcher_config) -> np.ndarra
 
 
 def _find_multipiece_regions(
-    image_bgr: np.ndarray, matcher_config, min_area_frac: float = 0.002
+    image_bgr: np.ndarray,
+    matcher_config,
+    min_area_frac: float = 0.002,
+    template_bgr: Optional[np.ndarray] = None,
 ):
-    mask01 = _compute_multipiece_mask(image_bgr, matcher_config)
+    mask01 = _compute_multipiece_mask(image_bgr, matcher_config, template_bgr)
     mask255 = (mask01 > 0).astype(np.uint8) * 255
     contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -1090,7 +1102,21 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
             **template_spec.matcher_overrides,
         }
     )
-    regions, _ = _find_multipiece_regions(grid_bgr, matcher_config)
+    template_rgb = None
+    for spec in TEMPLATE_REGISTRY.templates.values():
+        if spec.template_id == template_id:
+            template_rgb = get_template_image(
+                spec.template_path, crop_x=spec.crop_x, crop_y=spec.crop_y
+            )
+            break
+    template_bgr = (
+        cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
+        if template_rgb is not None
+        else None
+    )
+    regions, _ = _find_multipiece_regions(
+        grid_bgr, matcher_config, template_bgr=template_bgr
+    )
     if not regions:
         yield _blank_outputs(
             "No pieces detected in the image.",
@@ -1105,15 +1131,6 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
     colors = GRID_COLORS_BGR
 
     grid_overview = _build_multipiece_overview(grid_bgr, regions, colors)
-    # Get template RGB for overlay
-    template_rgb = None
-    for spec in TEMPLATE_REGISTRY.templates.values():
-        if spec.template_id == template_id:
-            template_rgb = get_template_image(
-                spec.template_path, crop_x=spec.crop_x, crop_y=spec.crop_y
-            )
-            break
-
     batch_state = {
         "template_id": template_id,
         "rotation": rotation,
