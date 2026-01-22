@@ -1,5 +1,6 @@
 """Gradio interface for the jigsaw puzzle solver"""
 
+import argparse
 import base64
 import os
 import random
@@ -1815,4 +1816,12 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(theme=app_theme)
+    argparse_parser = argparse.ArgumentParser()
+    argparse_parser.add_argument(
+        "--accessible", action="store_true", help="Make accessible over local network"
+    )
+    args = argparse_parser.parse_args()
+    kwargs = {}
+    if args.accessible:
+        kwargs["server_name"] = "0.0.0.0"
+    demo.launch(theme=app_theme, **kwargs)
