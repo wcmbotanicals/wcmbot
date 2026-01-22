@@ -16,6 +16,9 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+# Set up module logger
+logger = logging.getLogger(__name__)
+
 # ---------- configuration ----------
 COLS = 36
 ROWS = 28
@@ -1201,7 +1204,7 @@ def _match_scale_rotation_combo(
         return combo_best_local
 
     # Decide whether to use coarse-then-fine
-    # ws < tw and hs < th are already guaranteed by the check at line 1129
+    # ws < tw and hs < th are already guaranteed by the check at line 1133
     use_coarse = template_coarse_f32 is not None and 0.0 < coarse_factor < 1.0
 
     if use_coarse:
@@ -1397,7 +1400,7 @@ def _match_template_multiscale_binary(
                             break
                 except Exception as e:
                     # Log but don't crash on individual match failures
-                    logging.warning("Parallel match failed: %s", e)
+                    logger.warning("Parallel match failed: %s", e)
                     continue
 
         if not all_candidates:
