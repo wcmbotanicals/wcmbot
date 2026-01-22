@@ -30,7 +30,9 @@
         "media/pieces/grass_puzzle"
       ],
       "matcher_overrides": {
-        "coarse_factor": 1.0,
+        "coarse_factor": 0.5,
+        "preserve_edges_coarse": true,
+        "parallel_matching": true,
         "binarize_blur_ksz": null,
         "resize_rethreshold": true,
         "match_blur_ksz": null,

@@ -1,9 +1,12 @@
 import os
+import tempfile
 
 import cv2
 import numpy as np
 import pytest
+from PIL import Image
 
+from app import _find_multipiece_regions
 from wcmbot.matcher import (
     COLS,
     ROWS,
@@ -57,6 +60,34 @@ GRASS_CASES = [
 EXPECTED_LOCATION_CASES = [("sample_puzzle", *case) for case in BASE_CASES] + [
     ("grass_puzzle", *case) for case in GRASS_CASES
 ]
+
+MANY_PIECES_EXPECTED = {
+    1: (11, 10),
+    2: (16, 22),
+    3: (15, 13),
+    4: (23, 33),
+    5: (12, 10),
+    6: (25, 13),
+    7: (17, 32),
+    8: (16, 17),
+    9: (24, 33),
+    10: (14, 23),
+    11: (10, 31),
+    12: (16, 33),
+    13: (12, 4),
+    14: (22, 11),
+    15: (16, 19),
+    16: (27, 27),
+    17: (25, 22),
+    18: (10, 19),
+    19: (16, 30),
+    20: (15, 19),
+    21: (12, 7),
+    22: (13, 27),
+    23: (13, 14),
+    24: (14, 25),
+    25: (12, 3),
+}
 
 ROTATION_SWEEP_DEGREES = [-15, -10, -5, -2.5, 0, 2.5, 5, 10, 15]
 TEMPLATE_ROTATION_CASE = ("piece_5.jpg", 0, 2, 180, 11, 6)
@@ -222,4 +253,63 @@ def test_find_piece_with_template_rotation(template_rotation):
     )
     assert top["col"] == exp_col, (
         f"col mismatch for {piece_filename} at template rotation {template_rotation}deg"
+    )
+
+
+@pytest.mark.e2e
+def test_multipiece_many_pieces_batch():
+    spec = TEMPLATE_REGISTRY.get("grass_puzzle")
+    matcher_config = build_matcher_config(
+        {
+            "rows": spec.rows,
+            "cols": spec.cols,
+            "crop_x": spec.crop_x,
+            "crop_y": spec.crop_y,
+            **spec.matcher_overrides,
+        }
+    )
+    grid_path = os.path.join(GRASS_PIECES_DIR, "many_pieces.jpg")
+    grid_img = Image.open(grid_path).convert("RGB")
+    grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
+
+    regions, _ = _find_multipiece_regions(grid_bgr, matcher_config)
+    assert len(regions) == 25, "Expected 25 pieces detected"
+
+    placements = {}
+    correct = 0
+    template_path = os.fspath(spec.template_path)
+    for idx, region in enumerate(regions, start=1):
+        x, y, w, h = region["bbox"]
+        pad = max(4, int(min(w, h) * 0.06))
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(grid_bgr.shape[1], x + w + pad)
+        y1 = min(grid_bgr.shape[0], y + h + pad)
+        crop = grid_img.crop((x0, y0, x1, y1))
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            crop.save(tmp.name)
+            crop_path = tmp.name
+        try:
+            payload = find_piece_in_template(
+                piece_image_path=crop_path,
+                template_image_path=template_path,
+                knobs_x=None,
+                knobs_y=None,
+                infer_knobs=True,
+                auto_align=True,
+                template_rotation=spec.default_rotation,
+                matcher_config=matcher_config,
+            )
+        finally:
+            os.unlink(crop_path)
+
+        assert payload.matches, f"No match returned for piece {idx}"
+        top = payload.matches[0]
+        placements[idx] = (top["row"], top["col"])
+        if MANY_PIECES_EXPECTED.get(idx) == placements[idx]:
+            correct += 1
+
+    assert correct >= 23, (
+        f"Expected at least 23 correctly placed pieces, got {correct}: {placements}"
     )
