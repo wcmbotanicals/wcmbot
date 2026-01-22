@@ -1270,7 +1270,10 @@ def _match_scale_rotation_combo(
                     )
                     all_fine_candidates.extend(fine_candidates)
 
-                return all_fine_candidates
+                # Only short-circuit if the coarse refinement produced candidates.
+                # If none were found, fall back to full-resolution matching below.
+                if all_fine_candidates:
+                    return all_fine_candidates
 
     # Fallback: full-resolution matching without coarse pass
     res = cv2.matchTemplate(template_blur_f32, patt_masked, corr_method)
