@@ -1378,11 +1378,22 @@ def _match_template_multiscale_binary(
                     all_candidates.extend(result)
 
                     # Early termination if we find an excellent match
-                    if result and result[0]["score"] > 0.85:
-                        # Cancel remaining futures
-                        for f in futures:
-                            f.cancel()
-                        break
+                    if result:
+                        max_score = max(c["score"] for c in result)
+                        if max_score > 0.85:
+                            # Cancel remaining futures
+                            for f in futures:
+                                f.cancel()
+                            # Ensure all futures have finished or been cancelled
+                            for f in futures:
+                                try:
+                                    # Block until the future completes or raises,
+                                    # ignoring any exceptions here since failures
+                                    # are handled elsewhere.
+                                    f.result()
+                                except Exception:
+                                    pass
+                            break
                 except Exception as e:
                     # Log but don't crash on individual match failures
                     print(f"Warning: Parallel match failed: {e}")
