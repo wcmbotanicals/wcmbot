@@ -6,13 +6,18 @@ needing to reproduce image-processing logic.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+# Set up module logger
+logger = logging.getLogger(__name__)
 
 # ---------- configuration ----------
 COLS = 36
@@ -347,7 +352,9 @@ def _adaptive_coarse_resize(
     # Mild unsharp mask: enhances edges without over-sharpening or creating artifacts
     # This is gentler than a sharpening kernel and preserves grass blades without distortion
     blurred = cv2.GaussianBlur(img, (3, 3), 1.0)
-    # Unsharp mask with low weight (0.3) to avoid over-enhancement
+    # Unsharp mask formula: sharpened = original * (1 + weight) + blurred * (-weight)
+    # Weight of 0.3 provides mild enhancement without overflow/underflow.
+    # cv2.addWeighted clamps values to [0, 255] for uint8 or valid range for float32.
     sharpened = cv2.addWeighted(img, 1.3, blurred, -0.3, 0)
 
     # Use INTER_AREA for high-quality downsampling after mild sharpening
@@ -1197,12 +1204,8 @@ def _match_scale_rotation_combo(
         return combo_best_local
 
     # Decide whether to use coarse-then-fine
-    use_coarse = (
-        template_coarse_f32 is not None
-        and 0.0 < coarse_factor < 1.0
-        and ws < tw
-        and hs < th
-    )
+    # ws < tw and hs < th are already guaranteed by the check at line 1133
+    use_coarse = template_coarse_f32 is not None and 0.0 < coarse_factor < 1.0
 
     if use_coarse:
         # Coarse pass: find approximate locations
@@ -1313,12 +1316,13 @@ def _match_template_multiscale_binary(
     grid_center_weight = config.grid_center_weight
 
     # Check if we should use parallel execution
+    # Threshold of 8 configs balances parallelization benefits vs. thread creation overhead.
+    # Below 8, the overhead of thread management exceeds the performance gains.
     num_configs = len(scales) * len(rotations)
     use_parallel = config.parallel_matching and num_configs >= 8
 
     if use_parallel:
         # Parallel path: use ThreadPoolExecutor for scale/rotation combinations
-        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         if template_blur_f32 is None:
             T = (
@@ -1396,7 +1400,7 @@ def _match_template_multiscale_binary(
                             break
                 except Exception as e:
                     # Log but don't crash on individual match failures
-                    print(f"Warning: Parallel match failed: {e}")
+                    logger.warning("Parallel match failed: %s", e)
                     continue
 
         if not all_candidates:
