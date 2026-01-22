@@ -1345,7 +1345,12 @@ def _match_template_multiscale_binary(
             T_coarse_blur = None
 
         all_candidates = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        # Determine an appropriate number of worker threads based on CPU count
+        total_tasks = len(scales) * len(rotations)
+        cpu_count = os.cpu_count() or 1
+        max_workers = min(total_tasks, cpu_count)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
                     _match_scale_rotation_combo,
