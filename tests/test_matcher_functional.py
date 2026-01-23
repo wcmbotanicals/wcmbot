@@ -478,4 +478,3 @@ class TestMaskHelpers:
         assert result.shape == (100, 100)
         # With zero threshold, result should be all zeros or mostly zeros
         assert result.sum() == 0
->>>>>>> ce79429 (Address Copilot PR review feedback)
