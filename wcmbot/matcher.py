@@ -120,6 +120,7 @@ class MatcherConfig:
     template_cluster_percentile: float = 98.0
     template_cluster_scale: float = 1.15
     render_full_res: bool = True
+    use_cuda: bool = False
 
 
 def build_matcher_config(
@@ -139,6 +140,7 @@ def build_matcher_config(
         "coarse_min_side": COARSE_MIN_SIDE,
         "preserve_edges_coarse": False,
         "parallel_matching": True,
+        "use_cuda": False,
         "grid_center_weight": GRID_CENTER_WEIGHT,
         "knob_width_frac": KNOB_WIDTH_FRAC,
         "crop_x": CROP_X_PX,
@@ -388,6 +390,92 @@ def _adaptive_coarse_resize(
     return cv2.resize(
         sharpened, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA
     )
+
+
+def _cuda_available() -> bool:
+    """Return True if OpenCV is compiled with CUDA and at least one device is enabled."""
+    try:
+        return (
+            bool(getattr(cv2, "cuda", None))
+            and cv2.cuda.getCudaEnabledDeviceCount() > 0
+        )
+    except Exception:
+        return False
+
+
+class _CudaMatchContext:
+    """Thin wrapper that uploads templates once and reuses CUDA matchers."""
+
+    def __init__(
+        self,
+        template_full: np.ndarray,
+        template_coarse: Optional[np.ndarray],
+        corr_method: int,
+    ) -> None:
+        self.enabled = True
+        self.corr_method = corr_method
+        self.template_gpu = cv2.cuda_GpuMat()
+        self.template_gpu.upload(
+            np.ascontiguousarray(template_full.astype(np.float32, copy=False))
+        )
+        self.tm_full = cv2.cuda.createTemplateMatching(cv2.CV_32F, corr_method)
+
+        self.tm_coarse = None
+        self.template_coarse_gpu = None
+        if template_coarse is not None:
+            self.template_coarse_gpu = cv2.cuda_GpuMat()
+            self.template_coarse_gpu.upload(
+                np.ascontiguousarray(template_coarse.astype(np.float32, copy=False))
+            )
+            self.tm_coarse = cv2.cuda.createTemplateMatching(cv2.CV_32F, corr_method)
+
+    @property
+    def has_coarse(self) -> bool:
+        return self.template_coarse_gpu is not None and self.tm_coarse is not None
+
+    def disable(self) -> None:
+        self.enabled = False
+
+    def _run_match(
+        self, template_gpu: "cv2.cuda_GpuMat", patch: np.ndarray, matcher
+    ) -> np.ndarray:
+        if not self.enabled:
+            raise RuntimeError("CUDA matcher disabled")
+        patch_gpu = cv2.cuda_GpuMat()
+        patch_gpu.upload(np.ascontiguousarray(patch.astype(np.float32, copy=False)))
+        res_gpu = matcher.match(template_gpu, patch_gpu)
+        return res_gpu.download()
+
+    def match_full(self, patch: np.ndarray) -> np.ndarray:
+        return self._run_match(self.template_gpu, patch, self.tm_full)
+
+    def match_coarse(self, patch: np.ndarray) -> np.ndarray:
+        if not self.has_coarse:
+            raise RuntimeError("CUDA coarse matcher not initialized")
+        return self._run_match(self.template_coarse_gpu, patch, self.tm_coarse)
+
+
+def _match_template(
+    template_img: np.ndarray,
+    patch: np.ndarray,
+    corr_method: int,
+    cuda_ctx: Optional[_CudaMatchContext],
+    template_kind: str,
+    allow_cuda: bool = True,
+) -> np.ndarray:
+    """Match template with optional CUDA acceleration and graceful fallback."""
+
+    if allow_cuda and cuda_ctx is not None and cuda_ctx.enabled:
+        try:
+            if template_kind == "full":
+                return cuda_ctx.match_full(patch)
+            if template_kind == "coarse" and cuda_ctx.has_coarse:
+                return cuda_ctx.match_coarse(patch)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("CUDA match failed (%s): %s", template_kind, exc)
+            cuda_ctx.disable()
+
+    return cv2.matchTemplate(template_img, patch, corr_method)
 
 
 def _binarize_two_color(
@@ -1415,6 +1503,7 @@ def _match_scale_rotation_combo(
     piece_mask: np.ndarray,
     template_blur_f32: np.ndarray,
     template_coarse_f32: Optional[np.ndarray],
+    cuda_ctx: Optional[_CudaMatchContext],
     config: MatcherConfig,
     knobs_x: Optional[int],
     knobs_y: Optional[int],
@@ -1552,8 +1641,13 @@ def _match_scale_rotation_combo(
                 patt_c = cv2.resize(patt_c, (ws_c, hs_c), interpolation=cv2.INTER_AREA)
             mask_c = cv2.resize(mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST)
             patt_masked_c = patt_c * mask_c
-
-            res_c = cv2.matchTemplate(template_coarse_f32, patt_masked_c, corr_method)
+            res_c = _match_template(
+                template_coarse_f32,
+                patt_masked_c,
+                corr_method,
+                cuda_ctx,
+                template_kind="coarse",
+            )
 
             if res_c.size > 0:
                 # Find top-K coarse candidates
@@ -1582,7 +1676,14 @@ def _match_scale_rotation_combo(
                         continue
 
                     # Fine match in ROI
-                    res_fine = cv2.matchTemplate(roi, patt_masked, corr_method)
+                    res_fine = _match_template(
+                        roi,
+                        patt_masked,
+                        corr_method,
+                        cuda_ctx,
+                        template_kind="roi",
+                        allow_cuda=False,
+                    )
                     if res_fine.size == 0:
                         continue
 
@@ -1609,7 +1710,13 @@ def _match_scale_rotation_combo(
                     return all_fine_candidates
 
     # Fallback: full-resolution matching without coarse pass
-    res = cv2.matchTemplate(template_blur_f32, patt_masked, corr_method)
+    res = _match_template(
+        template_blur_f32,
+        patt_masked,
+        corr_method,
+        cuda_ctx,
+        template_kind="full",
+    )
 
     if res.size == 0:
         return []
@@ -1645,38 +1752,63 @@ def _match_template_multiscale_binary(
     coarse_min_side = config.coarse_min_side
     grid_center_weight = config.grid_center_weight
 
+    if template_blur_f32 is None:
+        T = (
+            (template_bin_img * 255).astype(np.uint8)
+            if template_bin_img.max() <= 1
+            else template_bin_img.astype(np.uint8)
+        )
+        if blur_ksz is not None:
+            T_blur = cv2.GaussianBlur(T, blur_ksz, 0)
+        else:
+            T_blur = T.copy()
+        T_blur_f32 = T_blur.astype(np.float32)
+    else:
+        T_blur_f32 = template_blur_f32
+
+    th, tw = T_blur_f32.shape[:2]
+    cell_w = tw / cols
+    cell_h = th / rows
+
+    use_coarse = 0.0 < coarse_factor < 1.0 and min(tw, th) >= coarse_min_side
+    if use_coarse:
+        tw_c = max(1, int(round(tw * coarse_factor)))
+        th_c = max(1, int(round(th * coarse_factor)))
+        if tw_c < 2 or th_c < 2:
+            use_coarse = False
+            T_coarse_blur = None
+        else:
+            T_coarse_blur = _adaptive_coarse_resize(
+                T_blur_f32, coarse_factor, config.preserve_edges_coarse
+            )
+    else:
+        T_coarse_blur = None
+
+    cuda_ctx: Optional[_CudaMatchContext] = None
+    if config.use_cuda:
+        if _cuda_available():
+            try:
+                cuda_ctx = _CudaMatchContext(
+                    T_blur_f32, T_coarse_blur if use_coarse else None, corr_method
+                )
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning("CUDA init failed; using CPU: %s", exc)
+                cuda_ctx = None
+        else:
+            logger.info("CUDA requested but not available; using CPU")
+
     # Check if we should use parallel execution
     # Threshold of 8 configs balances parallelization benefits vs. thread creation overhead.
     # Below 8, the overhead of thread management exceeds the performance gains.
     num_configs = len(scales) * len(rotations)
-    use_parallel = config.parallel_matching and num_configs >= 8
+    use_parallel = (
+        config.parallel_matching
+        and num_configs >= 8
+        and not (config.use_cuda and cuda_ctx is not None)
+    )
 
     if use_parallel:
         # Parallel path: use ThreadPoolExecutor for scale/rotation combinations
-
-        if template_blur_f32 is None:
-            T = (
-                (template_bin_img * 255).astype(np.uint8)
-                if template_bin_img.max() <= 1
-                else template_bin_img.astype(np.uint8)
-            )
-            if blur_ksz is not None:
-                T_blur = cv2.GaussianBlur(T, blur_ksz, 0)
-            else:
-                T_blur = T.copy()
-            T_blur_f32 = T_blur.astype(np.float32)
-        else:
-            T_blur_f32 = template_blur_f32
-
-        # Prepare coarse template if needed
-        th, tw = T_blur_f32.shape[:2]
-        use_coarse = 0.0 < coarse_factor < 1.0 and min(tw, th) >= coarse_min_side
-        if use_coarse:
-            T_coarse_blur = _adaptive_coarse_resize(
-                T_blur_f32, coarse_factor, config.preserve_edges_coarse
-            )
-        else:
-            T_coarse_blur = None
 
         all_candidates = []
         # Determine an appropriate number of worker threads based on CPU count
@@ -1694,6 +1826,7 @@ def _match_template_multiscale_binary(
                     piece_mask,
                     T_blur_f32,
                     T_coarse_blur,
+                    cuda_ctx,
                     config,
                     knobs_x,
                     knobs_y,
@@ -1727,19 +1860,6 @@ def _match_template_multiscale_binary(
         return best, top_matches
 
     # Sequential path: original implementation with coarse-then-fine
-    if template_blur_f32 is None:
-        T = (
-            (template_bin_img * 255).astype(np.uint8)
-            if template_bin_img.max() <= 1
-            else template_bin_img.astype(np.uint8)
-        )
-        if blur_ksz is not None:
-            T_blur = cv2.GaussianBlur(T, blur_ksz, 0)
-        else:
-            T_blur = T.copy()
-        T_blur_f32 = T_blur.astype(np.float32)
-    else:
-        T_blur_f32 = template_blur_f32
     P = (
         (piece_bin_pattern * 255).astype(np.uint8)
         if piece_bin_pattern.max() <= 1
@@ -1750,26 +1870,8 @@ def _match_template_multiscale_binary(
     else:
         M = (piece_mask > 127).astype(np.uint8) * 255
 
-    th, tw = T_blur_f32.shape[:2]
-    cell_w = tw / cols
-    cell_h = th / rows
-
     combo_candidates: List[Dict] = []
     dilate_ker = MATCH_DILATE_KERNEL
-
-    use_coarse = 0.0 < coarse_factor < 1.0 and min(tw, th) >= coarse_min_side
-    if use_coarse:
-        tw_c = max(1, int(round(tw * coarse_factor)))
-        th_c = max(1, int(round(th * coarse_factor)))
-        if tw_c < 2 or th_c < 2:
-            use_coarse = False
-            T_coarse_blur = None
-        else:
-            T_coarse_blur = _adaptive_coarse_resize(
-                T_blur_f32, coarse_factor, config.preserve_edges_coarse
-            )
-    else:
-        T_coarse_blur = None
 
     def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
         if flat.size <= max_len:
@@ -1939,7 +2041,13 @@ def _match_template_multiscale_binary(
                         mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST
                     )
                     patt_masked_c = patt_c * mask_c
-                    res_c = cv2.matchTemplate(T_coarse_blur, patt_masked_c, corr_method)
+                    res_c = _match_template(
+                        T_coarse_blur,
+                        patt_masked_c,
+                        corr_method,
+                        cuda_ctx,
+                        template_kind="coarse",
+                    )
                     if res_c.size:
                         coarse_positions = _collect_coarse_positions(
                             res_c, ws_c, hs_c, coarse_top_k
@@ -1962,7 +2070,14 @@ def _match_template_multiscale_binary(
                             roi = T_blur_f32[y0:y1, x0:x1]
                             if roi.shape[0] < hs or roi.shape[1] < ws:
                                 continue
-                            res = cv2.matchTemplate(roi, patt_masked, corr_method)
+                            res = _match_template(
+                                roi,
+                                patt_masked,
+                                corr_method,
+                                cuda_ctx,
+                                template_kind="roi",
+                                allow_cuda=False,
+                            )
                             if res.size == 0:
                                 continue
                             combo_best = _collect_matches(
@@ -1979,7 +2094,13 @@ def _match_template_multiscale_binary(
                                 combo_added = True
 
             if not combo_added:
-                res = cv2.matchTemplate(T_blur_f32, patt_masked, corr_method)
+                res = _match_template(
+                    T_blur_f32,
+                    patt_masked,
+                    corr_method,
+                    cuda_ctx,
+                    template_kind="full",
+                )
 
                 if res.size == 0:
                     continue

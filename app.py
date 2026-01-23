@@ -73,6 +73,35 @@ GRID_COLORS_BGR = [
 
 MULTIPIECE_DEFAULT = True
 MAX_DYNAMIC_BUTTONS = 50
+USE_CUDA = False
+
+
+def _assert_cuda_available() -> None:
+    """Exit fast when --gpu is requested but OpenCV CUDA is missing."""
+    try:
+        has_cuda = (
+            bool(getattr(cv2, "cuda", None))
+            and cv2.cuda.getCudaEnabledDeviceCount() > 0
+        )
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        raise RuntimeError(f"CUDA availability check failed: {exc}") from exc
+    if not has_cuda:
+        raise RuntimeError(
+            "--gpu requested but CUDA is not available (check your OpenCV build and drivers)."
+        )
+
+
+def _make_matcher_config(template_spec):
+    return build_matcher_config(
+        {
+            "rows": template_spec.rows,
+            "cols": template_spec.cols,
+            "crop_x": template_spec.crop_x,
+            "crop_y": template_spec.crop_y,
+            "use_cuda": USE_CUDA,
+            **template_spec.matcher_overrides,
+        }
+    )
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
@@ -929,15 +958,7 @@ def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_st
     # Get template spec and run matcher with forced rotation (no auto-align)
     template_spec = TEMPLATE_REGISTRY.get(template_id)
     try:
-        matcher_config = build_matcher_config(
-            {
-                "rows": template_spec.rows,
-                "cols": template_spec.cols,
-                "crop_x": template_spec.crop_x,
-                "crop_y": template_spec.crop_y,
-                **template_spec.matcher_overrides,
-            }
-        )
+        matcher_config = _make_matcher_config(template_spec)
 
         # Load the original piece and apply total rotation
         piece_bgr = cv2.imread(cached_piece_path)
@@ -1044,15 +1065,7 @@ def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
         )
 
     try:
-        matcher_config = build_matcher_config(
-            {
-                "rows": template_spec.rows,
-                "cols": template_spec.cols,
-                "crop_x": template_spec.crop_x,
-                "crop_y": template_spec.crop_y,
-                **template_spec.matcher_overrides,
-            }
-        )
+        matcher_config = _make_matcher_config(template_spec)
         payload = find_piece_in_template(
             piece_path,
             str(template_spec.template_path),
@@ -1094,17 +1107,9 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         return
 
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
-    matcher_config = build_matcher_config(
-        {
-            "rows": template_spec.rows,
-            "cols": template_spec.cols,
-            "crop_x": template_spec.crop_x,
-            "crop_y": template_spec.crop_y,
-            **template_spec.matcher_overrides,
-        }
-    )
-    template_rgb = None
-    if template_spec is not None:
+    matcher_config = build_matcher_config_for_template(template_spec)
+    template_rgb = TEMPLATE_IMAGES.get(template_id)
+    if template_rgb is None and template_spec is not None:
         template_rgb = get_template_image(
             template_spec.template_path,
             crop_x=template_spec.crop_x,
@@ -1115,7 +1120,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         if template_rgb is not None
         else None
     )
-    regions, _ = _find_multipiece_regions(
+    regions, _ = find_multipiece_region_dicts(
         grid_bgr, matcher_config, template_bgr=template_bgr
     )
     if not regions:
@@ -1131,7 +1136,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
     piece_states = [None] * total
     colors = GRID_COLORS_BGR
 
-    grid_overview = _build_multipiece_overview(grid_bgr, regions, colors)
+    grid_overview = build_multipiece_overview(grid_bgr, regions, colors)
     batch_state = {
         "template_id": template_id,
         "rotation": rotation,
@@ -1820,8 +1825,16 @@ if __name__ == "__main__":
     argparse_parser.add_argument(
         "--accessible", action="store_true", help="Make accessible over local network"
     )
+    argparse_parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Enable CUDA acceleration (requires OpenCV built with CUDA)",
+    )
     args = argparse_parser.parse_args()
     kwargs = {}
+    if args.gpu:
+        _assert_cuda_available()
+        USE_CUDA = True
     if args.accessible:
         kwargs["server_name"] = "0.0.0.0"
     demo.launch(theme=app_theme, **kwargs)
