@@ -69,6 +69,20 @@ MATCH_BLUR_KSZ = (3, 3)
 RESIZE_RETHRESHOLD = False
 PIECE_BG_PAD_FRAC = 0.03
 
+# Magic number thresholds for mask refinement
+# These thresholds control the behavior of mask shape refinement with template clustering
+MASK_FILL_RATIO_THRESHOLD = (
+    0.84  # Minimum fill ratio before applying aggressive clustering
+)
+MASK_FILL_RATIO_MULTIPLIER = (
+    0.35  # Multiplier for scale adjustment based on fill deficit
+)
+MASK_FILL_SCALE_FACTOR = 0.8  # Scaling factor for fill ratio adjustment
+MASK_ALLOW_GROWTH_THRESHOLD = 0.86  # Fill ratio threshold for allowing mask growth
+MASK_AGGRESSIVE_GROWTH_THRESHOLD = 0.9  # Fill ratio threshold for aggressive growth
+BG_DISTANCE_THRESHOLD = 2  # Distance threshold offset for background detection
+BORDER_DISTANCE_PERCENTILE = 8  # Border distance percentile for edge recovery
+
 
 # ---------- helper dataclasses ----------
 @dataclass(frozen=True)
@@ -796,6 +810,7 @@ def compute_piece_mask(
     else:
         raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
 
+    template_clustering_applied = False
     if template_bgr is not None and mask_mode in ("hsv", "hsv_ranges"):
         try:
             y0, y1, x0, x1 = _mask_bbox(mask01)
@@ -804,8 +819,11 @@ def compute_piece_mask(
         except RuntimeError:
             fill_ratio = 0.0
         cluster_scale = float(config.template_cluster_scale)
-        if fill_ratio < 0.84:
-            cluster_scale *= 1.0 + min(0.35, (0.84 - fill_ratio) * 0.8)
+        if fill_ratio < MASK_FILL_RATIO_THRESHOLD:
+            cluster_scale *= 1.0 + min(
+                MASK_FILL_RATIO_MULTIPLIER,
+                (MASK_FILL_RATIO_THRESHOLD - fill_ratio) * MASK_FILL_SCALE_FACTOR,
+            )
         centers, thresholds = _template_color_clusters(
             template_bgr,
             template_mask=template_mask,
@@ -828,17 +846,19 @@ def compute_piece_mask(
         template_mask01 = (template_mask01 > 0).astype(np.uint8)
         template_mask01 = np.where(bg_mask01 > 0, 0, template_mask01).astype(np.uint8)
         mask01 = np.where(seed > 0, (mask01 | template_mask01), mask01).astype(np.uint8)
-        allow_growth = fill_ratio < 0.86
+        allow_growth = fill_ratio < MASK_ALLOW_GROWTH_THRESHOLD
         if allow_growth:
             dist_u8, otsu = _background_distance_from_border(piece_bgr)
             if dist_u8 is None or otsu is None:
                 bg_dist_mask = np.zeros_like(mask01)
             else:
-                bg_dist_mask = (dist_u8 >= max(0, otsu + 2)).astype(np.uint8)
+                bg_dist_mask = (dist_u8 >= max(0, otsu + BG_DISTANCE_THRESHOLD)).astype(
+                    np.uint8
+                )
             candidate = (template_mask01 | bg_dist_mask).astype(np.uint8)
             candidate = np.where(bg_mask01 > 0, 0, candidate).astype(np.uint8)
             mask01 = np.where(seed > 0, (mask01 | candidate), mask01).astype(np.uint8)
-            if fill_ratio < 0.9:
+            if fill_ratio < MASK_AGGRESSIVE_GROWTH_THRESHOLD:
                 dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                 dilated = cv2.morphologyEx(
                     (mask01 > 0).astype(np.uint8) * 255,
@@ -849,13 +869,14 @@ def compute_piece_mask(
                 dilated01 = (dilated > 0).astype(np.uint8)
                 constrained = (dilated01 > 0) & (candidate > 0)
                 mask01 = np.where(constrained, 1, mask01).astype(np.uint8)
+        # Apply shape refinement as part of template clustering pipeline
         if config.mask_shape_refine:
             mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
             mask01 = _smooth_piece_contour(mask01)
             mask01 = _fill_mask_holes(mask01)
             mask01 = _smooth_mask_edges(mask01, kernel_size)
         else:
-            if fill_ratio < 0.86:
+            if fill_ratio < MASK_ALLOW_GROWTH_THRESHOLD:
                 mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
             mask01 = _fill_mask_holes(mask01)
             mask01 = _smooth_mask_edges(mask01, kernel_size)
@@ -863,8 +884,10 @@ def compute_piece_mask(
         mask01 = (mask01 > 0).astype(np.uint8)
         if keep_largest_component:
             mask01 = _keep_largest_component(mask01)
+        template_clustering_applied = True
 
-    if config.mask_shape_refine:
+    # Apply shape refinement for non-template clustering cases or when explicitly enabled
+    if not template_clustering_applied and config.mask_shape_refine:
         mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
         mask01 = _smooth_piece_contour(mask01)
         mask01 = _smooth_mask_edges(mask01, kernel_size)
