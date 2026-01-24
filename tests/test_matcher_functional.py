@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from app import _find_multipiece_regions
+from wcmbot.multipiece import find_multipiece_region_dicts
 from wcmbot.matcher import (
     COLS,
     ROWS,
@@ -281,7 +281,7 @@ def test_multipiece_many_pieces_batch():
     grid_img = Image.open(grid_path).convert("RGB")
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
 
-    regions, _ = _find_multipiece_regions(grid_bgr, matcher_config)
+    regions, _ = find_multipiece_region_dicts(grid_bgr, matcher_config)
     assert len(regions) == 25, "Expected 25 pieces detected"
 
     placements = {}

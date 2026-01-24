@@ -2649,6 +2649,43 @@ def find_piece_in_template(
     template_rotation: Optional[int] = None,
     matcher_config: Optional[MatcherConfig] = None,
 ) -> MatchPayload:
+    piece_bgr = _load_image(piece_image_path)
+    return find_piece_in_template_bgr(
+        piece_bgr,
+        template_image_path,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
+        auto_align=auto_align,
+        infer_knobs=infer_knobs,
+        template_rotation=template_rotation,
+        matcher_config=matcher_config,
+    )
+
+
+def find_piece_in_template_bgr(
+    piece_bgr: np.ndarray,
+    template_image_path: str,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    auto_align: bool = False,
+    infer_knobs: Optional[bool] = None,
+    template_rotation: Optional[int] = None,
+    matcher_config: Optional[MatcherConfig] = None,
+) -> MatchPayload:
+    """Like find_piece_in_template, but accepts a BGR numpy array for the piece.
+
+    This avoids repeated disk I/O when solving multi-piece images.
+    """
+
+    if piece_bgr is None:
+        raise ValueError("piece_bgr must be a numpy array")
+    if piece_bgr.ndim == 2:
+        piece = cv2.cvtColor(piece_bgr, cv2.COLOR_GRAY2BGR)
+    elif piece_bgr.ndim == 3 and piece_bgr.shape[2] == 4:
+        piece = cv2.cvtColor(piece_bgr, cv2.COLOR_BGRA2BGR)
+    else:
+        piece = piece_bgr
+
     config = matcher_config or build_matcher_config()
     profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
     profile = profile_value not in ("", "0", "false", "no")
@@ -2665,7 +2702,6 @@ def find_piece_in_template(
     if profile:
         marks.append(("template", time.perf_counter()))
 
-    piece = _load_image(piece_image_path)
     piece = _pad_piece_image(piece)
     if profile:
         marks.append(("piece", time.perf_counter()))
