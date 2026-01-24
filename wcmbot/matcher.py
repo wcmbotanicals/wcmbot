@@ -7,6 +7,7 @@ needing to reproduce image-processing logic.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1729,6 +1730,243 @@ def _match_scale_rotation_combo(
     )
 
 
+def _match_rotation_scale_sweep(
+    rot: int,
+    scales: List[float],
+    piece_bin_pattern: np.ndarray,
+    piece_mask: np.ndarray,
+    template_blur_f32: np.ndarray,
+    template_coarse_f32: Optional[np.ndarray],
+    cuda_ctx: Optional[_CudaMatchContext],
+    config: MatcherConfig,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    blur_ksz: Optional[Tuple[int, int]],
+    corr_method: int,
+    cols: int,
+    rows: int,
+) -> List[Dict]:
+    """Match all scales for a single rotation.
+
+    This is used by the CPU-parallel path to avoid re-rotating the piece/mask
+    for every (scale, rotation) combination.
+    """
+
+    P = (
+        (piece_bin_pattern * 255).astype(np.uint8)
+        if piece_bin_pattern.max() <= 1
+        else piece_bin_pattern.astype(np.uint8)
+    )
+    if piece_mask.max() <= 1:
+        M = (piece_mask > 0).astype(np.uint8) * 255
+    else:
+        M = (piece_mask > 127).astype(np.uint8) * 255
+
+    th, tw = template_blur_f32.shape[:2]
+    cell_w = tw / cols
+    cell_h = th / rows
+
+    dilate_ker = MATCH_DILATE_KERNEL
+    top_match_count = config.top_match_count
+    top_match_scan_multiplier = config.top_match_scan_multiplier
+    grid_center_weight = config.grid_center_weight
+    coarse_factor = config.coarse_factor
+    coarse_top_k = config.coarse_top_k
+    coarse_padding_pixels = config.coarse_padding_pixels
+
+    P_r = _rotate_img(P, rot)
+    M_r = _rotate_img(M, rot)
+    M_r_raw01 = (M_r > 127).astype(np.uint8)
+    rot_knobs_x, rot_knobs_y = _rotate_knob_counts(knobs_x, knobs_y, rot)
+    core_center = _core_center_from_mask(M_r_raw01, rot_knobs_x, rot_knobs_y)
+    M_r = (M_r_raw01 > 0).astype(np.uint8) * 255
+    M_r = cv2.morphologyEx(M_r, cv2.MORPH_DILATE, dilate_ker, iterations=1)
+    M_r01 = (M_r > 127).astype(np.float32)
+
+    def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
+        if flat.size <= max_len:
+            return np.argsort(flat)[::-1]
+        scan_count = min(flat.size, max(max_len * top_match_scan_multiplier, max_len))
+        order = np.argpartition(flat, -scan_count)[-scan_count:]
+        return order[np.argsort(flat[order])[::-1]]
+
+    def _scan_candidates(
+        res: np.ndarray,
+        order: np.ndarray,
+        res_w: int,
+        ws: int,
+        hs: int,
+        offset_x: int,
+        offset_y: int,
+        core_offset_x: float,
+        core_offset_y: float,
+        scale: float,
+    ) -> List[Dict]:
+        combo_best_local: List[Dict] = []
+        for idx in order:
+            if len(combo_best_local) >= top_match_count:
+                break
+            y, x = divmod(int(idx), res_w)
+            x0 = x + offset_x
+            y0 = y + offset_y
+            cx = x0 + core_offset_x
+            cy = y0 + core_offset_y
+            base_score = float(res[y, x])
+            proximity = _grid_center_proximity(cx, cy, cell_w, cell_h, cols, rows)
+            score = base_score + (grid_center_weight * proximity)
+            tl = (int(x0), int(y0))
+            br = (int(x0 + ws), int(y0 + hs))
+            candidate = {
+                "score": score,
+                "score_raw": base_score,
+                "grid_score": proximity,
+                "rot": rot,
+                "scale": scale,
+                "col": int(cx / cell_w) + 1,
+                "row": int(cy / cell_h) + 1,
+                "tl": tl,
+                "br": br,
+                "center": (float(cx), float(cy)),
+            }
+            if any(
+                _candidate_is_close(candidate, existing)
+                for existing in combo_best_local
+            ):
+                continue
+            combo_best_local.append(candidate)
+        return combo_best_local
+
+    use_coarse = template_coarse_f32 is not None and 0.0 < coarse_factor < 1.0
+
+    all_candidates: List[Dict] = []
+    for scale in scales:
+        ws = int(round(P_r.shape[1] * scale))
+        hs = int(round(P_r.shape[0] * scale))
+        if ws <= 0 or hs <= 0 or ws >= tw or hs >= th:
+            continue
+
+        scale_x = ws / float(P_r.shape[1])
+        scale_y = hs / float(P_r.shape[0])
+        core_offset_x = core_center[0] * scale_x
+        core_offset_y = core_center[1] * scale_y
+
+        patt_s = _resize_for_match(P_r, ws, hs, rethreshold=config.resize_rethreshold)
+        mask_s = _resize_for_match(M_r01, ws, hs)
+
+        if blur_ksz is not None:
+            patt_s_blur = cv2.GaussianBlur(patt_s, blur_ksz, 0).astype(np.float32)
+        else:
+            patt_s_blur = patt_s.astype(np.float32)
+
+        patt_masked = patt_s_blur * mask_s
+
+        candidates_for_scale: List[Dict] = []
+        if use_coarse:
+            th_c, tw_c = template_coarse_f32.shape[:2]
+            ws_c = max(1, int(round(ws * coarse_factor)))
+            hs_c = max(1, int(round(hs * coarse_factor)))
+
+            if 1 < ws_c < tw_c and 1 < hs_c < th_c:
+                patt_c = _adaptive_coarse_resize(
+                    patt_s_blur, coarse_factor, config.preserve_edges_coarse
+                )
+                if patt_c.shape[:2] != (hs_c, ws_c):
+                    patt_c = cv2.resize(
+                        patt_c, (ws_c, hs_c), interpolation=cv2.INTER_AREA
+                    )
+                mask_c = cv2.resize(
+                    mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST
+                )
+                patt_masked_c = patt_c * mask_c
+                res_c = _match_template(
+                    template_coarse_f32,
+                    patt_masked_c,
+                    corr_method,
+                    cuda_ctx,
+                    template_kind="coarse",
+                )
+
+                if res_c.size > 0:
+                    flat_c = res_c.ravel()
+                    order_c = _candidate_order(flat_c, coarse_top_k)
+                    res_w_c = res_c.shape[1]
+
+                    for idx in order_c[:coarse_top_k]:
+                        y_c, x_c = divmod(int(idx), res_w_c)
+                        x_full = int(round(x_c / coarse_factor))
+                        y_full = int(round(y_c / coarse_factor))
+                        x_full = max(0, min(x_full, tw - ws))
+                        y_full = max(0, min(y_full, th - hs))
+
+                        x0 = max(0, x_full - coarse_padding_pixels)
+                        y0 = max(0, y_full - coarse_padding_pixels)
+                        x1 = min(tw, x_full + ws + coarse_padding_pixels)
+                        y1 = min(th, y_full + hs + coarse_padding_pixels)
+
+                        roi = template_blur_f32[y0:y1, x0:x1]
+                        if roi.shape[0] < hs or roi.shape[1] < ws:
+                            continue
+
+                        res_fine = _match_template(
+                            roi,
+                            patt_masked,
+                            corr_method,
+                            cuda_ctx,
+                            template_kind="roi",
+                            allow_cuda=False,
+                        )
+                        if res_fine.size == 0:
+                            continue
+
+                        flat_fine = res_fine.ravel()
+                        order_fine = _candidate_order(flat_fine, top_match_count)
+                        res_w_fine = res_fine.shape[1]
+
+                        candidates_for_scale.extend(
+                            _scan_candidates(
+                                res_fine,
+                                order_fine,
+                                res_w_fine,
+                                ws,
+                                hs,
+                                x0,
+                                y0,
+                                core_offset_x,
+                                core_offset_y,
+                                scale,
+                            )
+                        )
+
+        if not candidates_for_scale:
+            res = _match_template(
+                template_blur_f32,
+                patt_masked,
+                corr_method,
+                cuda_ctx,
+                template_kind="full",
+            )
+            if res.size:
+                flat = res.ravel()
+                order = _candidate_order(flat, top_match_count)
+                res_w = res.shape[1]
+                candidates_for_scale = _scan_candidates(
+                    res,
+                    order,
+                    res_w,
+                    ws,
+                    hs,
+                    0,
+                    0,
+                    core_offset_x,
+                    core_offset_y,
+                    scale,
+                )
+
+        all_candidates.extend(candidates_for_scale)
+
+    return all_candidates
+
+
 def _match_template_multiscale_binary(
     template_bin_img: np.ndarray,
     piece_bin_pattern: np.ndarray,
@@ -1808,20 +2046,35 @@ def _match_template_multiscale_binary(
     )
 
     if use_parallel:
-        # Parallel path: use ThreadPoolExecutor for scale/rotation combinations
+        # Parallel path: use ThreadPoolExecutor across rotations, sweeping scales
+        # within each worker. This avoids re-rotating the piece/mask per scale.
 
         all_candidates = []
-        # Determine an appropriate number of worker threads based on CPU count
-        total_tasks = len(scales) * len(rotations)
         cpu_count = os.cpu_count() or 1
+        # Use more than one task per rotation when we have spare cores.
+        # This keeps the rotation reuse benefit while still saturating the CPU.
+        desired_tasks = min(cpu_count, len(rotations) * len(scales))
+        tasks_per_rotation = max(
+            1,
+            min(
+                len(scales),
+                int(math.ceil(desired_tasks / max(1, len(rotations)))),
+            ),
+        )
+        chunk_size = max(1, int(math.ceil(len(scales) / tasks_per_rotation)))
+        scale_chunks = [
+            scales[i : i + chunk_size] for i in range(0, len(scales), chunk_size)
+        ]
+
+        total_tasks = len(rotations) * len(scale_chunks)
         max_workers = min(total_tasks, cpu_count)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
-                    _match_scale_rotation_combo,
-                    scale,
+                    _match_rotation_scale_sweep,
                     rot,
+                    scale_chunk,
                     piece_bin_pattern,
                     piece_mask,
                     T_blur_f32,
@@ -1835,8 +2088,8 @@ def _match_template_multiscale_binary(
                     cols,
                     rows,
                 )
-                for scale in scales
                 for rot in rotations
+                for scale_chunk in scale_chunks
             ]
 
             for future in as_completed(futures):
