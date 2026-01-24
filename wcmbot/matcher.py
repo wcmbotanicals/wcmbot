@@ -30,6 +30,9 @@ TOP_MATCH_COUNT = 5
 TOP_MATCH_SCAN_MULTIPLIER = 50
 TOP_MATCH_SCAN_MULT = TOP_MATCH_SCAN_MULTIPLIER  # Backward-compatible alias; prefer TOP_MATCH_SCAN_MULTIPLIER
 PROFILE_ENV = "WCMBOT_PROFILE"
+USE_TORCH_ENV = "WCMBOT_USE_TORCH"
+TORCH_DEVICE_ENV = "WCMBOT_TORCH_DEVICE"
+TORCH_JIT_ENV = "WCMBOT_TORCH_JIT"
 COARSE_FACTOR = 0.4
 COARSE_TOP_K = 3
 COARSE_PADDING_PIXELS = 24
@@ -404,6 +407,71 @@ def _cuda_available() -> bool:
         return False
 
 
+def _torch_available() -> bool:
+    try:
+        import torch  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _default_torch_device() -> str:
+    import torch
+
+    if (
+        getattr(torch.backends, "mps", None) is not None
+        and torch.backends.mps.is_available()
+    ):
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def _match_template_torch_ccorr_normed(
+    template_f32: np.ndarray,
+    patch_f32: np.ndarray,
+    device: Optional[str] = None,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """Torch implementation of cv2.TM_CCORR_NORMED for float32 arrays."""
+    import torch
+    import torch.nn.functional as F
+
+    if template_f32.size == 0 or patch_f32.size == 0:
+        return np.empty((0, 0), dtype=np.float32)
+
+    th, tw = int(template_f32.shape[0]), int(template_f32.shape[1])
+    ph, pw = int(patch_f32.shape[0]), int(patch_f32.shape[1])
+    if ph > th or pw > tw:
+        return np.empty((0, 0), dtype=np.float32)
+
+    dev = device or _default_torch_device()
+    t = torch.from_numpy(np.ascontiguousarray(template_f32)).to(torch.float32)[
+        None, None
+    ]
+    p = torch.from_numpy(np.ascontiguousarray(patch_f32)).to(torch.float32)[None, None]
+    t = t.to(dev)
+    p = p.to(dev)
+
+    ones = torch.ones((1, 1, ph, pw), device=dev, dtype=torch.float32)
+    with torch.no_grad():
+        num = F.conv2d(t, p)
+        sum_t2 = torch.sum(p * p)
+        sum_i2 = F.conv2d(t * t, ones)
+        den = torch.sqrt(sum_i2 * sum_t2).clamp_min(eps)
+        out = (num / den).to(dtype=torch.float32)
+        return (
+            out.squeeze(0)
+            .squeeze(0)
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=False)
+        )
+
+
 class _CudaMatchContext:
     """Thin wrapper that uploads templates once and reuses CUDA matchers."""
 
@@ -465,6 +533,28 @@ def _match_template(
     allow_cuda: bool = True,
 ) -> np.ndarray:
     """Match template with optional CUDA acceleration and graceful fallback."""
+
+    use_torch = os.getenv(USE_TORCH_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if use_torch and corr_method == cv2.TM_CCORR_NORMED and _torch_available():
+        torch_device = (
+            (os.getenv(TORCH_DEVICE_ENV, "").strip() or _default_torch_device())
+            .strip()
+            .lower()
+        )
+        if torch_device != "cpu":
+            try:
+                return _match_template_torch_ccorr_normed(
+                    template_img,
+                    patch,
+                    device=torch_device,
+                )
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning("Torch match failed (%s): %s", template_kind, exc)
 
     if allow_cuda and cuda_ctx is not None and cuda_ctx.enabled:
         try:
@@ -1890,7 +1980,7 @@ def _match_rotation_scale_sweep(
                     flat_c = res_c.ravel()
                     order_c = _candidate_order(flat_c, coarse_top_k)
                     res_w_c = res_c.shape[1]
-
+                    seen_rois = set()
                     for idx in order_c[:coarse_top_k]:
                         y_c, x_c = divmod(int(idx), res_w_c)
                         x_full = int(round(x_c / coarse_factor))
@@ -1902,6 +1992,10 @@ def _match_rotation_scale_sweep(
                         y0 = max(0, y_full - coarse_padding_pixels)
                         x1 = min(tw, x_full + ws + coarse_padding_pixels)
                         y1 = min(th, y_full + hs + coarse_padding_pixels)
+                        roi_key = (x0, y0, x1, y1)
+                        if roi_key in seen_rois:
+                            continue
+                        seen_rois.add(roi_key)
 
                         roi = template_blur_f32[y0:y1, x0:x1]
                         if roi.shape[0] < hs or roi.shape[1] < ws:

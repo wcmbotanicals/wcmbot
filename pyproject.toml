@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 license = "MIT"
 dynamic = ["version"]
 
-dependencies = ["Pillow", "opencv-python", "numpy", "gradio", "plotly"]
+dependencies = ["Pillow", "opencv-python", "numpy", "gradio", "plotly", "torch"]
 
 [project.urls]
 repository = "https://github.com/wcmbotanicals/wcmbot"
