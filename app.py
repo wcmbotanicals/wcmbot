@@ -17,8 +17,8 @@ from PIL import Image
 
 from wcmbot import __version__
 from wcmbot.matcher import (
-    format_match_summary,
     MatchPayload,
+    format_match_summary,
     preload_template_cache,
     render_primary_views,
 )

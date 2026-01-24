@@ -1,14 +1,15 @@
 """Unit tests for app.py helper functions"""
 
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
 import numpy as np
 import pytest
-from unittest.mock import patch
-from pathlib import Path
-import tempfile
 from PIL import Image
 
 # Import the functions we need to test
-from app import _stack_images_vertical, _annotate_pair_image
+from app import _annotate_pair_image, _stack_images_vertical
 
 
 def test_build_multipiece_views_accepts_matchpayload_last_result(monkeypatch):
@@ -260,8 +261,9 @@ class TestOnPieceChange:
         """Sample outputs that match the expected structure"""
         # Start from _no_update_outputs to get the correct overall shape,
         # then override location, summary, state, and idx for testing.
-        from app import VIEW_KEYS, MAX_DYNAMIC_BUTTONS
         import gradio as gr
+
+        from app import MAX_DYNAMIC_BUTTONS, VIEW_KEYS
 
         num_views = len(VIEW_KEYS)
         num_spacers = MAX_DYNAMIC_BUTTONS + 1
