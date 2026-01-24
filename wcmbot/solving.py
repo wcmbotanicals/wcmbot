@@ -15,8 +15,8 @@ from typing import Iterator, Optional
 import numpy as np
 
 from wcmbot.matcher import (
-    MatchPayload,
     MatcherConfig,
+    MatchPayload,
     build_matcher_config,
     find_piece_in_template_bgr,
 )

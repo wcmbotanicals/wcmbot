@@ -18,6 +18,7 @@ from PIL import Image
 from wcmbot import __version__
 from wcmbot.matcher import (
     format_match_summary,
+    MatchPayload,
     preload_template_cache,
     render_primary_views,
 )
@@ -325,15 +326,31 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
     latest_pair = None
     latest_piece = None
     if last_result is not None:
-        outputs = list(last_result)
-        zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
-        latest_zoom = outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
-        zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
-        latest_pair = outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
-        zoom_piece_idx = VIEW_KEYS.index("zoom_piece")
-        latest_piece = (
-            outputs[zoom_piece_idx] if zoom_piece_idx < len(outputs) else None
-        )
+        if isinstance(last_result, MatchPayload):
+            try:
+                rendered = render_primary_views(last_result, 0)
+            except Exception:
+                rendered = {}
+            latest_zoom = rendered.get("zoom_focus")
+            latest_pair = rendered.get("zoom_pair")
+            latest_piece = rendered.get("zoom_piece")
+        else:
+            try:
+                outputs = list(last_result)
+            except TypeError:
+                outputs = []
+            zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
+            latest_zoom = (
+                outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
+            )
+            zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
+            latest_pair = (
+                outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
+            )
+            zoom_piece_idx = VIEW_KEYS.index("zoom_piece")
+            latest_piece = (
+                outputs[zoom_piece_idx] if zoom_piece_idx < len(outputs) else None
+            )
 
     template_view = None
     if template_rgb is not None:

@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from wcmbot.multipiece import find_multipiece_region_dicts
 from wcmbot.matcher import (
     COLS,
     ROWS,
@@ -23,6 +22,7 @@ from wcmbot.matcher import (
     build_matcher_config,
     find_piece_in_template,
 )
+from wcmbot.multipiece import find_multipiece_region_dicts
 from wcmbot.template_settings import load_template_registry
 
 HERE = os.path.dirname(__file__)

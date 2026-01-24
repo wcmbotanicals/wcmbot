@@ -11,6 +11,72 @@ from PIL import Image
 from app import _stack_images_vertical, _annotate_pair_image
 
 
+def test_build_multipiece_views_accepts_matchpayload_last_result(monkeypatch):
+    import app
+    from wcmbot.matcher import MatchPayload
+
+    template_rgb = np.zeros((20, 20, 3), dtype=np.uint8)
+    template_bin = np.zeros((20, 20), dtype=bool)
+    piece_rgb = np.zeros((10, 10, 3), dtype=np.uint8)
+    piece_mask = np.ones((10, 10), dtype=bool)
+    piece_bin = np.ones((10, 10), dtype=bool)
+    payload = MatchPayload(
+        template_rgb=template_rgb,
+        template_bin=template_bin,
+        piece_rgb=piece_rgb,
+        piece_mask=piece_mask,
+        piece_bin=piece_bin,
+        matches=[
+            {
+                "tl": (5, 5),
+                "br": (15, 15),
+                "center": (10, 10),
+                "rot": 0,
+                "scale": 1.0,
+                "score": 0.9,
+                "row": 0,
+                "col": 0,
+                "contours": [],
+            }
+        ],
+        template_shape=(20, 20),
+    )
+
+    dummy_zoom_focus = np.ones((3, 3, 3), dtype=np.uint8) * 11
+    dummy_zoom_pair = np.ones((4, 4, 3), dtype=np.uint8) * 22
+    dummy_zoom_piece = np.ones((5, 5, 3), dtype=np.uint8) * 33
+
+    calls = {"count": 0}
+
+    def fake_render_primary_views(arg_payload, match_index):
+        calls["count"] += 1
+        assert arg_payload is payload
+        assert match_index == 0
+        return {
+            "zoom_focus": dummy_zoom_focus,
+            "zoom_pair": dummy_zoom_pair,
+            "zoom_piece": dummy_zoom_piece,
+        }
+
+    monkeypatch.setattr(app, "render_primary_views", fake_render_primary_views)
+    monkeypatch.setattr(app, "make_zoomable_plot", lambda img: img)
+    monkeypatch.setattr(app, "TEMPLATE_IMAGES", {"dummy": template_rgb})
+
+    batch_state = {
+        "piece_states": [],
+        "grid_overview": np.zeros((8, 8, 3), dtype=np.uint8),
+        "template_rgb": template_rgb,
+        "template_id": "dummy",
+        "rotation": 0,
+    }
+
+    views = app._build_multipiece_views_from_state(batch_state, last_result=payload)
+    assert calls["count"] == 1
+    assert np.array_equal(views["zoom_focus"], dummy_zoom_focus)
+    assert np.array_equal(views["zoom_pair"], dummy_zoom_pair)
+    assert np.array_equal(views["zoom_piece"], dummy_zoom_piece)
+
+
 class TestStackImagesVertical:
     """Tests for _stack_images_vertical helper function"""
 
