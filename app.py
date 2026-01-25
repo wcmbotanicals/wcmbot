@@ -30,11 +30,11 @@ from wcmbot.solving import (
 )
 from wcmbot.template_settings import load_template_registry
 from wcmbot.viz import (
-    annotate_pair_image as _annotate_pair_image,
+    annotate_pair_image,
     build_multipiece_overview,
-    overlay_piece_on_template as _overlay_piece_on_template,
-    rotate_template_preview as _rotate_template_preview,
-    stack_images_vertical as _stack_images_vertical,
+    overlay_piece_on_template,
+    rotate_template_preview,
+    stack_images_vertical,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -267,7 +267,7 @@ def _build_button_visibility(batch_state):
 
 def _blank_outputs(message: str, template_id: str, template_rotation: int):
     blank_views = {key: None for key in VIEW_KEYS}
-    rotated_template = _rotate_template_preview(
+    rotated_template = rotate_template_preview(
         TEMPLATE_IMAGES.get(template_id), template_rotation
     )
     blank_views["template_color"] = rotated_template
@@ -384,7 +384,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
             piece_bin = getattr(payload, "piece_bin", None)
             if piece_rgb is not None and piece_bin is not None:
                 piece_bgr = cv2.cvtColor(piece_rgb, cv2.COLOR_RGB2BGR)
-                _overlay_piece_on_template(template_marked, piece_bgr, piece_bin, match)
+                overlay_piece_on_template(template_marked, piece_bgr, piece_bin, match)
 
             contours = match.get("contours", [])
             if contours:
@@ -465,13 +465,13 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
         except Exception:
             pair_view = None
         if isinstance(pair_view, np.ndarray):
-            labeled = _annotate_pair_image(pair_view, f"Piece {pidx + 1}")
+            labeled = annotate_pair_image(pair_view, f"Piece {pidx + 1}")
             multipiece_pairs.append(labeled)
             piece_indices_with_pairs.append(pidx)
 
     piece_heights = []
     if multipiece_pairs:
-        stacked, piece_heights = _stack_images_vertical(multipiece_pairs)
+        stacked, piece_heights = stack_images_vertical(multipiece_pairs)
         views["zoom_pair"] = stacked
         # Store heights in batch_state for button alignment
         if batch_state is not None:
@@ -480,7 +480,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
     views["zoom_template"] = (
         template_view if template_view is not None else make_zoomable_plot(None)
     )
-    rotated_template = _rotate_template_preview(
+    rotated_template = rotate_template_preview(
         TEMPLATE_IMAGES.get(template_id), rotation
     )
     views["template_color"] = rotated_template
@@ -919,7 +919,7 @@ TEMPLATE_IMAGES = {
     )
     for spec in TEMPLATE_REGISTRY.templates.values()
 }
-DEFAULT_TEMPLATE_PREVIEW = _rotate_template_preview(
+DEFAULT_TEMPLATE_PREVIEW = rotate_template_preview(
     TEMPLATE_IMAGES.get(DEFAULT_TEMPLATE_ID), DEFAULT_TEMPLATE_SPEC.default_rotation
 )
 DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
