@@ -1,12 +1,9 @@
+import cv2
 import numpy as np
 import pytest
 
-import cv2
-
 
 def test_torch_ccorr_normed_matches_opencv_cpu() -> None:
-    pytest.importorskip("torch")
-
     from wcmbot.matcher import _match_template_torch_ccorr_normed
 
     rng = np.random.default_rng(0)
@@ -21,8 +18,6 @@ def test_torch_ccorr_normed_matches_opencv_cpu() -> None:
 
 
 def test_torch_ccorr_normed_empty_when_patch_larger() -> None:
-    pytest.importorskip("torch")
-
     from wcmbot.matcher import _match_template_torch_ccorr_normed
 
     template = np.zeros((8, 8), dtype=np.float32)
