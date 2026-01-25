@@ -124,7 +124,6 @@ class MatcherConfig:
     template_cluster_percentile: float = 98.0
     template_cluster_scale: float = 1.15
     render_full_res: bool = True
-    use_cuda: bool = False
     use_torch: bool = False
     torch_device: Optional[str] = None
 
@@ -175,7 +174,6 @@ def build_matcher_config(
         "coarse_min_side": COARSE_MIN_SIDE,
         "preserve_edges_coarse": False,
         "parallel_matching": parallel_matching,
-        "use_cuda": False,
         "use_torch": use_torch_env,
         "torch_device": torch_device_env,
         "grid_center_weight": GRID_CENTER_WEIGHT,
@@ -422,16 +420,6 @@ def _adaptive_coarse_resize(
     return cv2.resize(
         sharpened, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA
     )
-
-
-def _cuda_available() -> bool:
-    try:
-        return (
-            bool(getattr(cv2, "cuda", None))
-            and cv2.cuda.getCudaEnabledDeviceCount() > 0
-        )
-    except Exception:
-        return False
 
 
 def _torch_available() -> bool:
@@ -928,69 +916,15 @@ class _TorchMatchContext:
         )
 
 
-class _CudaMatchContext:
-    """Thin wrapper that uploads templates once and reuses CUDA matchers."""
-
-    def __init__(
-        self,
-        template_full: np.ndarray,
-        template_coarse: Optional[np.ndarray],
-        corr_method: int,
-    ) -> None:
-        self.enabled = True
-        self.corr_method = corr_method
-        self.template_gpu = cv2.cuda_GpuMat()
-        self.template_gpu.upload(
-            np.ascontiguousarray(template_full.astype(np.float32, copy=False))
-        )
-        self.tm_full = cv2.cuda.createTemplateMatching(cv2.CV_32F, corr_method)
-
-        self.tm_coarse = None
-        self.template_coarse_gpu = None
-        if template_coarse is not None:
-            self.template_coarse_gpu = cv2.cuda_GpuMat()
-            self.template_coarse_gpu.upload(
-                np.ascontiguousarray(template_coarse.astype(np.float32, copy=False))
-            )
-            self.tm_coarse = cv2.cuda.createTemplateMatching(cv2.CV_32F, corr_method)
-
-    @property
-    def has_coarse(self) -> bool:
-        return self.template_coarse_gpu is not None and self.tm_coarse is not None
-
-    def disable(self) -> None:
-        self.enabled = False
-
-    def _run_match(
-        self, template_gpu: "cv2.cuda_GpuMat", patch: np.ndarray, matcher
-    ) -> np.ndarray:
-        if not self.enabled:
-            raise RuntimeError("CUDA matcher disabled")
-        patch_gpu = cv2.cuda_GpuMat()
-        patch_gpu.upload(np.ascontiguousarray(patch.astype(np.float32, copy=False)))
-        res_gpu = matcher.match(template_gpu, patch_gpu)
-        return res_gpu.download()
-
-    def match_full(self, patch: np.ndarray) -> np.ndarray:
-        return self._run_match(self.template_gpu, patch, self.tm_full)
-
-    def match_coarse(self, patch: np.ndarray) -> np.ndarray:
-        if not self.has_coarse:
-            raise RuntimeError("CUDA coarse matcher not initialized")
-        return self._run_match(self.template_coarse_gpu, patch, self.tm_coarse)
-
-
 def _match_template(
     template_img: np.ndarray,
     patch: np.ndarray,
     corr_method: int,
-    cuda_ctx: Optional[_CudaMatchContext],
     config: MatcherConfig,
     torch_ctx: Optional[_TorchMatchContext],
     template_kind: str,
-    allow_cuda: bool = True,
 ) -> np.ndarray:
-    """Match template with optional CUDA acceleration and graceful fallback."""
+    """Match template with optional Torch acceleration and graceful fallback."""
 
     if (
         config.use_torch
@@ -1014,16 +948,6 @@ def _match_template(
                 )
             except Exception as exc:  # pragma: no cover - defensive fallback
                 logger.warning("Torch match failed (%s): %s", template_kind, exc)
-
-    if allow_cuda and cuda_ctx is not None and cuda_ctx.enabled:
-        try:
-            if template_kind == "full":
-                return cuda_ctx.match_full(patch)
-            if template_kind == "coarse" and cuda_ctx.has_coarse:
-                return cuda_ctx.match_coarse(patch)
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("CUDA match failed (%s): %s", template_kind, exc)
-            cuda_ctx.disable()
 
     return cv2.matchTemplate(template_img, patch, corr_method)
 
@@ -2270,7 +2194,6 @@ def _match_scale_rotation_combo(
     piece_mask: np.ndarray,
     template_blur_f32: np.ndarray,
     template_coarse_f32: Optional[np.ndarray],
-    cuda_ctx: Optional[_CudaMatchContext],
     torch_ctx: Optional[_TorchMatchContext],
     config: MatcherConfig,
     knobs_x: Optional[int],
@@ -2361,7 +2284,6 @@ def _match_scale_rotation_combo(
                 template_coarse_f32,
                 patt_masked_c,
                 corr_method,
-                cuda_ctx,
                 config,
                 torch_ctx,
                 template_kind="coarse",
@@ -2400,11 +2322,9 @@ def _match_scale_rotation_combo(
                         roi,
                         patt_masked,
                         corr_method,
-                        cuda_ctx,
                         config,
                         torch_ctx,
                         template_kind="roi",
-                        allow_cuda=False,
                     )
                     if res_fine.size == 0:
                         continue
@@ -2446,7 +2366,6 @@ def _match_scale_rotation_combo(
         template_blur_f32,
         patt_masked,
         corr_method,
-        cuda_ctx,
         config,
         torch_ctx,
         template_kind="full",
@@ -2486,7 +2405,6 @@ def _match_rotation_scale_sweep(
     piece_mask: np.ndarray,
     template_blur_f32: np.ndarray,
     template_coarse_f32: Optional[np.ndarray],
-    cuda_ctx: Optional[_CudaMatchContext],
     torch_ctx: Optional[_TorchMatchContext],
     config: MatcherConfig,
     knobs_x: Optional[int],
@@ -2665,7 +2583,6 @@ def _match_rotation_scale_sweep(
                         template_coarse_f32,
                         j["patt_masked_c"],
                         corr_method,
-                        cuda_ctx,
                         config,
                         torch_ctx,
                         template_kind="coarse",
@@ -2719,11 +2636,9 @@ def _match_rotation_scale_sweep(
                         roi,
                         patt_masked,
                         corr_method,
-                        cuda_ctx,
                         config,
                         torch_ctx,
                         template_kind="roi",
-                        allow_cuda=False,
                     )
                     if res_fine.size == 0:
                         continue
@@ -2841,7 +2756,6 @@ def _match_rotation_scale_sweep(
             template_blur_f32,
             j["patt_masked"],
             corr_method,
-            cuda_ctx,
             config,
             torch_ctx,
             template_kind="full",
@@ -2948,28 +2862,11 @@ def _match_template_multiscale_binary(
             logger.warning("Torch init failed; using OpenCV: %s", exc)
             torch_ctx = None
 
-    cuda_ctx: Optional[_CudaMatchContext] = None
-    if config.use_cuda and not config.use_torch:
-        if _cuda_available():
-            try:
-                cuda_ctx = _CudaMatchContext(
-                    T_blur_f32, T_coarse_blur if use_coarse else None, corr_method
-                )
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                logger.warning("CUDA init failed; using CPU: %s", exc)
-                cuda_ctx = None
-        else:
-            logger.info("CUDA requested but not available; using CPU")
-
     # Check if we should use parallel execution
     # Threshold of 8 configs balances parallelization benefits vs. thread creation overhead.
     # Below 8, the overhead of thread management exceeds the performance gains.
     num_configs = len(scales) * len(rotations)
-    use_parallel = (
-        config.parallel_matching
-        and num_configs >= 8
-        and not (config.use_cuda and cuda_ctx is not None)
-    )
+    use_parallel = config.parallel_matching and num_configs >= 8
 
     # Torch fast-path: batch across *all* rotations+scales by patch size.
     # This reduces the number of conv2d launches compared to per-rotation sweeps.
@@ -3149,11 +3046,9 @@ def _match_template_multiscale_binary(
                             roi,
                             patt_masked,
                             corr_method,
-                            cuda_ctx,
                             config,
                             torch_ctx,
                             template_kind="roi",
-                            allow_cuda=False,
                         )
                         if res_fine.size == 0:
                             continue
@@ -3246,7 +3141,6 @@ def _match_template_multiscale_binary(
                         T_blur_f32,
                         j["patt_masked"],
                         corr_method,
-                        cuda_ctx,
                         config,
                         torch_ctx,
                         template_kind="full",
@@ -3350,7 +3244,6 @@ def _match_template_multiscale_binary(
                     piece_mask,
                     T_blur_f32,
                     T_coarse_blur,
-                    cuda_ctx,
                     torch_ctx,
                     config,
                     knobs_x,
@@ -3538,7 +3431,6 @@ def _match_template_multiscale_binary(
                                 T_coarse_blur,
                                 patt_masked_c,
                                 corr_method,
-                                cuda_ctx,
                                 config,
                                 torch_ctx,
                                 template_kind="coarse",
@@ -3583,11 +3475,9 @@ def _match_template_multiscale_binary(
                                     roi,
                                     patt_masked,
                                     corr_method,
-                                    cuda_ctx,
                                     config,
                                     torch_ctx,
                                     template_kind="roi",
-                                    allow_cuda=False,
                                 )
                                 if res.size == 0:
                                     continue
@@ -3786,7 +3676,6 @@ def _match_template_multiscale_binary(
                         T_blur_f32,
                         patt_masked,
                         corr_method,
-                        cuda_ctx,
                         config,
                         torch_ctx,
                         template_kind="full",

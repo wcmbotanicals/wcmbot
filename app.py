@@ -1446,8 +1446,15 @@ if __name__ == "__main__":
     argparse_parser.add_argument(
         "--accessible", action="store_true", help="Make accessible over local network"
     )
+    argparse_parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Enable Torch acceleration (uses MPS/CUDA if available)",
+    )
     args = argparse_parser.parse_args()
     kwargs = {}
+    if args.gpu:
+        os.environ["WCMBOT_USE_TORCH"] = "1"
     if args.accessible:
         kwargs["server_name"] = "0.0.0.0"
     demo.launch(theme=app_theme, **kwargs)
