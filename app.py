@@ -86,6 +86,23 @@ MULTIPIECE_DEFAULT = True
 MAX_DYNAMIC_BUTTONS = 50
 
 
+def _assert_torch_accel_available() -> str:
+    """Return the best torch accelerator device or raise if none exist."""
+    try:
+        import torch
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        raise RuntimeError("--gpu requested but PyTorch is not available.") from exc
+
+    if (
+        getattr(torch.backends, "mps", None) is not None
+        and torch.backends.mps.is_available()
+    ):
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    raise RuntimeError(
+        "--gpu requested but no PyTorch MPS/CUDA device is available; CPU is not supported."
+    )
 def make_zoomable_plot(image: Optional[np.ndarray]):
     """Create a Plotly figure with zoom/pan for a numpy RGB image."""
     if image is None:
@@ -1454,7 +1471,9 @@ if __name__ == "__main__":
     args = argparse_parser.parse_args()
     kwargs = {}
     if args.gpu:
+        device = _assert_torch_accel_available()
         os.environ["WCMBOT_USE_TORCH"] = "1"
+        os.environ["WCMBOT_TORCH_DEVICE"] = device
     if args.accessible:
         kwargs["server_name"] = "0.0.0.0"
     demo.launch(theme=app_theme, **kwargs)
