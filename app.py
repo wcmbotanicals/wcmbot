@@ -103,6 +103,8 @@ def _assert_torch_accel_available() -> str:
     raise RuntimeError(
         "--gpu requested but no PyTorch MPS/CUDA device is available; the --gpu flag requires a GPU/MPS accelerator."
     )
+
+
 def make_zoomable_plot(image: Optional[np.ndarray]):
     """Create a Plotly figure with zoom/pan for a numpy RGB image."""
     if image is None:
