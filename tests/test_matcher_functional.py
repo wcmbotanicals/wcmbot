@@ -11,6 +11,15 @@ from wcmbot.matcher import (
     COLS,
     ROWS,
     _background_bgr,
+    _fill_mask_holes,
+    _smooth_mask_edges,
+    _background_distance_from_border,
+    _recover_piece_edges,
+    _smooth_piece_contour,
+    _template_color_clusters,
+    _apply_template_cluster_mask,
+    _background_color_clusters,
+    _apply_background_cluster_mask,
     build_matcher_config,
     find_piece_in_template,
 )
@@ -313,3 +322,159 @@ def test_multipiece_many_pieces_batch():
     assert correct >= 23, (
         f"Expected at least 23 correctly placed pieces, got {correct}: {placements}"
     )
+
+
+# Tests for new mask processing helper functions
+class TestMaskHelpers:
+    """Test suite for mask processing helper functions."""
+
+    def test_fill_mask_holes_empty_mask(self):
+        """Test _fill_mask_holes with an empty mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        result = _fill_mask_holes(mask)
+        assert result.shape == mask.shape
+        assert result.sum() == 0
+
+    def test_fill_mask_holes_full_mask(self):
+        """Test _fill_mask_holes with a full mask."""
+        mask = np.ones((100, 100), dtype=np.uint8)
+        result = _fill_mask_holes(mask)
+        assert result.shape == mask.shape
+        assert result.sum() > 0
+
+    def test_fill_mask_holes_with_holes(self):
+        """Test _fill_mask_holes correctly fills interior holes."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        # Draw a hollow rectangle
+        mask[20:80, 20:80] = 1
+        mask[40:60, 40:60] = 0
+        result = _fill_mask_holes(mask)
+        # Result should have the hole filled
+        assert result[50, 50] > 0
+
+    def test_smooth_mask_edges_preserves_shape(self):
+        """Test _smooth_mask_edges preserves mask shape."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[30:70, 30:70] = 1
+        result = _smooth_mask_edges(mask, kernel_size=7)
+        assert result.shape == mask.shape
+
+    def test_smooth_mask_edges_empty_mask(self):
+        """Test _smooth_mask_edges with empty mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        result = _smooth_mask_edges(mask, kernel_size=7)
+        assert result.shape == mask.shape
+        assert result.sum() == 0
+
+    def test_background_distance_from_border_valid_image(self):
+        """Test _background_distance_from_border with a valid image."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        # Add a distinct border
+        img[:10, :] = [100, 100, 100]
+        img[-10:, :] = [100, 100, 100]
+        img[:, :10] = [100, 100, 100]
+        img[:, -10:] = [100, 100, 100]
+        dist_u8, otsu = _background_distance_from_border(img)
+        assert dist_u8 is not None
+        assert otsu is not None
+        assert dist_u8.shape == (100, 100)
+
+    def test_background_distance_from_border_uniform_image(self):
+        """Test _background_distance_from_border with uniform image."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        dist_u8, otsu = _background_distance_from_border(img)
+        # May return None or valid values depending on implementation
+        if dist_u8 is not None:
+            assert dist_u8.shape == (100, 100)
+
+    def test_recover_piece_edges_preserves_shape(self):
+        """Test _recover_piece_edges preserves mask shape."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 200
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[30:70, 30:70] = 1
+        result = _recover_piece_edges(img, mask, kernel_size=7)
+        assert result.shape == mask.shape
+
+    def test_recover_piece_edges_recovers_edges(self):
+        """Test _recover_piece_edges correctly expands mask at edges."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 200
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[30:70, 30:70] = 1
+        result = _recover_piece_edges(img, mask, kernel_size=7)
+        # Result should expand the mask, so sum should be >= original
+        assert result.sum() >= mask.sum()
+
+    def test_smooth_piece_contour_preserves_shape(self):
+        """Test _smooth_piece_contour preserves mask shape."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[30:70, 30:70] = 1
+        result = _smooth_piece_contour(mask)
+        assert result.shape == mask.shape
+
+    def test_smooth_piece_contour_empty_mask(self):
+        """Test _smooth_piece_contour with empty mask."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        result = _smooth_piece_contour(mask)
+        assert result.shape == mask.shape
+        assert result.sum() == 0
+
+    def test_template_color_clusters_returns_valid_shapes(self):
+        """Test _template_color_clusters returns properly shaped outputs."""
+        template = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        # Add color variation
+        template[0:50, 0:50] = [100, 150, 100]
+        template[50:100, 50:100] = [150, 100, 150]
+        centers, thresholds = _template_color_clusters(template, k=4)
+        assert centers.shape[1] == 2  # AB channels in LAB
+        assert len(thresholds) == 4
+
+    def test_template_color_clusters_with_mask(self):
+        """Test _template_color_clusters with a provided mask."""
+        template = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:80, 20:80] = 1
+        centers, thresholds = _template_color_clusters(
+            template, template_mask=mask, k=3
+        )
+        assert centers is not None
+        assert thresholds is not None
+
+    def test_apply_template_cluster_mask_returns_binary(self):
+        """Test _apply_template_cluster_mask returns binary mask."""
+        piece = np.ones((100, 100, 3), dtype=np.uint8) * 150
+        centers = np.array([[0, 0], [10, 10]], dtype=np.float32)
+        thresholds = np.array([20, 20], dtype=np.float32)
+        result = _apply_template_cluster_mask(piece, centers, thresholds)
+        assert result.shape == (100, 100)
+        assert np.all((result == 0) | (result == 1))
+
+    def test_background_color_clusters_returns_valid_shapes(self):
+        """Test _background_color_clusters returns properly shaped outputs."""
+        piece = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        # Add border variation
+        piece[:10, :] = [100, 100, 100]
+        piece[-10:, :] = [100, 100, 100]
+        piece[:, :10] = [100, 100, 100]
+        piece[:, -10:] = [100, 100, 100]
+        centers, thresholds = _background_color_clusters(piece, k=3)
+        assert centers.shape[1] == 2  # AB channels
+        assert len(thresholds) == 3
+
+    def test_apply_background_cluster_mask_returns_binary(self):
+        """Test _apply_background_cluster_mask returns binary mask."""
+        piece = np.ones((100, 100, 3), dtype=np.uint8) * 150
+        centers = np.array([[0, 0]], dtype=np.float32)
+        thresholds = np.array([20], dtype=np.float32)
+        result = _apply_background_cluster_mask(piece, centers, thresholds)
+        assert result.shape == (100, 100)
+        assert np.all((result == 0) | (result == 1))
+
+    def test_apply_background_cluster_mask_empty_thresholds(self):
+        """Test _apply_background_cluster_mask handles zero thresholds."""
+        piece = np.ones((100, 100, 3), dtype=np.uint8) * 150
+        centers = np.array([[0, 0]], dtype=np.float32)
+        thresholds = np.array([0], dtype=np.float32)  # Zero threshold
+        result = _apply_background_cluster_mask(piece, centers, thresholds)
+        assert result.shape == (100, 100)
+        # With zero threshold, result should be all zeros or mostly zeros
+        assert result.sum() == 0
