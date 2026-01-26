@@ -115,6 +115,7 @@ class MatcherConfig:
     mask_open_iters: int = OPEN_ITERS
     mask_close_iters: int = CLOSE_ITERS
     mask_shape_refine: bool = False
+    template_clustering: bool = False
     template_cluster_k: int = 4
     template_cluster_percentile: float = 98.0
     template_cluster_scale: float = 1.15
@@ -151,6 +152,7 @@ def build_matcher_config(
         "mask_open_iters": OPEN_ITERS,
         "mask_close_iters": CLOSE_ITERS,
         "mask_shape_refine": False,
+        "template_clustering": False,
         "template_cluster_k": 4,
         "template_cluster_percentile": 98.0,
         "template_cluster_scale": 1.15,
@@ -811,80 +813,94 @@ def compute_piece_mask(
         raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
 
     template_clustering_applied = False
-    if template_bgr is not None and mask_mode in ("hsv", "hsv_ranges"):
+    if (
+        config.template_clustering
+        and template_bgr is not None
+        and mask_mode in ("hsv", "hsv_ranges")
+    ):
         try:
             y0, y1, x0, x1 = _mask_bbox(mask01)
             bbox_area = max(1, (y1 - y0) * (x1 - x0))
             fill_ratio = float(mask01.sum()) / float(bbox_area)
         except RuntimeError:
             fill_ratio = 0.0
-        cluster_scale = float(config.template_cluster_scale)
         if fill_ratio < MASK_FILL_RATIO_THRESHOLD:
+            cluster_scale = float(config.template_cluster_scale)
             cluster_scale *= 1.0 + min(
                 MASK_FILL_RATIO_MULTIPLIER,
                 (MASK_FILL_RATIO_THRESHOLD - fill_ratio) * MASK_FILL_SCALE_FACTOR,
             )
-        centers, thresholds = _template_color_clusters(
-            template_bgr,
-            template_mask=template_mask,
-            k=int(config.template_cluster_k),
-            percentile=float(config.template_cluster_percentile),
-            scale=cluster_scale,
-        )
-        template_mask01 = _apply_template_cluster_mask(piece_bgr, centers, thresholds)
-        bg_centers, bg_thresholds = _background_color_clusters(piece_bgr)
-        bg_mask01 = _apply_background_cluster_mask(piece_bgr, bg_centers, bg_thresholds)
-        seed_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (max(3, kernel_size), max(3, kernel_size))
-        )
-        seed = cv2.morphologyEx(
-            (mask01 > 0).astype(np.uint8) * 255,
-            cv2.MORPH_DILATE,
-            seed_kernel,
-            iterations=2,
-        )
-        template_mask01 = (template_mask01 > 0).astype(np.uint8)
-        template_mask01 = np.where(bg_mask01 > 0, 0, template_mask01).astype(np.uint8)
-        mask01 = np.where(seed > 0, (mask01 | template_mask01), mask01).astype(np.uint8)
-        allow_growth = fill_ratio < MASK_ALLOW_GROWTH_THRESHOLD
-        if allow_growth:
-            dist_u8, otsu = _background_distance_from_border(piece_bgr)
-            if dist_u8 is None or otsu is None:
-                bg_dist_mask = np.zeros_like(mask01)
-            else:
-                bg_dist_mask = (dist_u8 >= max(0, otsu + BG_DISTANCE_THRESHOLD)).astype(
+            centers, thresholds = _template_color_clusters(
+                template_bgr,
+                template_mask=template_mask,
+                k=int(config.template_cluster_k),
+                percentile=float(config.template_cluster_percentile),
+                scale=cluster_scale,
+            )
+            template_mask01 = _apply_template_cluster_mask(
+                piece_bgr, centers, thresholds
+            )
+            bg_centers, bg_thresholds = _background_color_clusters(piece_bgr)
+            bg_mask01 = _apply_background_cluster_mask(
+                piece_bgr, bg_centers, bg_thresholds
+            )
+            seed_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (max(3, kernel_size), max(3, kernel_size))
+            )
+            seed = cv2.morphologyEx(
+                (mask01 > 0).astype(np.uint8) * 255,
+                cv2.MORPH_DILATE,
+                seed_kernel,
+                iterations=2,
+            )
+            template_mask01 = (template_mask01 > 0).astype(np.uint8)
+            template_mask01 = np.where(bg_mask01 > 0, 0, template_mask01).astype(
+                np.uint8
+            )
+            mask01 = np.where(seed > 0, (mask01 | template_mask01), mask01).astype(
+                np.uint8
+            )
+            allow_growth = fill_ratio < MASK_ALLOW_GROWTH_THRESHOLD
+            if allow_growth:
+                dist_u8, otsu = _background_distance_from_border(piece_bgr)
+                if dist_u8 is None or otsu is None:
+                    bg_dist_mask = np.zeros_like(mask01)
+                else:
+                    bg_dist_mask = (
+                        dist_u8 >= max(0, otsu + BG_DISTANCE_THRESHOLD)
+                    ).astype(np.uint8)
+                candidate = (template_mask01 | bg_dist_mask).astype(np.uint8)
+                candidate = np.where(bg_mask01 > 0, 0, candidate).astype(np.uint8)
+                mask01 = np.where(seed > 0, (mask01 | candidate), mask01).astype(
                     np.uint8
                 )
-            candidate = (template_mask01 | bg_dist_mask).astype(np.uint8)
-            candidate = np.where(bg_mask01 > 0, 0, candidate).astype(np.uint8)
-            mask01 = np.where(seed > 0, (mask01 | candidate), mask01).astype(np.uint8)
-            if fill_ratio < MASK_AGGRESSIVE_GROWTH_THRESHOLD:
-                dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                dilated = cv2.morphologyEx(
-                    (mask01 > 0).astype(np.uint8) * 255,
-                    cv2.MORPH_DILATE,
-                    dil_kernel,
-                    iterations=1,
-                )
-                dilated01 = (dilated > 0).astype(np.uint8)
-                constrained = (dilated01 > 0) & (candidate > 0)
-                mask01 = np.where(constrained, 1, mask01).astype(np.uint8)
-        # Apply shape refinement as part of template clustering pipeline
-        if config.mask_shape_refine:
-            mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
-            mask01 = _smooth_piece_contour(mask01)
-            mask01 = _fill_mask_holes(mask01)
-            mask01 = _smooth_mask_edges(mask01, kernel_size)
-        else:
-            if fill_ratio < MASK_ALLOW_GROWTH_THRESHOLD:
+                if fill_ratio < MASK_AGGRESSIVE_GROWTH_THRESHOLD:
+                    dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                    dilated = cv2.morphologyEx(
+                        (mask01 > 0).astype(np.uint8) * 255,
+                        cv2.MORPH_DILATE,
+                        dil_kernel,
+                        iterations=1,
+                    )
+                    dilated01 = (dilated > 0).astype(np.uint8)
+                    constrained = (dilated01 > 0) & (candidate > 0)
+                    mask01 = np.where(constrained, 1, mask01).astype(np.uint8)
+            # Apply shape refinement as part of template clustering pipeline
+            if config.mask_shape_refine:
                 mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
-            mask01 = _fill_mask_holes(mask01)
-            mask01 = _smooth_mask_edges(mask01, kernel_size)
-        mask01 = _cleanup_mask(mask01 * 255, kernel_size, open_iters, close_iters)
-        mask01 = (mask01 > 0).astype(np.uint8)
-        if keep_largest_component:
-            mask01 = _keep_largest_component(mask01)
-        template_clustering_applied = True
+                mask01 = _smooth_piece_contour(mask01)
+                mask01 = _fill_mask_holes(mask01)
+                mask01 = _smooth_mask_edges(mask01, kernel_size)
+            else:
+                if fill_ratio < MASK_ALLOW_GROWTH_THRESHOLD:
+                    mask01 = _recover_piece_edges(piece_bgr, mask01, kernel_size)
+                mask01 = _fill_mask_holes(mask01)
+                mask01 = _smooth_mask_edges(mask01, kernel_size)
+            mask01 = _cleanup_mask(mask01 * 255, kernel_size, open_iters, close_iters)
+            mask01 = (mask01 > 0).astype(np.uint8)
+            if keep_largest_component:
+                mask01 = _keep_largest_component(mask01)
+            template_clustering_applied = True
 
     # Apply shape refinement for non-template clustering cases or when explicitly enabled
     if not template_clustering_applied and config.mask_shape_refine:
@@ -1223,23 +1239,6 @@ def _infer_knob_counts(
     piece_area_px = float(mask01.sum())
     if piece_area_px <= 0:
         return 0, 0
-
-    col_sum = mask01.sum(axis=0)
-    row_sum = mask01.sum(axis=1)
-    if col_sum.max() > 0 and row_sum.max() > 0:
-        col_thresh = 0.55 * float(col_sum.max())
-        row_thresh = 0.55 * float(row_sum.max())
-        left = int(np.argmax(col_sum >= col_thresh))
-        right = int(mw - 1 - np.argmax(col_sum[::-1] >= col_thresh))
-        top = int(np.argmax(row_sum >= row_thresh))
-        bottom = int(mh - 1 - np.argmax(row_sum[::-1] >= row_thresh))
-        core_w = max(1, right - left + 1)
-        core_h = max(1, bottom - top + 1)
-        if core_w >= 0.7 * mw and core_h >= 0.7 * mh:
-            mask01 = mask01[top : bottom + 1, left : right + 1]
-            mw = core_w
-            mh = core_h
-            piece_area_px = float(mask01.sum())
 
     fill_ratio = piece_area_px / float(mw * mh)
 
@@ -1712,23 +1711,6 @@ def _match_template_multiscale_binary(
                     result = future.result()
                     all_candidates.extend(result)
 
-                    # Early termination if we find an excellent match
-                    if result:
-                        max_score = max(c["score"] for c in result)
-                        if max_score > 0.85:
-                            # Cancel remaining futures
-                            for f in futures:
-                                f.cancel()
-                            # Ensure all futures have finished or been cancelled
-                            for f in futures:
-                                try:
-                                    # Block until the future completes or raises,
-                                    # ignoring any exceptions here since failures
-                                    # are handled elsewhere.
-                                    f.result()
-                                except Exception:
-                                    pass
-                            break
                 except Exception as e:
                     # Log but don't crash on individual match failures
                     logger.warning("Parallel match failed: %s", e)
