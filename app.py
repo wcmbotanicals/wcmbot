@@ -717,7 +717,7 @@ def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
         piece_bgr = cv2.imread(piece_path)
         if piece_bgr is None:
             raise ValueError(f"Could not load piece image: {piece_path}")
-    matcher_config = build_matcher_config_for_template(template_spec)
+        matcher_config = build_matcher_config_for_template(template_spec)
         payload = solve_piece_payload_from_bgr(
             piece_bgr,
             template_spec,

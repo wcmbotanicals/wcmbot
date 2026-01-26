@@ -20,7 +20,7 @@ from wcmbot.matcher import (
     build_matcher_config,
     find_piece_in_template_bgr,
 )
-from wcmbot.multipiece import find_multipiece_region_dicts
+from wcmbot.multipiece import find_multipiece_regions
 from wcmbot.template_settings import TemplateSpec
 
 
@@ -93,21 +93,38 @@ def iter_multipiece_payloads_from_bgr(
     Notes:
     - Returns crops as BGR numpy arrays.
     - Uses the same segmentation ordering as the UI.
-    - When regions are supplied, they are used directly.
+    - If regions are provided, segmentation is skipped and those regions are used.
     """
 
     config = matcher_config or build_matcher_config_for_template(template_spec)
 
     if regions is None:
-        regions, _mask01 = find_multipiece_region_dicts(
+        typed_regions, _mask01 = find_multipiece_regions(
             grid_bgr,
             config,
             min_area_frac=min_area_frac,
             template_bgr=template_bgr,
             template_mask=template_mask,
         )
+        region_dicts = [
+            {"bbox": r.bbox, "contour": r.contour, "area": r.area}
+            for r in typed_regions
+        ]
+    else:
+        region_dicts = []
+        for region in regions:
+            if hasattr(region, "bbox"):
+                region_dicts.append(
+                    {
+                        "bbox": region.bbox,
+                        "contour": region.contour,
+                        "area": region.area,
+                    }
+                )
+            else:
+                region_dicts.append(region)
 
-    for idx, region in enumerate(regions):
+    for idx, region in enumerate(region_dicts):
         x, y, w, h = region["bbox"]
         pad = max(4, int(min(w, h) * float(pad_frac)))
         x0 = max(0, x - pad)
@@ -116,6 +133,7 @@ def iter_multipiece_payloads_from_bgr(
         y1 = min(grid_bgr.shape[0], y + h + pad)
         crop_bgr = grid_bgr[y0:y1, x0:x1].copy()
 
+        payload = None
         try:
             payload = solve_piece_payload_from_bgr(
                 crop_bgr,
@@ -124,9 +142,8 @@ def iter_multipiece_payloads_from_bgr(
                 template_rotation=template_rotation,
                 matcher_config=config,
             )
-        except Exception:
+        except Exception:  # pylint: disable=broad-except
             payload = None
-
         yield MultipieceSolveItem(
             index=idx,
             region=region,

@@ -173,8 +173,6 @@ def find_multipiece_region_dicts(
     template_bgr: Optional[np.ndarray] = None,
     template_mask: Optional[np.ndarray] = None,
     min_area_frac: float = 0.002,
-    template_bgr: np.ndarray | None = None,
-    template_mask: np.ndarray | None = None,
 ) -> tuple[list[dict], np.ndarray]:
     """Compatibility wrapper returning historical region dicts.
 
@@ -191,8 +189,6 @@ def find_multipiece_region_dicts(
         template_bgr=template_bgr,
         template_mask=template_mask,
         min_area_frac=min_area_frac,
-        template_bgr=template_bgr,
-        template_mask=template_mask,
     )
     region_dicts = [
         {"bbox": r.bbox, "contour": r.contour, "area": r.area} for r in regions
