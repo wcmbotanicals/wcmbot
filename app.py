@@ -17,7 +17,7 @@ from PIL import Image
 
 from wcmbot import __version__
 from wcmbot.matcher import (
-    MatchPayload,
+    assert_torch_accel_available,
     format_match_summary,
     preload_template_cache,
     render_primary_views,
@@ -84,25 +84,6 @@ GRID_COLORS_BGR = [
 
 MULTIPIECE_DEFAULT = True
 MAX_DYNAMIC_BUTTONS = 50
-
-
-def _assert_torch_accel_available() -> str:
-    """Return the best torch accelerator device or raise if none exist."""
-    try:
-        import torch
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        raise RuntimeError("--gpu requested but PyTorch is not available.") from exc
-
-    if (
-        getattr(torch.backends, "mps", None) is not None
-        and torch.backends.mps.is_available()
-    ):
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    raise RuntimeError(
-        "--gpu requested but no PyTorch MPS/CUDA device is available; the --gpu flag requires a GPU/MPS accelerator."
-    )
 
 
 def make_zoomable_plot(image: Optional[np.ndarray]):
@@ -345,31 +326,13 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
     latest_pair = None
     latest_piece = None
     if last_result is not None:
-        if isinstance(last_result, MatchPayload):
-            try:
-                rendered = render_primary_views(last_result, 0)
-            except Exception:
-                rendered = {}
-            latest_zoom = rendered.get("zoom_focus")
-            latest_pair = rendered.get("zoom_pair")
-            latest_piece = rendered.get("zoom_piece")
-        else:
-            try:
-                outputs = list(last_result)
-            except TypeError:
-                outputs = []
-            zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
-            latest_zoom = (
-                outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
-            )
-            zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
-            latest_pair = (
-                outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
-            )
-            zoom_piece_idx = VIEW_KEYS.index("zoom_piece")
-            latest_piece = (
-                outputs[zoom_piece_idx] if zoom_piece_idx < len(outputs) else None
-            )
+        try:
+            rendered = render_primary_views(last_result, 0)
+        except Exception:
+            rendered = {}
+        latest_zoom = rendered.get("zoom_focus")
+        latest_pair = rendered.get("zoom_pair")
+        latest_piece = rendered.get("zoom_piece")
 
     template_view = None
     if template_rgb is not None:
@@ -1473,7 +1436,7 @@ if __name__ == "__main__":
     args = argparse_parser.parse_args()
     kwargs = {}
     if args.gpu:
-        device = _assert_torch_accel_available()
+        device = assert_torch_accel_available()
         os.environ["WCMBOT_USE_TORCH"] = "1"
         os.environ["WCMBOT_TORCH_DEVICE"] = device
     if args.accessible:

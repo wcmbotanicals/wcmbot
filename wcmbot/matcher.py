@@ -444,6 +444,18 @@ def _default_torch_device() -> str:
     return "cpu"
 
 
+def assert_torch_accel_available() -> str:
+    """Return the best torch accelerator device or raise if none exist."""
+    if not _torch_available():
+        raise RuntimeError("--gpu requested but PyTorch is not available.")
+    device = _default_torch_device()
+    if device == "cpu":
+        raise RuntimeError(
+            "--gpu requested but no PyTorch MPS/CUDA device is available; the --gpu flag requires a GPU/MPS accelerator."
+        )
+    return device
+
+
 def _match_template_torch_ccorr_normed(
     template_f32: np.ndarray,
     patch_f32: np.ndarray,

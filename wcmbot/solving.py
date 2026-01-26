@@ -93,7 +93,7 @@ def iter_multipiece_payloads_from_bgr(
     Notes:
     - Returns crops as BGR numpy arrays.
     - Uses the same segmentation ordering as the UI.
-    - If regions are provided, segmentation is skipped and those regions are used.
+    - If regions are provided, segmentation is skipped and those region dicts are used.
     """
 
     config = matcher_config or build_matcher_config_for_template(template_spec)
@@ -111,18 +111,7 @@ def iter_multipiece_payloads_from_bgr(
             for r in typed_regions
         ]
     else:
-        region_dicts = []
-        for region in regions:
-            if hasattr(region, "bbox"):
-                region_dicts.append(
-                    {
-                        "bbox": region.bbox,
-                        "contour": region.contour,
-                        "area": region.area,
-                    }
-                )
-            else:
-                region_dicts.append(region)
+        region_dicts = list(regions)
 
     for idx, region in enumerate(region_dicts):
         x, y, w, h = region["bbox"]
