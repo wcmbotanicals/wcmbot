@@ -126,12 +126,6 @@ class MatcherConfig:
     render_full_res: bool = True
     use_torch: bool = False
     torch_device: Optional[str] = None
-    mask_shape_refine: bool = False
-    template_clustering: bool = False
-    template_cluster_k: int = 4
-    template_cluster_percentile: float = 98.0
-    template_cluster_scale: float = 1.15
-    render_full_res: bool = True
 
 
 def build_matcher_config(
