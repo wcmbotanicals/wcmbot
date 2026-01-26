@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from app import _find_multipiece_regions
 from wcmbot.matcher import (
     COLS,
     ROWS,
@@ -23,6 +22,7 @@ from wcmbot.matcher import (
     build_matcher_config,
     find_piece_in_template,
 )
+from wcmbot.multipiece import find_multipiece_region_dicts
 from wcmbot.template_settings import load_template_registry
 
 HERE = os.path.dirname(__file__)
@@ -97,6 +97,7 @@ MANY_PIECES_EXPECTED = {
     24: (14, 25),
     25: (12, 3),
 }
+
 
 ROTATION_SWEEP_DEGREES = [-15, -10, -5, -2.5, 0, 2.5, 5, 10, 15]
 TEMPLATE_ROTATION_CASE = ("piece_5.jpg", 0, 2, 180, 11, 6)
@@ -281,7 +282,7 @@ def test_multipiece_many_pieces_batch():
     grid_img = Image.open(grid_path).convert("RGB")
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
 
-    regions, _ = _find_multipiece_regions(grid_bgr, matcher_config)
+    regions, _ = find_multipiece_region_dicts(grid_bgr, matcher_config)
     assert len(regions) == 25, "Expected 25 pieces detected"
 
     placements = {}

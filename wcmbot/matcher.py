@@ -7,6 +7,7 @@ needing to reproduce image-processing logic.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,8 +28,12 @@ EST_SCALE_WINDOW = np.linspace(0.8, 1.2, num=11).tolist()
 ROTATIONS = [0, 90, 180, 270]
 TOP_MATCH_COUNT = 5
 TOP_MATCH_SCAN_MULTIPLIER = 50
-TOP_MATCH_SCAN_MULT = TOP_MATCH_SCAN_MULTIPLIER  # Backward-compatible alias; prefer TOP_MATCH_SCAN_MULTIPLIER
 PROFILE_ENV = "WCMBOT_PROFILE"
+USE_TORCH_ENV = "WCMBOT_USE_TORCH"
+TORCH_DEVICE_ENV = "WCMBOT_TORCH_DEVICE"
+TORCH_JIT_ENV = "WCMBOT_TORCH_JIT"
+COARSE_FACTOR_ENV = "WCMBOT_COARSE_FACTOR"
+PARALLEL_MATCHING_ENV = "WCMBOT_PARALLEL_MATCHING"
 COARSE_FACTOR = 0.4
 COARSE_TOP_K = 3
 COARSE_PADDING_PIXELS = 24
@@ -40,7 +45,6 @@ GRID_CENTER_WEIGHT = 0.03
 KNOB_WIDTH_FRAC = 1.0 / 3.0
 CROP_X_PX = 0
 CROP_Y_PX = 0
-KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 MATCH_DILATE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
 LOWER_BLUE1 = np.array([90, 60, 40], dtype=np.uint8)
@@ -120,11 +124,42 @@ class MatcherConfig:
     template_cluster_percentile: float = 98.0
     template_cluster_scale: float = 1.15
     render_full_res: bool = True
+    use_torch: bool = False
+    torch_device: Optional[str] = None
 
 
 def build_matcher_config(
     overrides: Optional[Dict[str, object]] = None,
 ) -> MatcherConfig:
+    use_torch_env = os.getenv(USE_TORCH_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    torch_device_env = os.getenv(TORCH_DEVICE_ENV, "").strip() or None
+
+    parallel_matching = True
+    parallel_env = os.getenv(PARALLEL_MATCHING_ENV, "").strip().lower()
+    if parallel_env:
+        parallel_matching = parallel_env in {"1", "true", "yes", "on"}
+
+    coarse_factor = COARSE_FACTOR
+    coarse_factor_env = os.getenv(COARSE_FACTOR_ENV, "").strip()
+    if coarse_factor_env:
+        try:
+            coarse_factor = float(coarse_factor_env)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid {COARSE_FACTOR_ENV}={coarse_factor_env!r}; expected a float"
+            ) from exc
+
+    forced_keys: set[str] = set()
+    if parallel_env:
+        forced_keys.add("parallel_matching")
+    if coarse_factor_env:
+        forced_keys.add("coarse_factor")
+
     payload = {
         "cols": COLS,
         "rows": ROWS,
@@ -133,12 +168,14 @@ def build_matcher_config(
         "rotations": list(ROTATIONS),
         "top_match_count": TOP_MATCH_COUNT,
         "top_match_scan_multiplier": TOP_MATCH_SCAN_MULTIPLIER,
-        "coarse_factor": COARSE_FACTOR,
+        "coarse_factor": coarse_factor,
         "coarse_top_k": COARSE_TOP_K,
         "coarse_padding_pixels": COARSE_PADDING_PIXELS,
         "coarse_min_side": COARSE_MIN_SIDE,
         "preserve_edges_coarse": False,
-        "parallel_matching": True,
+        "parallel_matching": parallel_matching,
+        "use_torch": use_torch_env,
+        "torch_device": torch_device_env,
         "grid_center_weight": GRID_CENTER_WEIGHT,
         "knob_width_frac": KNOB_WIDTH_FRAC,
         "crop_x": CROP_X_PX,
@@ -161,6 +198,8 @@ def build_matcher_config(
     if not overrides:
         return MatcherConfig(**payload)
     for key, value in overrides.items():
+        if key in forced_keys:
+            continue
         if key not in payload:
             raise ValueError(f"Unknown matcher override: {key}")
         if key in ("binarize_blur_ksz", "match_blur_ksz"):
@@ -302,18 +341,18 @@ def _get_template_blur_f32(
     cached = blur_cache.get(blur_ksz)
     if cached is not None:
         return cached
-    T = (
+    t_u8 = (
         (template_bin * 255).astype(np.uint8)
         if template_bin.max() <= 1
         else template_bin.astype(np.uint8)
     )
     if blur_ksz is not None:
-        T_blur = cv2.GaussianBlur(T, blur_ksz, 0)
+        t_blur = cv2.GaussianBlur(t_u8, blur_ksz, 0)
     else:
-        T_blur = T.copy()
-    T_blur_f32 = T_blur.astype(np.float32)
-    blur_cache[blur_ksz] = T_blur_f32
-    return T_blur_f32
+        t_blur = t_u8.copy()
+    t_blur_f32 = t_blur.astype(np.float32)
+    blur_cache[blur_ksz] = t_blur_f32
+    return t_blur_f32
 
 
 def preload_template_cache(
@@ -376,18 +415,553 @@ def _adaptive_coarse_resize(
     if not preserve_edges:
         return cv2.resize(img, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA)
 
-    # Mild unsharp mask: enhances edges without over-sharpening or creating artifacts
-    # This is gentler than a sharpening kernel and preserves grass blades without distortion
     blurred = cv2.GaussianBlur(img, (3, 3), 1.0)
-    # Unsharp mask formula: sharpened = original * (1 + weight) + blurred * (-weight)
-    # Weight of 0.3 provides mild enhancement without overflow/underflow.
-    # cv2.addWeighted clamps values to [0, 255] for uint8 or valid range for float32.
     sharpened = cv2.addWeighted(img, 1.3, blurred, -0.3, 0)
-
-    # Use INTER_AREA for high-quality downsampling after mild sharpening
     return cv2.resize(
         sharpened, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA
     )
+
+
+def _torch_available() -> bool:
+    try:
+        import torch  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _default_torch_device() -> str:
+    import torch
+
+    if (
+        getattr(torch.backends, "mps", None) is not None
+        and torch.backends.mps.is_available()
+    ):
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def assert_torch_accel_available() -> str:
+    """Return the best torch accelerator device or raise if none exist."""
+    if not _torch_available():
+        raise RuntimeError("--gpu requested but PyTorch is not available.")
+    device = _default_torch_device()
+    if device == "cpu":
+        raise RuntimeError(
+            "--gpu requested but no PyTorch MPS/CUDA device is available; the --gpu flag requires a GPU/MPS accelerator."
+        )
+    return device
+
+
+def _match_template_torch_ccorr_normed(
+    template_f32: np.ndarray,
+    patch_f32: np.ndarray,
+    device: Optional[str] = None,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """Torch implementation of cv2.TM_CCORR_NORMED for float32 arrays."""
+
+    import torch
+    import torch.nn.functional as F
+
+    if template_f32.size == 0 or patch_f32.size == 0:
+        return np.empty((0, 0), dtype=np.float32)
+
+    th, tw = int(template_f32.shape[0]), int(template_f32.shape[1])
+    ph, pw = int(patch_f32.shape[0]), int(patch_f32.shape[1])
+    if ph > th or pw > tw:
+        return np.empty((0, 0), dtype=np.float32)
+
+    dev = device or _default_torch_device()
+    t = torch.from_numpy(np.ascontiguousarray(template_f32)).to(torch.float32)[
+        None, None
+    ]
+    p = torch.from_numpy(np.ascontiguousarray(patch_f32)).to(torch.float32)[None, None]
+    t = t.to(dev)
+    p = p.to(dev)
+
+    ones = torch.ones((1, 1, ph, pw), device=dev, dtype=torch.float32)
+    with torch.no_grad():
+        num = F.conv2d(t, p)
+        sum_t2 = torch.sum(p * p)
+        sum_i2 = F.conv2d(t * t, ones)
+        den = torch.sqrt(sum_i2 * sum_t2).clamp_min(eps)
+        out = (num / den).to(dtype=torch.float32)
+        return (
+            out.squeeze(0)
+            .squeeze(0)
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=False)
+        )
+
+
+def _torch_gaussian_sigma_for_ksize(ksize: int) -> float:
+    # OpenCV's default sigma when sigma=0 (approx):
+    # sigma = 0.3*((ksize-1)*0.5 - 1) + 0.8
+    if ksize <= 1:
+        return 0.0
+    return 0.3 * (((ksize - 1) * 0.5) - 1.0) + 0.8
+
+
+def _torch_gaussian_kernel1d(ksize: int, sigma: float):
+    import torch
+
+    ksize = int(ksize)
+    if ksize <= 1:
+        return torch.tensor([1.0], dtype=torch.float32)
+    if sigma <= 0:
+        sigma = _torch_gaussian_sigma_for_ksize(ksize)
+    half = (ksize - 1) / 2.0
+    x = torch.arange(ksize, dtype=torch.float32) - half
+    kernel = torch.exp(-(x * x) / (2.0 * sigma * sigma))
+    kernel = kernel / kernel.sum().clamp_min(1e-12)
+    return kernel
+
+
+def _torch_gaussian_blur2d(img_t, ksz: Tuple[int, int]):
+    """Gaussian blur for NCHW float32 using separable 1D kernels."""
+    import torch.nn.functional as F
+
+    if img_t.ndim != 4:
+        raise ValueError("Expected NCHW tensor")
+
+    ky, kx = int(ksz[1]), int(ksz[0])
+    if ky <= 1 and kx <= 1:
+        return img_t
+
+    # OpenCV uses BORDER_DEFAULT (reflect101-ish). torch's 'reflect' is close enough.
+    out = img_t
+    if kx > 1:
+        k1 = _torch_gaussian_kernel1d(kx, sigma=0.0).to(device=out.device)
+        w = k1.view(1, 1, 1, kx)
+        pad_x = kx // 2
+        out = F.pad(out, (pad_x, pad_x, 0, 0), mode="reflect")
+        out = F.conv2d(out, w)
+    if ky > 1:
+        k1 = _torch_gaussian_kernel1d(ky, sigma=0.0).to(device=out.device)
+        w = k1.view(1, 1, ky, 1)
+        pad_y = ky // 2
+        out = F.pad(out, (0, 0, pad_y, pad_y), mode="reflect")
+        out = F.conv2d(out, w)
+    return out
+
+
+class _TorchMatchContext:
+    """Keep templates resident on a torch device to avoid per-call upload overhead."""
+
+    _jit_ccorr_topk = None
+
+    def __init__(
+        self,
+        template_full: np.ndarray,
+        template_coarse: Optional[np.ndarray],
+        device: Optional[str],
+    ) -> None:
+        import threading
+
+        import torch
+
+        self.enabled = True
+        self.device = device or _default_torch_device()
+        self._ones_cache: Dict[Tuple[int, int], "torch.Tensor"] = {}
+        self._ones_lock = threading.Lock()
+
+        self._use_jit_topk = False
+        try:
+            if os.getenv(TORCH_JIT_ENV) not in {"1", "true", "yes", "on"}:
+                raise RuntimeError("Torch JIT disabled")
+            if _TorchMatchContext._jit_ccorr_topk is None:
+                import torch.nn.functional as F
+
+                @torch.jit.script
+                def _ccorr_normed_topk(
+                    img_t: torch.Tensor,
+                    img_sq_t: torch.Tensor,
+                    templ_t: torch.Tensor,
+                    ones_t: torch.Tensor,
+                    k: int,
+                    eps: float,
+                ) -> Tuple[torch.Tensor, torch.Tensor]:
+                    num = F.conv2d(img_t, templ_t)
+                    sum_t2 = torch.sum(templ_t * templ_t)
+                    sum_i2 = F.conv2d(img_sq_t, ones_t)
+                    den = torch.sqrt(sum_i2 * sum_t2).clamp_min(eps)
+                    out = (num / den).to(dtype=torch.float32).squeeze(0).squeeze(0)
+                    flat = out.reshape(-1)
+                    if flat.numel() == 0:
+                        return (
+                            torch.empty((0,), dtype=torch.float32, device=flat.device),
+                            torch.empty((0,), dtype=torch.int64, device=flat.device),
+                        )
+                    kk = k
+                    if kk < 1:
+                        kk = 1
+                    if kk > flat.numel():
+                        kk = int(flat.numel())
+                    vals, idxs = torch.topk(flat, kk)
+                    return vals, idxs
+
+                _TorchMatchContext._jit_ccorr_topk = _ccorr_normed_topk
+
+            self._use_jit_topk = True
+        except Exception:
+            self._use_jit_topk = False
+
+        template_full_f32 = np.ascontiguousarray(
+            template_full.astype(np.float32, copy=False)
+        )
+        self.template_full_t = torch.from_numpy(template_full_f32)[None, None].to(
+            self.device
+        )
+        self.template_full_sq_t = self.template_full_t * self.template_full_t
+
+        self.template_coarse_t = None
+        self.template_coarse_sq_t = None
+        if template_coarse is not None:
+            template_coarse_f32 = np.ascontiguousarray(
+                template_coarse.astype(np.float32, copy=False)
+            )
+            self.template_coarse_t = torch.from_numpy(template_coarse_f32)[
+                None, None
+            ].to(self.device)
+            self.template_coarse_sq_t = self.template_coarse_t * self.template_coarse_t
+
+    @property
+    def has_coarse(self) -> bool:
+        return (
+            self.template_coarse_t is not None and self.template_coarse_sq_t is not None
+        )
+
+    def disable(self) -> None:
+        self.enabled = False
+
+    def _ones(self, h: int, w: int):
+        import torch
+
+        key = (int(h), int(w))
+        cached = self._ones_cache.get(key)
+        if cached is not None:
+            return cached
+        with self._ones_lock:
+            cached = self._ones_cache.get(key)
+            if cached is not None:
+                return cached
+            ones = torch.ones(
+                (1, 1, key[0], key[1]),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self._ones_cache[key] = ones
+            return ones
+
+    def _match_ccorr_normed(
+        self,
+        img_t,
+        img_sq_t,
+        patch: object,
+        eps: float = 1e-8,
+    ) -> np.ndarray:
+        if not self.enabled:
+            raise RuntimeError("Torch matcher disabled")
+
+        import torch
+        import torch.nn.functional as F
+
+        def _on_expected_device(t: "torch.Tensor") -> bool:
+            dev = str(self.device or "")
+            if dev.startswith("cuda"):
+                return t.device.type == "cuda"
+            return t.device.type == dev
+
+        if isinstance(patch, np.ndarray):
+            patch_f32 = np.ascontiguousarray(patch.astype(np.float32, copy=False))
+            h, w = patch_f32.shape[:2]
+            templ_t = torch.from_numpy(patch_f32)[None, None].to(self.device)
+        else:
+            templ_t = patch
+            if templ_t.ndim == 2:
+                templ_t = templ_t[None, None]
+            if templ_t.ndim != 4:
+                raise ValueError("Torch patch tensor must be 2D or NCHW")
+            if not _on_expected_device(templ_t):
+                templ_t = templ_t.to(self.device)
+            templ_t = templ_t.to(dtype=torch.float32)
+            h, w = int(templ_t.shape[-2]), int(templ_t.shape[-1])
+
+        with torch.no_grad():
+            num = F.conv2d(img_t, templ_t)
+            sum_t2 = torch.sum(templ_t * templ_t)
+            sum_i2 = F.conv2d(img_sq_t, self._ones(h, w))
+            den = torch.sqrt(sum_i2 * sum_t2).clamp_min(eps)
+            out = (num / den).to(dtype=torch.float32)
+            return out.squeeze(0).squeeze(0).detach().cpu().numpy()
+
+    def _topk_ccorr_normed(
+        self,
+        img_t,
+        img_sq_t,
+        patch: object,
+        k: int,
+        eps: float = 1e-8,
+    ) -> Tuple[np.ndarray, np.ndarray, int]:
+        """Return top-k (values, flat_indices, res_w) without downloading the full score map."""
+
+        if not self.enabled:
+            raise RuntimeError("Torch matcher disabled")
+
+        import torch
+        import torch.nn.functional as F
+
+        def _on_expected_device(t: "torch.Tensor") -> bool:
+            dev = str(self.device or "")
+            if dev.startswith("cuda"):
+                return t.device.type == "cuda"
+            return t.device.type == dev
+
+        if isinstance(patch, np.ndarray):
+            patch_f32 = np.ascontiguousarray(patch.astype(np.float32, copy=False))
+            h, w = patch_f32.shape[:2]
+            if h <= 0 or w <= 0:
+                return (
+                    np.empty((0,), dtype=np.float32),
+                    np.empty((0,), dtype=np.int64),
+                    0,
+                )
+            templ_t = torch.from_numpy(patch_f32)[None, None].to(self.device)
+        else:
+            templ_t = patch
+            if templ_t.ndim == 2:
+                templ_t = templ_t[None, None]
+            if templ_t.ndim != 4:
+                raise ValueError("Torch patch tensor must be 2D or NCHW")
+            if not _on_expected_device(templ_t):
+                templ_t = templ_t.to(self.device)
+            templ_t = templ_t.to(dtype=torch.float32)
+            h, w = int(templ_t.shape[-2]), int(templ_t.shape[-1])
+        if h <= 0 or w <= 0:
+            return (
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.int64),
+                0,
+            )
+
+        with torch.no_grad():
+            num = F.conv2d(img_t, templ_t)
+            sum_t2 = torch.sum(templ_t * templ_t)
+            sum_i2 = F.conv2d(img_sq_t, self._ones(h, w))
+            den = torch.sqrt(sum_i2 * sum_t2).clamp_min(eps)
+
+            res_w = int(img_t.shape[-1]) - int(w) + 1
+
+            k = int(k)
+            if k <= 0:
+                return (
+                    np.empty((0,), dtype=np.float32),
+                    np.empty((0,), dtype=np.int64),
+                    res_w,
+                )
+
+            if self._use_jit_topk and _TorchMatchContext._jit_ccorr_topk is not None:
+                try:
+                    vals_t, idxs_t = _TorchMatchContext._jit_ccorr_topk(
+                        img_t,
+                        img_sq_t,
+                        templ_t,
+                        self._ones(h, w),
+                        k,
+                        float(eps),
+                    )
+                    return (
+                        vals_t.detach().cpu().numpy().astype(np.float32, copy=False),
+                        idxs_t.detach().cpu().numpy().astype(np.int64, copy=False),
+                        res_w,
+                    )
+                except Exception:
+                    pass
+
+            out = (num / den).to(dtype=torch.float32).squeeze(0).squeeze(0)
+            flat = out.reshape(-1)
+            if flat.numel() == 0:
+                return (
+                    np.empty((0,), dtype=np.float32),
+                    np.empty((0,), dtype=np.int64),
+                    res_w,
+                )
+            k = min(k, int(flat.numel()))
+            vals, idxs = torch.topk(flat, k)
+            return (
+                vals.detach().cpu().numpy().astype(np.float32, copy=False),
+                idxs.detach().cpu().numpy().astype(np.int64, copy=False),
+                res_w,
+            )
+
+    def _topk_ccorr_normed_batch(
+        self,
+        img_t,
+        img_sq_t,
+        patches_t,
+        k: int,
+        eps: float = 1e-8,
+    ) -> Tuple[np.ndarray, np.ndarray, int]:
+        """Batched top-k for many templates of the same shape.
+
+        patches_t: NCHW tensor where N is the number of patches.
+        Returns (vals, idxs, res_w) where vals/idxs are (N, k) numpy arrays.
+        """
+
+        if not self.enabled:
+            raise RuntimeError("Torch matcher disabled")
+
+        import torch
+        import torch.nn.functional as F
+
+        if patches_t.ndim != 4:
+            raise ValueError("Torch batch patches must be NCHW")
+        if patches_t.shape[1] != 1:
+            raise ValueError("Torch batch patches must have C=1")
+
+        patches_t = patches_t.to(device=self.device, dtype=torch.float32)
+        n = int(patches_t.shape[0])
+        h = int(patches_t.shape[-2])
+        w = int(patches_t.shape[-1])
+        res_w = int(img_t.shape[-1]) - int(w) + 1
+
+        if n <= 0 or h <= 0 or w <= 0:
+            return (
+                np.empty((0, 0), dtype=np.float32),
+                np.empty((0, 0), dtype=np.int64),
+                res_w,
+            )
+
+        k = int(k)
+        if k <= 0:
+            return (
+                np.empty((n, 0), dtype=np.float32),
+                np.empty((n, 0), dtype=np.int64),
+                res_w,
+            )
+
+        with torch.no_grad():
+            # Treat each patch as an output channel.
+            num = F.conv2d(img_t, patches_t)
+            # sum_t2 per patch (channel)
+            sum_t2 = torch.sum(patches_t * patches_t, dim=(1, 2, 3))  # (N,)
+            sum_i2 = F.conv2d(img_sq_t, self._ones(h, w))  # (1,1,Ho,Wo)
+            den = torch.sqrt(sum_i2 * sum_t2.view(1, n, 1, 1)).clamp_min(eps)
+            out = (num / den).to(dtype=torch.float32).squeeze(0)  # (N,Ho,Wo)
+            flat = out.reshape(n, -1)
+            if flat.numel() == 0:
+                return (
+                    np.empty((n, 0), dtype=np.float32),
+                    np.empty((n, 0), dtype=np.int64),
+                    res_w,
+                )
+            kk = min(k, int(flat.shape[1]))
+            vals, idxs = torch.topk(flat, kk, dim=1)
+            return (
+                vals.detach().cpu().numpy().astype(np.float32, copy=False),
+                idxs.detach().cpu().numpy().astype(np.int64, copy=False),
+                res_w,
+            )
+
+    def match_full(self, patch: np.ndarray) -> np.ndarray:
+        return self._match_ccorr_normed(
+            self.template_full_t,
+            self.template_full_sq_t,
+            patch,
+        )
+
+    def topk_full(
+        self, patch: np.ndarray, k: int
+    ) -> Tuple[np.ndarray, np.ndarray, int]:
+        return self._topk_ccorr_normed(
+            self.template_full_t,
+            self.template_full_sq_t,
+            patch,
+            k,
+        )
+
+    def topk_full_batch(self, patches_t, k: int) -> Tuple[np.ndarray, np.ndarray, int]:
+        return self._topk_ccorr_normed_batch(
+            self.template_full_t,
+            self.template_full_sq_t,
+            patches_t,
+            k,
+        )
+
+    def match_coarse(self, patch: np.ndarray) -> np.ndarray:
+        if not self.has_coarse:
+            raise RuntimeError("Torch coarse matcher not initialized")
+        return self._match_ccorr_normed(
+            self.template_coarse_t,
+            self.template_coarse_sq_t,
+            patch,
+        )
+
+    def topk_coarse(
+        self, patch: np.ndarray, k: int
+    ) -> Tuple[np.ndarray, np.ndarray, int]:
+        if not self.has_coarse:
+            raise RuntimeError("Torch coarse matcher not initialized")
+        return self._topk_ccorr_normed(
+            self.template_coarse_t,
+            self.template_coarse_sq_t,
+            patch,
+            k,
+        )
+
+    def topk_coarse_batch(
+        self, patches_t, k: int
+    ) -> Tuple[np.ndarray, np.ndarray, int]:
+        if not self.has_coarse:
+            raise RuntimeError("Torch coarse matcher not initialized")
+        return self._topk_ccorr_normed_batch(
+            self.template_coarse_t,
+            self.template_coarse_sq_t,
+            patches_t,
+            k,
+        )
+
+
+def _match_template(
+    template_img: np.ndarray,
+    patch: np.ndarray,
+    corr_method: int,
+    config: MatcherConfig,
+    torch_ctx: Optional[_TorchMatchContext],
+    template_kind: str,
+) -> np.ndarray:
+    """Match template with optional Torch acceleration and graceful fallback."""
+
+    if (
+        config.use_torch
+        and template_kind in ("full", "coarse")
+        and corr_method == cv2.TM_CCORR_NORMED
+        and _torch_available()
+    ):
+        torch_device = (config.torch_device or _default_torch_device()).strip().lower()
+        if torch_device != "cpu":
+            try:
+                if torch_ctx is not None and torch_ctx.enabled:
+                    if template_kind == "full":
+                        return torch_ctx.match_full(patch)
+                    if template_kind == "coarse" and torch_ctx.has_coarse:
+                        return torch_ctx.match_coarse(patch)
+
+                return _match_template_torch_ccorr_normed(
+                    template_img,
+                    patch,
+                    device=torch_device,
+                )
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning("Torch match failed (%s): %s", template_kind, exc)
+
+    return cv2.matchTemplate(template_img, patch, corr_method)
 
 
 def _binarize_two_color(
@@ -1352,6 +1926,223 @@ def _grid_center_proximity(
     return max(0.0, 1.0 - min(dist / max_dist, 1.0))
 
 
+def _candidate_order(
+    flat: np.ndarray,
+    max_len: int,
+    scan_multiplier: int,
+) -> np.ndarray:
+    if flat.size <= max_len:
+        return np.argsort(flat)[::-1]
+    scan_count = min(flat.size, max(max_len * scan_multiplier, max_len))
+    order = np.argpartition(flat, -scan_count)[-scan_count:]
+    return order[np.argsort(flat[order])[::-1]]
+
+
+def _scan_candidates_topk(
+    values: np.ndarray,
+    order: np.ndarray,
+    res_w: int,
+    ws: int,
+    hs: int,
+    rot_value: int,
+    scale_value: float,
+    cell_w: float,
+    cell_h: float,
+    cols: int,
+    rows: int,
+    grid_center_weight: float,
+    top_match_count: int,
+    offset_x: int = 0,
+    offset_y: int = 0,
+    core_offset_x: Optional[float] = None,
+    core_offset_y: Optional[float] = None,
+) -> List[Dict]:
+    combo_best_local: List[Dict] = []
+    if core_offset_x is None:
+        core_offset_x = ws / 2
+    if core_offset_y is None:
+        core_offset_y = hs / 2
+
+    for i, idx in enumerate(order):
+        if len(combo_best_local) >= top_match_count:
+            break
+        y, x = divmod(int(idx), res_w)
+        x0 = x + offset_x
+        y0 = y + offset_y
+        cx = x0 + core_offset_x
+        cy = y0 + core_offset_y
+        base_score = float(values[i])
+        proximity = _grid_center_proximity(cx, cy, cell_w, cell_h, cols, rows)
+        score = base_score + (grid_center_weight * proximity)
+        tl = (int(x0), int(y0))
+        br = (int(x0 + ws), int(y0 + hs))
+        candidate = {
+            "score": score,
+            "score_raw": base_score,
+            "grid_score": proximity,
+            "rot": int(rot_value),
+            "scale": float(scale_value),
+            "col": int(cx / cell_w) + 1,
+            "row": int(cy / cell_h) + 1,
+            "tl": tl,
+            "br": br,
+            "center": (float(cx), float(cy)),
+        }
+        if any(
+            _candidate_is_close(candidate, existing) for existing in combo_best_local
+        ):
+            continue
+        combo_best_local.append(candidate)
+    return combo_best_local
+
+
+def _scan_candidates(
+    res: np.ndarray,
+    order: np.ndarray,
+    res_w: int,
+    ws: int,
+    hs: int,
+    rot_value: int,
+    scale_value: float,
+    cell_w: float,
+    cell_h: float,
+    cols: int,
+    rows: int,
+    grid_center_weight: float,
+    top_match_count: int,
+    offset_x: int = 0,
+    offset_y: int = 0,
+    core_offset_x: Optional[float] = None,
+    core_offset_y: Optional[float] = None,
+) -> List[Dict]:
+    combo_best_local: List[Dict] = []
+    if core_offset_x is None:
+        core_offset_x = ws / 2
+    if core_offset_y is None:
+        core_offset_y = hs / 2
+
+    for idx in order:
+        if len(combo_best_local) >= top_match_count:
+            break
+        y, x = divmod(int(idx), res_w)
+        x0 = x + offset_x
+        y0 = y + offset_y
+        cx = x0 + core_offset_x
+        cy = y0 + core_offset_y
+        base_score = float(res[y, x])
+        proximity = _grid_center_proximity(cx, cy, cell_w, cell_h, cols, rows)
+        score = base_score + (grid_center_weight * proximity)
+        tl = (int(x0), int(y0))
+        br = (int(x0 + ws), int(y0 + hs))
+        candidate = {
+            "score": score,
+            "score_raw": base_score,
+            "grid_score": proximity,
+            "rot": int(rot_value),
+            "scale": float(scale_value),
+            "col": int(cx / cell_w) + 1,
+            "row": int(cy / cell_h) + 1,
+            "tl": tl,
+            "br": br,
+            "center": (float(cx), float(cy)),
+        }
+        if any(
+            _candidate_is_close(candidate, existing) for existing in combo_best_local
+        ):
+            continue
+        combo_best_local.append(candidate)
+    return combo_best_local
+
+
+def _collect_matches(
+    res: np.ndarray,
+    ws: int,
+    hs: int,
+    rot_value: int,
+    scale_value: float,
+    cell_w: float,
+    cell_h: float,
+    cols: int,
+    rows: int,
+    grid_center_weight: float,
+    top_match_count: int,
+    top_match_scan_multiplier: int,
+    offset_x: int = 0,
+    offset_y: int = 0,
+    core_offset_x: Optional[float] = None,
+    core_offset_y: Optional[float] = None,
+) -> List[Dict]:
+    flat = res.ravel()
+    order = _candidate_order(flat, top_match_count, top_match_scan_multiplier)
+    res_w = res.shape[1]
+    combo_best = _scan_candidates(
+        res,
+        order,
+        res_w,
+        ws,
+        hs,
+        rot_value,
+        scale_value,
+        cell_w,
+        cell_h,
+        cols,
+        rows,
+        grid_center_weight,
+        top_match_count,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        core_offset_x=core_offset_x,
+        core_offset_y=core_offset_y,
+    )
+    if len(combo_best) < top_match_count and order.size < flat.size:
+        order = np.argsort(flat)[::-1]
+        combo_best = _scan_candidates(
+            res,
+            order,
+            res_w,
+            ws,
+            hs,
+            rot_value,
+            scale_value,
+            cell_w,
+            cell_h,
+            cols,
+            rows,
+            grid_center_weight,
+            top_match_count,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            core_offset_x=core_offset_x,
+            core_offset_y=core_offset_y,
+        )
+    return combo_best
+
+
+def _collect_coarse_positions_topk(
+    values: np.ndarray,
+    order: np.ndarray,
+    res_w: int,
+    ws: int,
+    hs: int,
+    top_k: int,
+) -> List[Dict]:
+    positions: List[Dict] = []
+    for i, idx in enumerate(order):
+        if len(positions) >= top_k:
+            break
+        y, x = divmod(int(idx), res_w)
+        candidate = {
+            "score": float(values[i]),
+            "tl": (int(x), int(y)),
+            "br": (int(x + ws), int(y + hs)),
+            "center": (float(x + ws / 2), float(y + hs / 2)),
+        }
+        if any(_candidate_is_close(candidate, existing) for existing in positions):
+            continue
+        positions.append(candidate)
+    return positions
+
+
 def _update_top_matches(
     top_matches: List[Dict], candidate: Dict, max_len: int = TOP_MATCH_COUNT
 ) -> None:
@@ -1415,6 +2206,7 @@ def _match_scale_rotation_combo(
     piece_mask: np.ndarray,
     template_blur_f32: np.ndarray,
     template_coarse_f32: Optional[np.ndarray],
+    torch_ctx: Optional[_TorchMatchContext],
     config: MatcherConfig,
     knobs_x: Optional[int],
     knobs_y: Optional[int],
@@ -1481,58 +2273,6 @@ def _match_scale_rotation_combo(
 
     patt_masked = patt_s_blur * mask_s
 
-    def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
-        if flat.size <= max_len:
-            return np.argsort(flat)[::-1]
-        scan_count = min(flat.size, max(max_len * top_match_scan_multiplier, max_len))
-        order = np.argpartition(flat, -scan_count)[-scan_count:]
-        return order[np.argsort(flat[order])[::-1]]
-
-    def _scan_candidates(
-        res: np.ndarray,
-        order: np.ndarray,
-        res_w: int,
-        ws: int,
-        hs: int,
-        offset_x: int,
-        offset_y: int,
-        core_offset_x: float,
-        core_offset_y: float,
-    ) -> List[Dict]:
-        combo_best_local: List[Dict] = []
-        for idx in order:
-            if len(combo_best_local) >= top_match_count:
-                break
-            y, x = divmod(int(idx), res_w)
-            x0 = x + offset_x
-            y0 = y + offset_y
-            cx = x0 + core_offset_x
-            cy = y0 + core_offset_y
-            base_score = float(res[y, x])
-            proximity = _grid_center_proximity(cx, cy, cell_w, cell_h, cols, rows)
-            score = base_score + (grid_center_weight * proximity)
-            tl = (int(x0), int(y0))
-            br = (int(x0 + ws), int(y0 + hs))
-            candidate = {
-                "score": score,
-                "score_raw": base_score,
-                "grid_score": proximity,
-                "rot": rot,
-                "scale": scale,
-                "col": int(cx / cell_w) + 1,
-                "row": int(cy / cell_h) + 1,
-                "tl": tl,
-                "br": br,
-                "center": (float(cx), float(cy)),
-            }
-            if any(
-                _candidate_is_close(candidate, existing)
-                for existing in combo_best_local
-            ):
-                continue
-            combo_best_local.append(candidate)
-        return combo_best_local
-
     # Decide whether to use coarse-then-fine
     # ws < tw and hs < th are already guaranteed by the check at line 1133
     use_coarse = template_coarse_f32 is not None and 0.0 < coarse_factor < 1.0
@@ -1552,13 +2292,21 @@ def _match_scale_rotation_combo(
                 patt_c = cv2.resize(patt_c, (ws_c, hs_c), interpolation=cv2.INTER_AREA)
             mask_c = cv2.resize(mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST)
             patt_masked_c = patt_c * mask_c
-
-            res_c = cv2.matchTemplate(template_coarse_f32, patt_masked_c, corr_method)
+            res_c = _match_template(
+                template_coarse_f32,
+                patt_masked_c,
+                corr_method,
+                config,
+                torch_ctx,
+                template_kind="coarse",
+            )
 
             if res_c.size > 0:
                 # Find top-K coarse candidates
                 flat_c = res_c.ravel()
-                order_c = _candidate_order(flat_c, coarse_top_k)
+                order_c = _candidate_order(
+                    flat_c, coarse_top_k, top_match_scan_multiplier
+                )
                 res_w_c = res_c.shape[1]
 
                 # Fine pass on each coarse candidate
@@ -1582,12 +2330,21 @@ def _match_scale_rotation_combo(
                         continue
 
                     # Fine match in ROI
-                    res_fine = cv2.matchTemplate(roi, patt_masked, corr_method)
+                    res_fine = _match_template(
+                        roi,
+                        patt_masked,
+                        corr_method,
+                        config,
+                        torch_ctx,
+                        template_kind="roi",
+                    )
                     if res_fine.size == 0:
                         continue
 
                     flat_fine = res_fine.ravel()
-                    order_fine = _candidate_order(flat_fine, top_match_count)
+                    order_fine = _candidate_order(
+                        flat_fine, top_match_count, top_match_scan_multiplier
+                    )
                     res_w_fine = res_fine.shape[1]
 
                     fine_candidates = _scan_candidates(
@@ -1596,10 +2353,18 @@ def _match_scale_rotation_combo(
                         res_w_fine,
                         ws,
                         hs,
-                        x0,
-                        y0,
-                        core_offset_x,
-                        core_offset_y,
+                        rot,
+                        scale,
+                        cell_w,
+                        cell_h,
+                        cols,
+                        rows,
+                        grid_center_weight,
+                        top_match_count,
+                        offset_x=x0,
+                        offset_y=y0,
+                        core_offset_x=core_offset_x,
+                        core_offset_y=core_offset_y,
                     )
                     all_fine_candidates.extend(fine_candidates)
 
@@ -1609,17 +2374,431 @@ def _match_scale_rotation_combo(
                     return all_fine_candidates
 
     # Fallback: full-resolution matching without coarse pass
-    res = cv2.matchTemplate(template_blur_f32, patt_masked, corr_method)
+    res = _match_template(
+        template_blur_f32,
+        patt_masked,
+        corr_method,
+        config,
+        torch_ctx,
+        template_kind="full",
+    )
 
     if res.size == 0:
         return []
 
     flat = res.ravel()
-    order = _candidate_order(flat, top_match_count)
+    order = _candidate_order(flat, top_match_count, top_match_scan_multiplier)
     res_w = res.shape[1]
     return _scan_candidates(
-        res, order, res_w, ws, hs, 0, 0, core_offset_x, core_offset_y
+        res,
+        order,
+        res_w,
+        ws,
+        hs,
+        rot,
+        scale,
+        cell_w,
+        cell_h,
+        cols,
+        rows,
+        grid_center_weight,
+        top_match_count,
+        offset_x=0,
+        offset_y=0,
+        core_offset_x=core_offset_x,
+        core_offset_y=core_offset_y,
     )
+
+
+def _match_rotation_scale_sweep(
+    rot: int,
+    scales: List[float],
+    piece_bin_pattern: np.ndarray,
+    piece_mask: np.ndarray,
+    template_blur_f32: np.ndarray,
+    template_coarse_f32: Optional[np.ndarray],
+    torch_ctx: Optional[_TorchMatchContext],
+    config: MatcherConfig,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    blur_ksz: Optional[Tuple[int, int]],
+    corr_method: int,
+    cols: int,
+    rows: int,
+) -> List[Dict]:
+    """Match all scales for a single rotation.
+
+    This is used by the CPU-parallel path to avoid re-rotating the piece/mask
+    for every (scale, rotation) combination.
+    """
+
+    P = (
+        (piece_bin_pattern * 255).astype(np.uint8)
+        if piece_bin_pattern.max() <= 1
+        else piece_bin_pattern.astype(np.uint8)
+    )
+    if piece_mask.max() <= 1:
+        M = (piece_mask > 0).astype(np.uint8) * 255
+    else:
+        M = (piece_mask > 127).astype(np.uint8) * 255
+
+    th, tw = template_blur_f32.shape[:2]
+    cell_w = tw / cols
+    cell_h = th / rows
+
+    dilate_ker = MATCH_DILATE_KERNEL
+    top_match_count = config.top_match_count
+    top_match_scan_multiplier = config.top_match_scan_multiplier
+    grid_center_weight = config.grid_center_weight
+    coarse_factor = config.coarse_factor
+    coarse_top_k = config.coarse_top_k
+    coarse_padding_pixels = config.coarse_padding_pixels
+
+    P_r = _rotate_img(P, rot)
+    M_r = _rotate_img(M, rot)
+    M_r_raw01 = (M_r > 127).astype(np.uint8)
+    rot_knobs_x, rot_knobs_y = _rotate_knob_counts(knobs_x, knobs_y, rot)
+    core_center = _core_center_from_mask(M_r_raw01, rot_knobs_x, rot_knobs_y)
+    M_r = (M_r_raw01 > 0).astype(np.uint8) * 255
+    M_r = cv2.morphologyEx(M_r, cv2.MORPH_DILATE, dilate_ker, iterations=1)
+    M_r01 = (M_r > 127).astype(np.float32)
+
+    use_coarse = template_coarse_f32 is not None and 0.0 < coarse_factor < 1.0
+
+    used_torch = (
+        config.use_torch
+        and corr_method == cv2.TM_CCORR_NORMED
+        and torch_ctx is not None
+        and torch_ctx.enabled
+    )
+
+    # Build per-scale payloads once, then run batched torch top-k by patch size.
+    scale_jobs: List[Dict] = []
+    for scale in scales:
+        ws = int(round(P_r.shape[1] * scale))
+        hs = int(round(P_r.shape[0] * scale))
+        if ws <= 0 or hs <= 0 or ws >= tw or hs >= th:
+            continue
+
+        scale_x = ws / float(P_r.shape[1])
+        scale_y = hs / float(P_r.shape[0])
+        core_offset_x = core_center[0] * scale_x
+        core_offset_y = core_center[1] * scale_y
+
+        patt_s = _resize_for_match(P_r, ws, hs, rethreshold=config.resize_rethreshold)
+        mask_s = _resize_for_match(M_r01, ws, hs)
+
+        if blur_ksz is not None:
+            patt_s_blur = cv2.GaussianBlur(patt_s, blur_ksz, 0).astype(np.float32)
+        else:
+            patt_s_blur = patt_s.astype(np.float32)
+
+        patt_masked = patt_s_blur * mask_s
+        job = {
+            "scale": float(scale),
+            "ws": int(ws),
+            "hs": int(hs),
+            "core_offset_x": float(core_offset_x),
+            "core_offset_y": float(core_offset_y),
+            "patt_masked": patt_masked,
+            "mask_s": mask_s,
+            "patt_s_blur": patt_s_blur,
+        }
+
+        if use_coarse:
+            th_c, tw_c = template_coarse_f32.shape[:2]
+            ws_c = max(1, int(round(ws * coarse_factor)))
+            hs_c = max(1, int(round(hs * coarse_factor)))
+            if 1 < ws_c < tw_c and 1 < hs_c < th_c:
+                patt_c = _adaptive_coarse_resize(
+                    patt_s_blur, coarse_factor, config.preserve_edges_coarse
+                )
+                if patt_c.shape[:2] != (hs_c, ws_c):
+                    patt_c = cv2.resize(
+                        patt_c, (ws_c, hs_c), interpolation=cv2.INTER_AREA
+                    )
+                mask_c = cv2.resize(
+                    mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST
+                )
+                patt_masked_c = patt_c * mask_c
+                job.update(
+                    {
+                        "ws_c": int(ws_c),
+                        "hs_c": int(hs_c),
+                        "patt_masked_c": patt_masked_c,
+                    }
+                )
+
+        scale_jobs.append(job)
+
+    all_candidates: List[Dict] = []
+    if not scale_jobs:
+        return all_candidates
+
+    # --- Coarse pass (batched on torch when enabled) ---
+    coarse_succeeded: Dict[float, bool] = {}
+    if use_coarse and template_coarse_f32 is not None:
+        # Group by coarse patch shape.
+        coarse_groups: Dict[Tuple[int, int], List[Dict]] = {}
+        for job in scale_jobs:
+            if "patt_masked_c" not in job:
+                continue
+            key = (int(job["hs_c"]), int(job["ws_c"]))
+            coarse_groups.setdefault(key, []).append(job)
+
+        for (hs_c, ws_c), jobs in coarse_groups.items():
+            coarse_positions_list: List[List[Dict]] = []
+            res_w_c = 0
+            if used_torch and torch_ctx.has_coarse:
+                try:
+                    import torch
+
+                    patches_np = [
+                        np.ascontiguousarray(
+                            j["patt_masked_c"].astype(np.float32, copy=False)
+                        )
+                        for j in jobs
+                    ]
+                    patches_t = torch.from_numpy(np.stack(patches_np, axis=0))[
+                        :, None
+                    ].to(torch_ctx.device)
+                    flat_size = (template_coarse_f32.shape[1] - ws_c + 1) * (
+                        template_coarse_f32.shape[0] - hs_c + 1
+                    )
+                    if flat_size > 0:
+                        k = min(
+                            flat_size,
+                            max(coarse_top_k * top_match_scan_multiplier, coarse_top_k),
+                        )
+                        vals_b, idxs_b, res_w_c = torch_ctx.topk_coarse_batch(
+                            patches_t, k
+                        )
+                        for i in range(vals_b.shape[0]):
+                            coarse_positions_list.append(
+                                _collect_coarse_positions_topk(
+                                    vals_b[i],
+                                    idxs_b[i],
+                                    res_w_c,
+                                    ws_c,
+                                    hs_c,
+                                    coarse_top_k,
+                                )
+                            )
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("Torch coarse batch topk failed: %s", exc)
+                    coarse_positions_list = []
+
+            if not coarse_positions_list:
+                # Fallback: OpenCV match per scale in this group.
+                for j in jobs:
+                    res_c = _match_template(
+                        template_coarse_f32,
+                        j["patt_masked_c"],
+                        corr_method,
+                        config,
+                        torch_ctx,
+                        template_kind="coarse",
+                    )
+                    if res_c.size:
+                        flat_c = res_c.ravel()
+                        order_c = _candidate_order(
+                            flat_c, coarse_top_k, top_match_scan_multiplier
+                        )
+                        coarse_positions_list.append(
+                            [
+                                {
+                                    "score": float(res_c.ravel()[int(idx)]),
+                                    "tl": (
+                                        int(divmod(int(idx), res_c.shape[1])[1]),
+                                        int(divmod(int(idx), res_c.shape[1])[0]),
+                                    ),
+                                }
+                                for idx in order_c[:coarse_top_k]
+                            ]
+                        )
+                    else:
+                        coarse_positions_list.append([])
+
+            # ROI refinement per scale job.
+            for j, coarse_positions in zip(jobs, coarse_positions_list):
+                ws = int(j["ws"])
+                hs = int(j["hs"])
+                scale = float(j["scale"])
+                patt_masked = j["patt_masked"]
+                core_offset_x = float(j["core_offset_x"])
+                core_offset_y = float(j["core_offset_y"])
+
+                candidates_for_scale: List[Dict] = []
+                for coarse in coarse_positions[:coarse_top_k]:
+                    x_c, y_c = coarse.get("tl", (0, 0))
+                    x_full = int(round(x_c / coarse_factor))
+                    y_full = int(round(y_c / coarse_factor))
+                    x_full = max(0, min(x_full, tw - ws))
+                    y_full = max(0, min(y_full, th - hs))
+
+                    x0 = max(0, x_full - coarse_padding_pixels)
+                    y0 = max(0, y_full - coarse_padding_pixels)
+                    x1 = min(tw, x_full + ws + coarse_padding_pixels)
+                    y1 = min(th, y_full + hs + coarse_padding_pixels)
+
+                    roi = template_blur_f32[y0:y1, x0:x1]
+                    if roi.shape[0] < hs or roi.shape[1] < ws:
+                        continue
+                    res_fine = _match_template(
+                        roi,
+                        patt_masked,
+                        corr_method,
+                        config,
+                        torch_ctx,
+                        template_kind="roi",
+                    )
+                    if res_fine.size == 0:
+                        continue
+                    flat_fine = res_fine.ravel()
+                    order_fine = _candidate_order(
+                        flat_fine, top_match_count, top_match_scan_multiplier
+                    )
+                    res_w_fine = res_fine.shape[1]
+                    candidates_for_scale.extend(
+                        _scan_candidates(
+                            res_fine,
+                            order_fine,
+                            res_w_fine,
+                            ws,
+                            hs,
+                            rot,
+                            scale,
+                            cell_w,
+                            cell_h,
+                            cols,
+                            rows,
+                            grid_center_weight,
+                            top_match_count,
+                            offset_x=x0,
+                            offset_y=y0,
+                            core_offset_x=core_offset_x,
+                            core_offset_y=core_offset_y,
+                        )
+                    )
+
+                if candidates_for_scale:
+                    coarse_succeeded[scale] = True
+                    all_candidates.extend(candidates_for_scale)
+                    # Mirror the outer parallel early-exit threshold.
+                    # Returning early here makes the ThreadPool cancellation
+                    # far more effective (otherwise we'd still sweep the rest
+                    # of the scales in this rotation task).
+                    if max(c["score"] for c in candidates_for_scale) > 0.85:
+                        return all_candidates
+                else:
+                    coarse_succeeded[scale] = False
+
+    # --- Full pass for scales that didn't yield coarse candidates ---
+    pending = [
+        j for j in scale_jobs if not coarse_succeeded.get(float(j["scale"]), False)
+    ]
+    if not pending:
+        return all_candidates
+
+    if used_torch:
+        try:
+            import torch
+
+            full_groups: Dict[Tuple[int, int], List[Dict]] = {}
+            for j in pending:
+                key = (int(j["hs"]), int(j["ws"]))
+                full_groups.setdefault(key, []).append(j)
+
+            for (hs, ws), jobs in full_groups.items():
+                flat_size = (tw - ws + 1) * (th - hs + 1)
+                if flat_size <= 0:
+                    continue
+                k = min(
+                    flat_size,
+                    max(top_match_count * top_match_scan_multiplier, top_match_count),
+                )
+                patches_np = [
+                    np.ascontiguousarray(
+                        j["patt_masked"].astype(np.float32, copy=False)
+                    )
+                    for j in jobs
+                ]
+                patches_t = torch.from_numpy(np.stack(patches_np, axis=0))[:, None].to(
+                    torch_ctx.device
+                )
+                vals_b, idxs_b, res_w = torch_ctx.topk_full_batch(patches_t, k)
+                for j, vals, idxs in zip(jobs, vals_b, idxs_b):
+                    scale = float(j["scale"])
+                    core_offset_x = float(j["core_offset_x"])
+                    core_offset_y = float(j["core_offset_y"])
+                    order = idxs
+                    all_candidates.extend(
+                        _scan_candidates_topk(
+                            vals,
+                            order,
+                            res_w,
+                            int(j["ws"]),
+                            int(j["hs"]),
+                            rot,
+                            scale,
+                            cell_w,
+                            cell_h,
+                            cols,
+                            rows,
+                            grid_center_weight,
+                            top_match_count,
+                            offset_x=0,
+                            offset_y=0,
+                            core_offset_x=core_offset_x,
+                            core_offset_y=core_offset_y,
+                        )
+                    )
+                if all_candidates and max(c["score"] for c in all_candidates) > 0.85:
+                    return all_candidates
+            return all_candidates
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Torch full batch topk failed; falling back: %s", exc)
+
+    # Fallback: original per-scale full match.
+    for j in pending:
+        ws = int(j["ws"])
+        hs = int(j["hs"])
+        scale = float(j["scale"])
+        res = _match_template(
+            template_blur_f32,
+            j["patt_masked"],
+            corr_method,
+            config,
+            torch_ctx,
+            template_kind="full",
+        )
+        if res.size:
+            flat = res.ravel()
+            order = _candidate_order(flat, top_match_count, top_match_scan_multiplier)
+            res_w = res.shape[1]
+            all_candidates.extend(
+                _scan_candidates(
+                    res,
+                    order,
+                    res_w,
+                    ws,
+                    hs,
+                    rot,
+                    scale,
+                    cell_w,
+                    cell_h,
+                    cols,
+                    rows,
+                    grid_center_weight,
+                    top_match_count,
+                    offset_x=0,
+                    offset_y=0,
+                    core_offset_x=float(j["core_offset_x"]),
+                    core_offset_y=float(j["core_offset_y"]),
+                )
+            )
+
+    return all_candidates
 
 
 def _match_template_multiscale_binary(
@@ -1645,55 +2824,439 @@ def _match_template_multiscale_binary(
     coarse_min_side = config.coarse_min_side
     grid_center_weight = config.grid_center_weight
 
+    if template_blur_f32 is None:
+        T = (
+            (template_bin_img * 255).astype(np.uint8)
+            if template_bin_img.max() <= 1
+            else template_bin_img.astype(np.uint8)
+        )
+        if blur_ksz is not None:
+            T_blur = cv2.GaussianBlur(T, blur_ksz, 0)
+        else:
+            T_blur = T.copy()
+        T_blur_f32 = T_blur.astype(np.float32)
+    else:
+        T_blur_f32 = template_blur_f32
+
+    th, tw = T_blur_f32.shape[:2]
+    cell_w = tw / cols
+    cell_h = th / rows
+
+    use_coarse = 0.0 < coarse_factor < 1.0 and min(tw, th) >= coarse_min_side
+    if use_coarse:
+        tw_c = max(1, int(round(tw * coarse_factor)))
+        th_c = max(1, int(round(th * coarse_factor)))
+        if tw_c < 2 or th_c < 2:
+            use_coarse = False
+            T_coarse_blur = None
+        else:
+            T_coarse_blur = _adaptive_coarse_resize(
+                T_blur_f32, coarse_factor, config.preserve_edges_coarse
+            )
+    else:
+        T_coarse_blur = None
+
+    torch_ctx: Optional[_TorchMatchContext] = None
+    if config.use_torch and corr_method == cv2.TM_CCORR_NORMED and _torch_available():
+        try:
+            chosen_device = (config.torch_device or _default_torch_device()).strip()
+            if chosen_device.lower() == "cpu":
+                # Torch CPU path is extremely slow and can be memory-hungry for this workload.
+                # Fall back to OpenCV to avoid surprising stalls.
+                logger.info("Torch device is CPU; falling back to OpenCV")
+                raise RuntimeError("Torch CPU device not supported in matcher")
+            torch_ctx = _TorchMatchContext(
+                T_blur_f32,
+                T_coarse_blur if use_coarse else None,
+                device=chosen_device,
+            )
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Torch init failed; using OpenCV: %s", exc)
+            torch_ctx = None
+
     # Check if we should use parallel execution
     # Threshold of 8 configs balances parallelization benefits vs. thread creation overhead.
     # Below 8, the overhead of thread management exceeds the performance gains.
     num_configs = len(scales) * len(rotations)
     use_parallel = config.parallel_matching and num_configs >= 8
 
+    # Torch fast-path: batch across *all* rotations+scales by patch size.
+    # This reduces the number of conv2d launches compared to per-rotation sweeps.
+    if (
+        config.use_torch
+        and corr_method == cv2.TM_CCORR_NORMED
+        and torch_ctx is not None
+        and torch_ctx.enabled
+    ):
+        P = (
+            (piece_bin_pattern * 255).astype(np.uint8)
+            if piece_bin_pattern.max() <= 1
+            else piece_bin_pattern.astype(np.uint8)
+        )
+        if piece_mask.max() <= 1:
+            M = (piece_mask > 0).astype(np.uint8) * 255
+        else:
+            M = (piece_mask > 127).astype(np.uint8) * 255
+
+        dilate_ker = MATCH_DILATE_KERNEL
+
+        jobs: List[Dict] = []
+        for rot in rotations:
+            P_r = _rotate_img(P, rot)
+            M_r = _rotate_img(M, rot)
+            M_r_raw01 = (M_r > 127).astype(np.uint8)
+            rot_knobs_x, rot_knobs_y = _rotate_knob_counts(knobs_x, knobs_y, rot)
+            core_center = _core_center_from_mask(M_r_raw01, rot_knobs_x, rot_knobs_y)
+            M_r = (M_r_raw01 > 0).astype(np.uint8) * 255
+            M_r = cv2.morphologyEx(M_r, cv2.MORPH_DILATE, dilate_ker, iterations=1)
+            M_r01 = (M_r > 127).astype(np.float32)
+
+            for scale in scales:
+                ws = int(round(P_r.shape[1] * scale))
+                hs = int(round(P_r.shape[0] * scale))
+                if ws <= 0 or hs <= 0 or ws >= tw or hs >= th:
+                    continue
+
+                scale_x = ws / float(P_r.shape[1])
+                scale_y = hs / float(P_r.shape[0])
+                core_offset_x = core_center[0] * scale_x
+                core_offset_y = core_center[1] * scale_y
+
+                patt_s = _resize_for_match(
+                    P_r, ws, hs, rethreshold=config.resize_rethreshold
+                )
+                mask_s = _resize_for_match(M_r01, ws, hs)
+                if blur_ksz is not None:
+                    patt_s_blur = cv2.GaussianBlur(patt_s, blur_ksz, 0).astype(
+                        np.float32
+                    )
+                else:
+                    patt_s_blur = patt_s.astype(np.float32)
+                patt_masked = patt_s_blur * mask_s
+
+                job = {
+                    "rot": int(rot),
+                    "scale": float(scale),
+                    "ws": int(ws),
+                    "hs": int(hs),
+                    "core_offset_x": float(core_offset_x),
+                    "core_offset_y": float(core_offset_y),
+                    "patt_masked": patt_masked,
+                }
+
+                if use_coarse and T_coarse_blur is not None and torch_ctx.has_coarse:
+                    ws_c = max(1, int(round(ws * coarse_factor)))
+                    hs_c = max(1, int(round(hs * coarse_factor)))
+                    if (
+                        1 < ws_c < T_coarse_blur.shape[1]
+                        and 1 < hs_c < T_coarse_blur.shape[0]
+                    ):
+                        patt_c = _adaptive_coarse_resize(
+                            patt_s_blur,
+                            coarse_factor,
+                            config.preserve_edges_coarse,
+                        )
+                        if patt_c.shape[:2] != (hs_c, ws_c):
+                            patt_c = cv2.resize(
+                                patt_c,
+                                (ws_c, hs_c),
+                                interpolation=cv2.INTER_AREA,
+                            )
+                        mask_c = cv2.resize(
+                            mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST
+                        )
+                        patt_masked_c = patt_c * mask_c
+                        job.update(
+                            {
+                                "ws_c": int(ws_c),
+                                "hs_c": int(hs_c),
+                                "patt_masked_c": patt_masked_c,
+                            }
+                        )
+                jobs.append(job)
+
+        if not jobs:
+            raise RuntimeError("No match found (binary matcher)")
+
+        # --- Coarse batched pass + ROI refinement (ROI stays OpenCV) ---
+        candidates: List[Dict] = []
+        coarse_hit: Dict[Tuple[int, float, int], bool] = {}
+        if use_coarse and T_coarse_blur is not None and torch_ctx.has_coarse:
+            coarse_groups: Dict[Tuple[int, int], List[int]] = {}
+            for idx, j in enumerate(jobs):
+                if "patt_masked_c" not in j:
+                    continue
+                key = (int(j["hs_c"]), int(j["ws_c"]))
+                coarse_groups.setdefault(key, []).append(idx)
+
+            for (hs_c, ws_c), idxs in coarse_groups.items():
+                try:
+                    import torch
+
+                    patches_np = [
+                        np.ascontiguousarray(
+                            jobs[i]["patt_masked_c"].astype(np.float32, copy=False)
+                        )
+                        for i in idxs
+                    ]
+                    patches_t = (
+                        torch.from_numpy(np.stack(patches_np, axis=0))[:, None]
+                        .to(torch_ctx.device)
+                        .to(dtype=torch.float32)
+                    )
+                    flat_size = (T_coarse_blur.shape[1] - ws_c + 1) * (
+                        T_coarse_blur.shape[0] - hs_c + 1
+                    )
+                    if flat_size <= 0:
+                        continue
+                    k = min(
+                        flat_size,
+                        max(coarse_top_k * top_match_scan_multiplier, coarse_top_k),
+                    )
+                    vals_b, idxs_b, res_w_c = torch_ctx.topk_coarse_batch(patches_t, k)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("Torch coarse batch failed: %s", exc)
+                    continue
+
+                for local_row, job_idx in enumerate(idxs):
+                    j = jobs[job_idx]
+                    rot = int(j["rot"])
+                    scale = float(j["scale"])
+                    ws = int(j["ws"])
+                    hs = int(j["hs"])
+                    core_offset_x = float(j["core_offset_x"])
+                    core_offset_y = float(j["core_offset_y"])
+                    patt_masked = j["patt_masked"]
+
+                    coarse_positions = _collect_coarse_positions_topk(
+                        vals_b[local_row],
+                        idxs_b[local_row],
+                        res_w_c,
+                        ws_c,
+                        hs_c,
+                        coarse_top_k,
+                    )
+                    if not coarse_positions:
+                        coarse_hit[(rot, scale, ws)] = False
+                        continue
+
+                    found_any = False
+                    for coarse in coarse_positions[:coarse_top_k]:
+                        x_c, y_c = coarse["tl"]
+                        x_full = int(round(x_c / coarse_factor))
+                        y_full = int(round(y_c / coarse_factor))
+                        x_full = max(0, min(x_full, tw - ws))
+                        y_full = max(0, min(y_full, th - hs))
+                        x0 = max(0, x_full - coarse_padding_pixels)
+                        y0 = max(0, y_full - coarse_padding_pixels)
+                        x1 = min(tw, x_full + ws + coarse_padding_pixels)
+                        y1 = min(th, y_full + hs + coarse_padding_pixels)
+                        roi = T_blur_f32[y0:y1, x0:x1]
+                        if roi.shape[0] < hs or roi.shape[1] < ws:
+                            continue
+                        res_fine = _match_template(
+                            roi,
+                            patt_masked,
+                            corr_method,
+                            config,
+                            torch_ctx,
+                            template_kind="roi",
+                        )
+                        if res_fine.size == 0:
+                            continue
+                        flat = res_fine.ravel()
+                        order = _candidate_order(
+                            flat, top_match_count, top_match_scan_multiplier
+                        )
+                        res_w = res_fine.shape[1]
+                        for idx_flat in order:
+                            if len(candidates) >= top_match_count * len(rotations):
+                                break
+                            y, x = divmod(int(idx_flat), res_w)
+                            x0f = x + x0
+                            y0f = y + y0
+                            cx = x0f + core_offset_x
+                            cy = y0f + core_offset_y
+                            base_score = float(res_fine[y, x])
+                            proximity = _grid_center_proximity(
+                                cx, cy, cell_w, cell_h, cols, rows
+                            )
+                            score = base_score + (grid_center_weight * proximity)
+                            cand = {
+                                "score": score,
+                                "score_raw": base_score,
+                                "grid_score": proximity,
+                                "rot": rot,
+                                "scale": scale,
+                                "col": int(cx / cell_w) + 1,
+                                "row": int(cy / cell_h) + 1,
+                                "tl": (int(x0f), int(y0f)),
+                                "br": (int(x0f + ws), int(y0f + hs)),
+                                "center": (float(cx), float(cy)),
+                            }
+                            if any(_candidate_is_close(cand, ex) for ex in candidates):
+                                continue
+                            candidates.append(cand)
+                            found_any = True
+                            break
+                    coarse_hit[(rot, scale, ws)] = found_any
+
+        # --- Full batched pass for remaining jobs ---
+        pending_idxs: List[int] = []
+        for idx, j in enumerate(jobs):
+            rot = int(j["rot"])
+            scale = float(j["scale"])
+            ws = int(j["ws"])
+            if coarse_hit.get((rot, scale, ws), False):
+                continue
+            pending_idxs.append(idx)
+
+        full_groups: Dict[Tuple[int, int], List[int]] = {}
+        for idx in pending_idxs:
+            j = jobs[idx]
+            key = (int(j["hs"]), int(j["ws"]))
+            full_groups.setdefault(key, []).append(idx)
+
+        for (hs, ws), idxs in full_groups.items():
+            flat_size = (tw - ws + 1) * (th - hs + 1)
+            if flat_size <= 0:
+                continue
+            k = min(
+                flat_size,
+                max(top_match_count * top_match_scan_multiplier, top_match_count),
+            )
+            try:
+                import torch
+
+                patches_np = [
+                    np.ascontiguousarray(
+                        jobs[i]["patt_masked"].astype(np.float32, copy=False)
+                    )
+                    for i in idxs
+                ]
+                patches_t = (
+                    torch.from_numpy(np.stack(patches_np, axis=0))[:, None]
+                    .to(torch_ctx.device)
+                    .to(dtype=torch.float32)
+                )
+                vals_b, idxs_b, res_w = torch_ctx.topk_full_batch(patches_t, k)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Torch full batch failed; falling back: %s", exc)
+                vals_b = None
+                idxs_b = None
+                res_w = 0
+
+            if vals_b is None or idxs_b is None:
+                for job_idx in idxs:
+                    j = jobs[job_idx]
+                    res = _match_template(
+                        T_blur_f32,
+                        j["patt_masked"],
+                        corr_method,
+                        config,
+                        torch_ctx,
+                        template_kind="full",
+                    )
+                    if res.size == 0:
+                        continue
+                    flat = res.ravel()
+                    order = _candidate_order(
+                        flat, top_match_count, top_match_scan_multiplier
+                    )
+                    res_w2 = res.shape[1]
+                    candidates.extend(
+                        _scan_candidates_topk(
+                            flat[order],
+                            order,
+                            res_w2,
+                            int(j["ws"]),
+                            int(j["hs"]),
+                            int(j["rot"]),
+                            float(j["scale"]),
+                            cell_w,
+                            cell_h,
+                            cols,
+                            rows,
+                            grid_center_weight,
+                            top_match_count,
+                            core_offset_x=float(j["core_offset_x"]),
+                            core_offset_y=float(j["core_offset_y"]),
+                        )
+                    )
+                continue
+
+            for local_row, job_idx in enumerate(idxs):
+                j = jobs[job_idx]
+                candidates.extend(
+                    _scan_candidates_topk(
+                        vals_b[local_row],
+                        idxs_b[local_row],
+                        res_w,
+                        int(j["ws"]),
+                        int(j["hs"]),
+                        int(j["rot"]),
+                        float(j["scale"]),
+                        cell_w,
+                        cell_h,
+                        cols,
+                        rows,
+                        grid_center_weight,
+                        top_match_count,
+                        core_offset_x=float(j["core_offset_x"]),
+                        core_offset_y=float(j["core_offset_y"]),
+                    )
+                )
+
+        if not candidates:
+            raise RuntimeError("No match found (binary matcher)")
+
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        top_matches: List[Dict] = []
+        for candidate in candidates:
+            _update_top_matches(top_matches, candidate, top_match_count)
+        best = top_matches[0]
+        return best, top_matches
+
     if use_parallel:
-        # Parallel path: use ThreadPoolExecutor for scale/rotation combinations
-
-        if template_blur_f32 is None:
-            T = (
-                (template_bin_img * 255).astype(np.uint8)
-                if template_bin_img.max() <= 1
-                else template_bin_img.astype(np.uint8)
-            )
-            if blur_ksz is not None:
-                T_blur = cv2.GaussianBlur(T, blur_ksz, 0)
-            else:
-                T_blur = T.copy()
-            T_blur_f32 = T_blur.astype(np.float32)
-        else:
-            T_blur_f32 = template_blur_f32
-
-        # Prepare coarse template if needed
-        th, tw = T_blur_f32.shape[:2]
-        use_coarse = 0.0 < coarse_factor < 1.0 and min(tw, th) >= coarse_min_side
-        if use_coarse:
-            T_coarse_blur = _adaptive_coarse_resize(
-                T_blur_f32, coarse_factor, config.preserve_edges_coarse
-            )
-        else:
-            T_coarse_blur = None
+        # Parallel path: use ThreadPoolExecutor across rotations, sweeping scales
+        # within each worker. This avoids re-rotating the piece/mask per scale.
 
         all_candidates = []
-        # Determine an appropriate number of worker threads based on CPU count
-        total_tasks = len(scales) * len(rotations)
         cpu_count = os.cpu_count() or 1
+        # When using torch (esp. on GPU/MPS), avoid duplicating per-rotation
+        # preprocessing across scale chunks. One task per rotation is enough.
+        if config.use_torch:
+            tasks_per_rotation = 1
+        else:
+            # Use more than one task per rotation when we have spare cores.
+            # This keeps the rotation reuse benefit while still saturating the CPU.
+            desired_tasks = min(cpu_count, len(rotations) * len(scales))
+            tasks_per_rotation = max(
+                1,
+                min(
+                    len(scales),
+                    int(math.ceil(desired_tasks / max(1, len(rotations)))),
+                ),
+            )
+        chunk_size = max(1, int(math.ceil(len(scales) / tasks_per_rotation)))
+        scale_chunks = [
+            scales[i : i + chunk_size] for i in range(0, len(scales), chunk_size)
+        ]
+
+        total_tasks = len(rotations) * len(scale_chunks)
         max_workers = min(total_tasks, cpu_count)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
-                    _match_scale_rotation_combo,
-                    scale,
+                    _match_rotation_scale_sweep,
                     rot,
+                    scale_chunk,
                     piece_bin_pattern,
                     piece_mask,
                     T_blur_f32,
                     T_coarse_blur,
+                    torch_ctx,
                     config,
                     knobs_x,
                     knobs_y,
@@ -1702,8 +3265,8 @@ def _match_template_multiscale_binary(
                     cols,
                     rows,
                 )
-                for scale in scales
                 for rot in rotations
+                for scale_chunk in scale_chunks
             ]
 
             for future in as_completed(futures):
@@ -1727,19 +3290,6 @@ def _match_template_multiscale_binary(
         return best, top_matches
 
     # Sequential path: original implementation with coarse-then-fine
-    if template_blur_f32 is None:
-        T = (
-            (template_bin_img * 255).astype(np.uint8)
-            if template_bin_img.max() <= 1
-            else template_bin_img.astype(np.uint8)
-        )
-        if blur_ksz is not None:
-            T_blur = cv2.GaussianBlur(T, blur_ksz, 0)
-        else:
-            T_blur = T.copy()
-        T_blur_f32 = T_blur.astype(np.float32)
-    else:
-        T_blur_f32 = template_blur_f32
     P = (
         (piece_bin_pattern * 255).astype(np.uint8)
         if piece_bin_pattern.max() <= 1
@@ -1750,142 +3300,8 @@ def _match_template_multiscale_binary(
     else:
         M = (piece_mask > 127).astype(np.uint8) * 255
 
-    th, tw = T_blur_f32.shape[:2]
-    cell_w = tw / cols
-    cell_h = th / rows
-
     combo_candidates: List[Dict] = []
     dilate_ker = MATCH_DILATE_KERNEL
-
-    use_coarse = 0.0 < coarse_factor < 1.0 and min(tw, th) >= coarse_min_side
-    if use_coarse:
-        tw_c = max(1, int(round(tw * coarse_factor)))
-        th_c = max(1, int(round(th * coarse_factor)))
-        if tw_c < 2 or th_c < 2:
-            use_coarse = False
-            T_coarse_blur = None
-        else:
-            T_coarse_blur = _adaptive_coarse_resize(
-                T_blur_f32, coarse_factor, config.preserve_edges_coarse
-            )
-    else:
-        T_coarse_blur = None
-
-    def _candidate_order(flat: np.ndarray, max_len: int) -> np.ndarray:
-        if flat.size <= max_len:
-            return np.argsort(flat)[::-1]
-        scan_count = min(flat.size, max(max_len * top_match_scan_multiplier, max_len))
-        order = np.argpartition(flat, -scan_count)[-scan_count:]
-        return order[np.argsort(flat[order])[::-1]]
-
-    def _scan_candidates(
-        res: np.ndarray,
-        order: np.ndarray,
-        res_w: int,
-        ws: int,
-        hs: int,
-        offset_x: int = 0,
-        offset_y: int = 0,
-        core_offset_x: Optional[float] = None,
-        core_offset_y: Optional[float] = None,
-    ) -> List[Dict]:
-        combo_best_local: List[Dict] = []
-        if core_offset_x is None:
-            core_offset_x = ws / 2
-        if core_offset_y is None:
-            core_offset_y = hs / 2
-        for idx in order:
-            if len(combo_best_local) >= top_match_count:
-                break
-            y, x = divmod(int(idx), res_w)
-            x0 = x + offset_x
-            y0 = y + offset_y
-            cx = x0 + core_offset_x
-            cy = y0 + core_offset_y
-            base_score = float(res[y, x])
-            proximity = _grid_center_proximity(cx, cy, cell_w, cell_h, cols, rows)
-            score = base_score + (grid_center_weight * proximity)
-            tl = (int(x0), int(y0))
-            br = (int(x0 + ws), int(y0 + hs))
-            candidate = {
-                "score": score,
-                "score_raw": base_score,
-                "grid_score": proximity,
-                "rot": rot,
-                "scale": scale,
-                "col": int(cx / cell_w) + 1,
-                "row": int(cy / cell_h) + 1,
-                "tl": tl,
-                "br": br,
-                "center": (float(cx), float(cy)),
-            }
-            if any(
-                _candidate_is_close(candidate, existing)
-                for existing in combo_best_local
-            ):
-                continue
-            combo_best_local.append(candidate)
-        return combo_best_local
-
-    def _collect_matches(
-        res: np.ndarray,
-        ws: int,
-        hs: int,
-        offset_x: int = 0,
-        offset_y: int = 0,
-        core_offset_x: Optional[float] = None,
-        core_offset_y: Optional[float] = None,
-    ) -> List[Dict]:
-        flat = res.ravel()
-        order = _candidate_order(flat, top_match_count)
-        res_w = res.shape[1]
-        combo_best = _scan_candidates(
-            res,
-            order,
-            res_w,
-            ws,
-            hs,
-            offset_x=offset_x,
-            offset_y=offset_y,
-            core_offset_x=core_offset_x,
-            core_offset_y=core_offset_y,
-        )
-        if len(combo_best) < top_match_count and order.size < flat.size:
-            order = np.argsort(flat)[::-1]
-            combo_best = _scan_candidates(
-                res,
-                order,
-                res_w,
-                ws,
-                hs,
-                offset_x=offset_x,
-                offset_y=offset_y,
-                core_offset_x=core_offset_x,
-                core_offset_y=core_offset_y,
-            )
-        return combo_best
-
-    def _collect_coarse_positions(
-        res: np.ndarray, ws: int, hs: int, top_k: int
-    ) -> List[Dict]:
-        flat = res.ravel()
-        order = _candidate_order(flat, top_k)
-        res_w = res.shape[1]
-        positions: List[Dict] = []
-        for idx in order:
-            if len(positions) >= top_k:
-                break
-            y, x = divmod(int(idx), res_w)
-            candidate = {
-                "score": float(res[y, x]),
-                "tl": (int(x), int(y)),
-                "br": (int(x + ws), int(y + hs)),
-                "center": (float(x + ws / 2), float(y + hs / 2)),
-            }
-            if any(_candidate_is_close(candidate, existing) for existing in positions):
-                continue
-            positions.append(candidate)
-        return positions
 
     for rot in rotations:
         P_r = _rotate_img(P, rot)
@@ -1897,101 +3313,410 @@ def _match_template_multiscale_binary(
         M_r = cv2.morphologyEx(M_r, cv2.MORPH_DILATE, dilate_ker, iterations=1)
         M_r01 = (M_r > 127).astype(np.float32)
 
-        for scale in scales:
-            ws = int(round(P_r.shape[1] * scale))
-            hs = int(round(P_r.shape[0] * scale))
-            if ws <= 0 or hs <= 0 or ws >= tw or hs >= th:
-                continue
-            scale_x = ws / float(P_r.shape[1])
-            scale_y = hs / float(P_r.shape[0])
-            core_offset_x = core_center[0] * scale_x
-            core_offset_y = core_center[1] * scale_y
+        # Optional torch-side preprocessing to avoid per-scale CPU work and uploads.
+        torch_p_rot = None
+        torch_m_rot = None
+        torch_can_preprocess = (
+            config.use_torch
+            and corr_method == cv2.TM_CCORR_NORMED
+            and torch_ctx is not None
+            and torch_ctx.enabled
+            and not config.resize_rethreshold
+            and not use_coarse
+        )
+        if torch_can_preprocess:
+            try:
+                import torch
 
-            patt_s = _resize_for_match(
-                P_r, ws, hs, rethreshold=config.resize_rethreshold
-            )
-            mask_s = _resize_for_match(M_r01, ws, hs)
+                torch_p_rot = torch.from_numpy(
+                    np.ascontiguousarray(P_r.astype(np.float32, copy=False))
+                )[None, None].to(torch_ctx.device)
+                torch_m_rot = torch.from_numpy(
+                    np.ascontiguousarray(M_r01.astype(np.float32, copy=False))
+                )[None, None].to(torch_ctx.device)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning("Torch preprocess init failed: %s", exc)
+                torch_p_rot = None
+                torch_m_rot = None
+        rot_candidates: List[Dict] = []
 
-            if blur_ksz is not None:
-                patt_s_blur = cv2.GaussianBlur(patt_s, blur_ksz, 0).astype(np.float32)
-            else:
-                patt_s_blur = patt_s.astype(np.float32)
-
-            patt_masked = patt_s_blur * mask_s
-            combo_added = False
-
-            if use_coarse and T_coarse_blur is not None:
-                ws_c = max(1, int(round(ws * coarse_factor)))
-                hs_c = max(1, int(round(hs * coarse_factor)))
-                if (
-                    1 < ws_c < T_coarse_blur.shape[1]
-                    and 1 < hs_c < T_coarse_blur.shape[0]
-                ):
-                    patt_c = _adaptive_coarse_resize(
-                        patt_s_blur, coarse_factor, config.preserve_edges_coarse
-                    )
-                    # Resize to exact dimensions after sharpening
-                    if patt_c.shape[:2] != (hs_c, ws_c):
-                        patt_c = cv2.resize(
-                            patt_c, (ws_c, hs_c), interpolation=cv2.INTER_AREA
-                        )
-                    mask_c = cv2.resize(
-                        mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST
-                    )
-                    patt_masked_c = patt_c * mask_c
-                    res_c = cv2.matchTemplate(T_coarse_blur, patt_masked_c, corr_method)
-                    if res_c.size:
-                        coarse_positions = _collect_coarse_positions(
-                            res_c, ws_c, hs_c, coarse_top_k
-                        )
-                        seen_rois = set()
-                        for coarse in coarse_positions:
-                            x_c, y_c = coarse["tl"]
-                            x_full = int(round(x_c / coarse_factor))
-                            y_full = int(round(y_c / coarse_factor))
-                            x_full = max(0, min(x_full, tw - ws))
-                            y_full = max(0, min(y_full, th - hs))
-                            x0 = max(0, x_full - coarse_padding_pixels)
-                            y0 = max(0, y_full - coarse_padding_pixels)
-                            x1 = min(tw, x_full + ws + coarse_padding_pixels)
-                            y1 = min(th, y_full + hs + coarse_padding_pixels)
-                            roi_key = (x0, y0, x1, y1)
-                            if roi_key in seen_rois:
-                                continue
-                            seen_rois.add(roi_key)
-                            roi = T_blur_f32[y0:y1, x0:x1]
-                            if roi.shape[0] < hs or roi.shape[1] < ws:
-                                continue
-                            res = cv2.matchTemplate(roi, patt_masked, corr_method)
-                            if res.size == 0:
-                                continue
-                            combo_best = _collect_matches(
-                                res,
-                                ws,
-                                hs,
-                                offset_x=x0,
-                                offset_y=y0,
-                                core_offset_x=core_offset_x,
-                                core_offset_y=core_offset_y,
-                            )
-                            if combo_best:
-                                combo_candidates.extend(combo_best)
-                                combo_added = True
-
-            if not combo_added:
-                res = cv2.matchTemplate(T_blur_f32, patt_masked, corr_method)
-
-                if res.size == 0:
+        def _run_scales(scale_list: List[float]) -> None:
+            for scale in scale_list:
+                ws = int(round(P_r.shape[1] * scale))
+                hs = int(round(P_r.shape[0] * scale))
+                if ws <= 0 or hs <= 0 or ws >= tw or hs >= th:
                     continue
+                scale_x = ws / float(P_r.shape[1])
+                scale_y = hs / float(P_r.shape[0])
+                core_offset_x = core_center[0] * scale_x
+                core_offset_y = core_center[1] * scale_y
 
-                combo_best = _collect_matches(
-                    res,
-                    ws,
-                    hs,
-                    core_offset_x=core_offset_x,
-                    core_offset_y=core_offset_y,
-                )
-                combo_candidates.extend(combo_best)
+                patt_s = None
+                mask_s = None
+                patt_s_blur = None
+                patt_masked = None
+
+                # Coarse path needs CPU-side patt/mask for ROI refinement.
+                if use_coarse:
+                    patt_s = _resize_for_match(
+                        P_r, ws, hs, rethreshold=config.resize_rethreshold
+                    )
+                    mask_s = _resize_for_match(M_r01, ws, hs)
+
+                    if blur_ksz is not None:
+                        patt_s_blur = cv2.GaussianBlur(patt_s, blur_ksz, 0).astype(
+                            np.float32
+                        )
+                    else:
+                        patt_s_blur = patt_s.astype(np.float32)
+
+                    patt_masked = patt_s_blur * mask_s
+
+                combo_added = False
+
+                if use_coarse and T_coarse_blur is not None:
+                    ws_c = max(1, int(round(ws * coarse_factor)))
+                    hs_c = max(1, int(round(hs * coarse_factor)))
+                    if (
+                        1 < ws_c < T_coarse_blur.shape[1]
+                        and 1 < hs_c < T_coarse_blur.shape[0]
+                    ):
+                        if patt_s_blur is None or mask_s is None:
+                            continue
+                        patt_c = _adaptive_coarse_resize(
+                            patt_s_blur, coarse_factor, config.preserve_edges_coarse
+                        )
+                        if patt_c.shape[:2] != (hs_c, ws_c):
+                            patt_c = cv2.resize(
+                                patt_c, (ws_c, hs_c), interpolation=cv2.INTER_AREA
+                            )
+                        mask_c = cv2.resize(
+                            mask_s, (ws_c, hs_c), interpolation=cv2.INTER_NEAREST
+                        )
+                        patt_masked_c = patt_c * mask_c
+                        coarse_positions: List[Dict] = []
+                        used_torch_coarse = (
+                            config.use_torch
+                            and corr_method == cv2.TM_CCORR_NORMED
+                            and torch_ctx is not None
+                            and torch_ctx.enabled
+                            and torch_ctx.has_coarse
+                        )
+                        if used_torch_coarse:
+                            try:
+                                flat_size = (T_coarse_blur.shape[1] - ws_c + 1) * (
+                                    T_coarse_blur.shape[0] - hs_c + 1
+                                )
+                                if flat_size > 0:
+                                    k = min(
+                                        flat_size,
+                                        max(
+                                            coarse_top_k * top_match_scan_multiplier,
+                                            coarse_top_k,
+                                        ),
+                                    )
+                                    for _ in range(3):
+                                        vals_c, idxs_c, res_w_c = torch_ctx.topk_coarse(
+                                            patt_masked_c, k
+                                        )
+                                        coarse_positions = (
+                                            _collect_coarse_positions_topk(
+                                                vals_c,
+                                                idxs_c,
+                                                res_w_c,
+                                                ws_c,
+                                                hs_c,
+                                                coarse_top_k,
+                                            )
+                                        )
+                                        if (
+                                            len(coarse_positions) >= coarse_top_k
+                                            or k >= flat_size
+                                        ):
+                                            break
+                                        k = min(flat_size, k * 4)
+                            except Exception as exc:  # pragma: no cover
+                                logger.warning("Torch coarse topk failed: %s", exc)
+
+                        if not coarse_positions:
+                            res_c = _match_template(
+                                T_coarse_blur,
+                                patt_masked_c,
+                                corr_method,
+                                config,
+                                torch_ctx,
+                                template_kind="coarse",
+                            )
+                            if res_c.size:
+                                flat = res_c.ravel()
+                                order = _candidate_order(
+                                    flat, coarse_top_k, top_match_scan_multiplier
+                                )
+                                values = flat[order]
+                                coarse_positions = _collect_coarse_positions_topk(
+                                    values,
+                                    order,
+                                    res_c.shape[1],
+                                    ws_c,
+                                    hs_c,
+                                    coarse_top_k,
+                                )
+
+                        if coarse_positions:
+                            seen_rois = set()
+                            for coarse in coarse_positions:
+                                x_c, y_c = coarse["tl"]
+                                x_full = int(round(x_c / coarse_factor))
+                                y_full = int(round(y_c / coarse_factor))
+                                x_full = max(0, min(x_full, tw - ws))
+                                y_full = max(0, min(y_full, th - hs))
+                                x0 = max(0, x_full - coarse_padding_pixels)
+                                y0 = max(0, y_full - coarse_padding_pixels)
+                                x1 = min(tw, x_full + ws + coarse_padding_pixels)
+                                y1 = min(th, y_full + hs + coarse_padding_pixels)
+                                roi_key = (x0, y0, x1, y1)
+                                if roi_key in seen_rois:
+                                    continue
+                                seen_rois.add(roi_key)
+                                roi = T_blur_f32[y0:y1, x0:x1]
+                                if roi.shape[0] < hs or roi.shape[1] < ws:
+                                    continue
+                                if patt_masked is None:
+                                    continue
+                                res = _match_template(
+                                    roi,
+                                    patt_masked,
+                                    corr_method,
+                                    config,
+                                    torch_ctx,
+                                    template_kind="roi",
+                                )
+                                if res.size == 0:
+                                    continue
+                                combo_best = _collect_matches(
+                                    res,
+                                    ws,
+                                    hs,
+                                    rot,
+                                    scale,
+                                    cell_w,
+                                    cell_h,
+                                    cols,
+                                    rows,
+                                    grid_center_weight,
+                                    top_match_count,
+                                    top_match_scan_multiplier,
+                                    offset_x=x0,
+                                    offset_y=y0,
+                                    core_offset_x=core_offset_x,
+                                    core_offset_y=core_offset_y,
+                                )
+                                if combo_best:
+                                    rot_candidates.extend(combo_best)
+                                    combo_added = True
+
+                if not combo_added:
+                    used_torch_full = (
+                        config.use_torch
+                        and corr_method == cv2.TM_CCORR_NORMED
+                        and torch_ctx is not None
+                        and torch_ctx.enabled
+                    )
+
+                    # If coarse matching is disabled and we can preprocess on-device,
+                    # build the patch tensor directly on torch_ctx.device and avoid uploads.
+                    if (
+                        used_torch_full
+                        and not use_coarse
+                        and torch_p_rot is not None
+                        and torch_m_rot is not None
+                    ):
+                        try:
+                            import torch.nn.functional as F
+
+                            in_h = int(torch_p_rot.shape[-2])
+                            in_w = int(torch_p_rot.shape[-1])
+                            if ws < in_w or hs < in_h:
+                                mode = "area"
+                                patt_s_t = F.interpolate(
+                                    torch_p_rot,
+                                    size=(hs, ws),
+                                    mode=mode,
+                                )
+                            else:
+                                patt_s_t = F.interpolate(
+                                    torch_p_rot,
+                                    size=(hs, ws),
+                                    mode="bilinear",
+                                    align_corners=False,
+                                )
+                            mask_s_t = F.interpolate(
+                                torch_m_rot,
+                                size=(hs, ws),
+                                mode="nearest",
+                            )
+                            if blur_ksz is not None:
+                                patt_s_blur_t = _torch_gaussian_blur2d(
+                                    patt_s_t, blur_ksz
+                                )
+                            else:
+                                patt_s_blur_t = patt_s_t
+                            patt_masked_t = patt_s_blur_t * mask_s_t
+
+                            flat_size = (tw - ws + 1) * (th - hs + 1)
+                            if flat_size <= 0:
+                                return
+                            k = min(
+                                flat_size,
+                                max(
+                                    top_match_count * top_match_scan_multiplier,
+                                    top_match_count,
+                                ),
+                            )
+                            combo_best_topk: List[Dict] = []
+                            for _ in range(3):
+                                vals, idxs, res_w = torch_ctx.topk_full(
+                                    patt_masked_t, k
+                                )
+                                combo_best_topk = _scan_candidates_topk(
+                                    vals,
+                                    idxs,
+                                    res_w,
+                                    ws,
+                                    hs,
+                                    rot,
+                                    scale,
+                                    cell_w,
+                                    cell_h,
+                                    cols,
+                                    rows,
+                                    grid_center_weight,
+                                    top_match_count,
+                                    core_offset_x=core_offset_x,
+                                    core_offset_y=core_offset_y,
+                                )
+                                if (
+                                    len(combo_best_topk) >= top_match_count
+                                    or k >= flat_size
+                                ):
+                                    break
+                                k = min(flat_size, k * 4)
+                            if combo_best_topk:
+                                rot_candidates.extend(combo_best_topk)
+                                return
+                        except Exception as exc:  # pragma: no cover
+                            logger.warning(
+                                "Torch preprocess full match failed: %s", exc
+                            )
+
+                    if used_torch_full:
+                        try:
+                            if patt_masked is None:
+                                patt_s = _resize_for_match(
+                                    P_r,
+                                    ws,
+                                    hs,
+                                    rethreshold=config.resize_rethreshold,
+                                )
+                                mask_s = _resize_for_match(M_r01, ws, hs)
+
+                                if blur_ksz is not None:
+                                    patt_s_blur = cv2.GaussianBlur(
+                                        patt_s, blur_ksz, 0
+                                    ).astype(np.float32)
+                                else:
+                                    patt_s_blur = patt_s.astype(np.float32)
+
+                                patt_masked = patt_s_blur * mask_s
+
+                            flat_size = (tw - ws + 1) * (th - hs + 1)
+                            if flat_size <= 0:
+                                return
+                            k = min(
+                                flat_size,
+                                max(
+                                    top_match_count * top_match_scan_multiplier,
+                                    top_match_count,
+                                ),
+                            )
+                            combo_best_topk: List[Dict] = []
+                            for _ in range(3):
+                                vals, idxs, res_w = torch_ctx.topk_full(patt_masked, k)
+                                combo_best_topk = _scan_candidates_topk(
+                                    vals,
+                                    idxs,
+                                    res_w,
+                                    ws,
+                                    hs,
+                                    rot,
+                                    scale,
+                                    cell_w,
+                                    cell_h,
+                                    cols,
+                                    rows,
+                                    grid_center_weight,
+                                    top_match_count,
+                                    core_offset_x=core_offset_x,
+                                    core_offset_y=core_offset_y,
+                                )
+                                if (
+                                    len(combo_best_topk) >= top_match_count
+                                    or k >= flat_size
+                                ):
+                                    break
+                                k = min(flat_size, k * 4)
+                            if combo_best_topk:
+                                rot_candidates.extend(combo_best_topk)
+                                return
+                        except Exception as exc:  # pragma: no cover
+                            logger.warning("Torch full topk failed: %s", exc)
+
+                    if patt_masked is None:
+                        patt_s = _resize_for_match(
+                            P_r, ws, hs, rethreshold=config.resize_rethreshold
+                        )
+                        mask_s = _resize_for_match(M_r01, ws, hs)
+                        if blur_ksz is not None:
+                            patt_s_blur = cv2.GaussianBlur(patt_s, blur_ksz, 0).astype(
+                                np.float32
+                            )
+                        else:
+                            patt_s_blur = patt_s.astype(np.float32)
+                        patt_masked = patt_s_blur * mask_s
+
+                    res = _match_template(
+                        T_blur_f32,
+                        patt_masked,
+                        corr_method,
+                        config,
+                        torch_ctx,
+                        template_kind="full",
+                    )
+
+                    if res.size == 0:
+                        return
+
+                    combo_best = _collect_matches(
+                        res,
+                        ws,
+                        hs,
+                        rot,
+                        scale,
+                        cell_w,
+                        cell_h,
+                        cols,
+                        rows,
+                        grid_center_weight,
+                        top_match_count,
+                        top_match_scan_multiplier,
+                        core_offset_x=core_offset_x,
+                        core_offset_y=core_offset_y,
+                    )
+                    rot_candidates.extend(combo_best)
+
+        _run_scales(list(scales))
+
+        combo_candidates.extend(rot_candidates)
 
     if not combo_candidates:
         raise RuntimeError("No match found (binary matcher)")
@@ -2275,6 +4000,43 @@ def find_piece_in_template(
     template_rotation: Optional[int] = None,
     matcher_config: Optional[MatcherConfig] = None,
 ) -> MatchPayload:
+    piece_bgr = _load_image(piece_image_path)
+    return find_piece_in_template_bgr(
+        piece_bgr,
+        template_image_path,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
+        auto_align=auto_align,
+        infer_knobs=infer_knobs,
+        template_rotation=template_rotation,
+        matcher_config=matcher_config,
+    )
+
+
+def find_piece_in_template_bgr(
+    piece_bgr: np.ndarray,
+    template_image_path: str,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    auto_align: bool = False,
+    infer_knobs: Optional[bool] = None,
+    template_rotation: Optional[int] = None,
+    matcher_config: Optional[MatcherConfig] = None,
+) -> MatchPayload:
+    """Like find_piece_in_template, but accepts a BGR numpy array for the piece.
+
+    This avoids repeated disk I/O when solving multi-piece images.
+    """
+
+    if piece_bgr is None:
+        raise ValueError("piece_bgr must be a numpy array")
+    if piece_bgr.ndim == 2:
+        piece = cv2.cvtColor(piece_bgr, cv2.COLOR_GRAY2BGR)
+    elif piece_bgr.ndim == 3 and piece_bgr.shape[2] == 4:
+        piece = cv2.cvtColor(piece_bgr, cv2.COLOR_BGRA2BGR)
+    else:
+        piece = piece_bgr
+
     config = matcher_config or build_matcher_config()
     profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
     profile = profile_value not in ("", "0", "false", "no")
@@ -2291,7 +4053,6 @@ def find_piece_in_template(
     if profile:
         marks.append(("template", time.perf_counter()))
 
-    piece = _load_image(piece_image_path)
     piece = _pad_piece_image(piece)
     if profile:
         marks.append(("piece", time.perf_counter()))

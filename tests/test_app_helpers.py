@@ -1,35 +1,102 @@
 """Unit tests for app.py helper functions"""
 
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
 import numpy as np
 import pytest
-from unittest.mock import patch
-from pathlib import Path
-import tempfile
 from PIL import Image
 
 # Import the functions we need to test
-from app import _stack_images_vertical, _annotate_pair_image
+from wcmbot.viz import annotate_pair_image, stack_images_vertical
+
+
+def test_build_multipiece_views_accepts_matchpayload_last_result(monkeypatch):
+    import app
+    from wcmbot.matcher import MatchPayload
+
+    template_rgb = np.zeros((20, 20, 3), dtype=np.uint8)
+    template_bin = np.zeros((20, 20), dtype=bool)
+    piece_rgb = np.zeros((10, 10, 3), dtype=np.uint8)
+    piece_mask = np.ones((10, 10), dtype=bool)
+    piece_bin = np.ones((10, 10), dtype=bool)
+    payload = MatchPayload(
+        template_rgb=template_rgb,
+        template_bin=template_bin,
+        piece_rgb=piece_rgb,
+        piece_mask=piece_mask,
+        piece_bin=piece_bin,
+        matches=[
+            {
+                "tl": (5, 5),
+                "br": (15, 15),
+                "center": (10, 10),
+                "rot": 0,
+                "scale": 1.0,
+                "score": 0.9,
+                "row": 0,
+                "col": 0,
+                "contours": [],
+            }
+        ],
+        template_shape=(20, 20),
+    )
+
+    dummy_zoom_focus = np.ones((3, 3, 3), dtype=np.uint8) * 11
+    dummy_zoom_pair = np.ones((4, 4, 3), dtype=np.uint8) * 22
+    dummy_zoom_piece = np.ones((5, 5, 3), dtype=np.uint8) * 33
+
+    calls = {"count": 0}
+
+    def fake_render_primary_views(arg_payload, match_index):
+        calls["count"] += 1
+        assert arg_payload is payload
+        assert match_index == 0
+        return {
+            "zoom_focus": dummy_zoom_focus,
+            "zoom_pair": dummy_zoom_pair,
+            "zoom_piece": dummy_zoom_piece,
+        }
+
+    monkeypatch.setattr(app, "render_primary_views", fake_render_primary_views)
+    monkeypatch.setattr(app, "make_zoomable_plot", lambda img: img)
+    monkeypatch.setattr(app, "TEMPLATE_IMAGES", {"dummy": template_rgb})
+
+    batch_state = {
+        "piece_states": [],
+        "grid_overview": np.zeros((8, 8, 3), dtype=np.uint8),
+        "template_rgb": template_rgb,
+        "template_id": "dummy",
+        "rotation": 0,
+    }
+
+    views = app._build_multipiece_views_from_state(batch_state, last_result=payload)
+    assert calls["count"] == 1
+    assert np.array_equal(views["zoom_focus"], dummy_zoom_focus)
+    assert np.array_equal(views["zoom_pair"], dummy_zoom_pair)
+    assert np.array_equal(views["zoom_piece"], dummy_zoom_piece)
 
 
 class TestStackImagesVertical:
-    """Tests for _stack_images_vertical helper function"""
+    """Tests for stack_images_vertical helper function"""
 
     def test_empty_list_returns_none(self):
         """Test that empty list returns None"""
-        result, heights = _stack_images_vertical([])
+        result, heights = stack_images_vertical([])
         assert result is None
         assert heights == []
 
     def test_list_with_all_none_images_returns_none(self):
         """Test that list with all None images returns None"""
-        result, heights = _stack_images_vertical([None, None, None])
+        result, heights = stack_images_vertical([None, None, None])
         assert result is None
         assert heights == []
 
     def test_single_rgb_image(self):
         """Test stacking a single RGB image"""
         img = np.ones((100, 50, 3), dtype=np.uint8) * 128
-        result, heights = _stack_images_vertical([img])
+        result, heights = stack_images_vertical([img])
         assert result is not None
         assert result.shape == (100, 50, 3)
         assert result.dtype == np.uint8
@@ -38,7 +105,7 @@ class TestStackImagesVertical:
     def test_single_grayscale_image_converted_to_rgb(self):
         """Test that grayscale image is converted to RGB"""
         img = np.ones((100, 50), dtype=np.uint8) * 128
-        result, heights = _stack_images_vertical([img])
+        result, heights = stack_images_vertical([img])
         assert result is not None
         assert result.shape == (100, 50, 3)
         assert result.dtype == np.uint8
@@ -49,7 +116,7 @@ class TestStackImagesVertical:
         img1 = np.ones((100, 50, 3), dtype=np.uint8) * 128
         img2 = np.ones((80, 50, 3), dtype=np.uint8) * 64
         gap = 10
-        result, heights = _stack_images_vertical([img1, img2], gap=gap)
+        result, heights = stack_images_vertical([img1, img2], gap=gap)
         assert result is not None
         # Total height should be sum of heights + gap
         assert result.shape[0] == 100 + 80 + gap
@@ -62,7 +129,7 @@ class TestStackImagesVertical:
         """Test that images with different widths are left-aligned"""
         img1 = np.ones((100, 50, 3), dtype=np.uint8) * 128
         img2 = np.ones((80, 30, 3), dtype=np.uint8) * 64
-        result, heights = _stack_images_vertical([img1, img2])
+        result, heights = stack_images_vertical([img1, img2])
         assert result is not None
         # Width should be max width
         assert result.shape[1] == 50
@@ -73,7 +140,7 @@ class TestStackImagesVertical:
         img1 = np.ones((100, 200, 3), dtype=np.uint8) * 128
         img2 = np.ones((80, 150, 3), dtype=np.uint8) * 64
         max_width = 100
-        result, heights = _stack_images_vertical([img1, img2], max_width=max_width)
+        result, heights = stack_images_vertical([img1, img2], max_width=max_width)
         assert result is not None
         # Width should be scaled to max_width
         assert result.shape[1] == max_width
@@ -83,7 +150,7 @@ class TestStackImagesVertical:
     def test_float_images_converted_to_uint8(self):
         """Test that float images are converted to uint8"""
         img = np.ones((100, 50, 3), dtype=np.float32) * 128.0
-        result, heights = _stack_images_vertical([img])
+        result, heights = stack_images_vertical([img])
         assert result is not None
         assert result.dtype == np.uint8
         assert heights == [100]
@@ -91,7 +158,7 @@ class TestStackImagesVertical:
     def test_images_clipped_to_valid_range(self):
         """Test that images are clipped to [0, 255] range"""
         img = np.ones((100, 50, 3), dtype=np.float32) * 300.0  # Out of range
-        result, heights = _stack_images_vertical([img])
+        result, heights = stack_images_vertical([img])
         assert result is not None
         assert np.all(result <= 255)
         assert np.all(result >= 0)
@@ -102,7 +169,7 @@ class TestStackImagesVertical:
         img1 = np.ones((10, 10, 3), dtype=np.uint8) * 100
         img2 = np.ones((10, 10, 3), dtype=np.uint8) * 100
         background = 200
-        result, heights = _stack_images_vertical(
+        result, heights = stack_images_vertical(
             [img1, img2], gap=5, background=background
         )
         assert result is not None
@@ -116,7 +183,7 @@ class TestStackImagesVertical:
         img1 = np.ones((100, 50, 3), dtype=np.uint8) * 128
         img2 = None
         img3 = np.ones((80, 50, 3), dtype=np.uint8) * 64
-        result, heights = _stack_images_vertical([img1, img2, img3])
+        result, heights = stack_images_vertical([img1, img2, img3])
         assert result is not None
         # Should only stack img1 and img3
         assert result.shape[0] == 100 + 80 + 8  # default gap is 8
@@ -124,13 +191,13 @@ class TestStackImagesVertical:
 
 
 class TestAnnotatePairImage:
-    """Tests for _annotate_pair_image helper function"""
+    """Tests for annotate_pair_image helper function"""
 
     def test_annotate_simple_image(self):
         """Test basic annotation on an image"""
         img = np.ones((200, 200, 3), dtype=np.uint8) * 128
         label = "Test"
-        result = _annotate_pair_image(img, label)
+        result = annotate_pair_image(img, label)
         assert result is not None
         assert result.shape == img.shape
         assert result.dtype == np.uint8
@@ -142,14 +209,14 @@ class TestAnnotatePairImage:
         img = np.ones((200, 200, 3), dtype=np.uint8) * 128
         img_copy = img.copy()
         label = "Test"
-        _annotate_pair_image(img, label)
+        annotate_pair_image(img, label)
         assert np.array_equal(img, img_copy)
 
     def test_annotate_with_long_label(self):
         """Test annotation with a long label"""
         img = np.ones((200, 200, 3), dtype=np.uint8) * 128
         label = "This is a very long label"
-        result = _annotate_pair_image(img, label)
+        result = annotate_pair_image(img, label)
         assert result is not None
         assert result.shape == img.shape
 
@@ -157,7 +224,7 @@ class TestAnnotatePairImage:
         """Test annotation with an empty label"""
         img = np.ones((200, 200, 3), dtype=np.uint8) * 128
         label = ""
-        result = _annotate_pair_image(img, label)
+        result = annotate_pair_image(img, label)
         assert result is not None
         assert result.shape == img.shape
 
@@ -165,7 +232,7 @@ class TestAnnotatePairImage:
         """Test annotation on a small image"""
         img = np.ones((50, 50, 3), dtype=np.uint8) * 128
         label = "Small"
-        result = _annotate_pair_image(img, label)
+        result = annotate_pair_image(img, label)
         assert result is not None
         assert result.shape == img.shape
 
@@ -173,7 +240,7 @@ class TestAnnotatePairImage:
         """Test that text is placed in the top-left area with padding"""
         img = np.ones((200, 200, 3), dtype=np.uint8) * 128
         label = "Test"
-        result = _annotate_pair_image(img, label)
+        result = annotate_pair_image(img, label)
         # Check that top-left area has been modified (white background and black text)
         top_left_region = result[0:30, 0:80]
         # Should have some white pixels for the background rectangle
@@ -194,8 +261,9 @@ class TestOnPieceChange:
         """Sample outputs that match the expected structure"""
         # Start from _no_update_outputs to get the correct overall shape,
         # then override location, summary, state, and idx for testing.
-        from app import VIEW_KEYS, MAX_DYNAMIC_BUTTONS
         import gradio as gr
+
+        from app import MAX_DYNAMIC_BUTTONS, VIEW_KEYS
 
         num_views = len(VIEW_KEYS)
         num_spacers = MAX_DYNAMIC_BUTTONS + 1

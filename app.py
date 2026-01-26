@@ -1,5 +1,6 @@
 """Gradio interface for the jigsaw puzzle solver"""
 
+import argparse
 import base64
 import os
 import random
@@ -16,14 +17,25 @@ from PIL import Image
 
 from wcmbot import __version__
 from wcmbot.matcher import (
-    build_matcher_config,
-    compute_piece_mask,
-    find_piece_in_template,
+    assert_torch_accel_available,
     format_match_summary,
     preload_template_cache,
     render_primary_views,
 )
+from wcmbot.multipiece import find_multipiece_region_dicts
+from wcmbot.solving import (
+    build_matcher_config_for_template,
+    iter_multipiece_payloads_from_bgr,
+    solve_piece_payload_from_bgr,
+)
 from wcmbot.template_settings import load_template_registry
+from wcmbot.viz import (
+    annotate_pair_image,
+    build_multipiece_overview,
+    overlay_piece_on_template,
+    rotate_template_preview,
+    stack_images_vertical,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 MUSPAN_LOGO_PATH = BASE_DIR / "media" / "muspan_logo.png"
@@ -97,356 +109,6 @@ def make_zoomable_plot(image: Optional[np.ndarray]):
         scaleratio=1,
     )
     return fig
-
-
-def _stack_images_vertical(
-    images: list[np.ndarray],
-    gap: int = 8,
-    background: int = 255,
-    max_width: int = 0,
-) -> tuple[Optional[np.ndarray], list[int]]:
-    """Stack images vertically and return (stacked_image, list_of_individual_heights)."""
-    if not images:
-        return None, []
-
-    prepared = []
-    for img in images:
-        if img is None:
-            continue
-        if img.ndim == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        if img.dtype != np.uint8:
-            img = np.clip(img, 0, 255).astype(np.uint8)
-        prepared.append(img)
-
-    if not prepared:
-        return None, []
-
-    widths = [img.shape[1] for img in prepared]
-    max_w = max(widths)
-    if max_width and max_w > max_width:
-        scale = max_width / max_w
-        resized = []
-        for img in prepared:
-            h, w = img.shape[:2]
-            resized.append(cv2.resize(img, (int(w * scale), int(h * scale))))
-        prepared = resized
-        widths = [img.shape[1] for img in prepared]
-        max_w = max(widths)
-
-    heights = [img.shape[0] for img in prepared]
-    total_h = sum(heights) + gap * (len(prepared) - 1)
-    out = np.full((total_h, max_w, 3), background, dtype=np.uint8)
-    y = 0
-    for img in prepared:
-        h, w = img.shape[:2]
-        out[y : y + h, :w] = img
-        y += h + gap
-    return out, heights
-
-
-def _annotate_pair_image(image: np.ndarray, label: str) -> np.ndarray:
-    annotated = image.copy()
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.8
-    thickness = 2
-    text_size, _ = cv2.getTextSize(label, font, font_scale, thickness)
-    text_w, text_h = text_size
-    pad = 6
-    x = pad
-    y = pad + text_h
-    cv2.rectangle(
-        annotated,
-        (x - pad, y - text_h - pad),
-        (x + text_w + pad, y + pad),
-        (255, 255, 255),
-        -1,
-    )
-    cv2.putText(annotated, label, (x, y), font, font_scale, (0, 0, 0), thickness)
-    return annotated
-
-
-def _annotate_grid_image(
-    grid_img: Image.Image, rows: int, cols: int, colors_bgr
-) -> np.ndarray:
-    """Overlay colored index numbers on a grid image."""
-    grid_rgb = np.array(grid_img.convert("RGB"))
-    grid_bgr = cv2.cvtColor(grid_rgb, cv2.COLOR_RGB2BGR)
-    height, width = grid_bgr.shape[:2]
-    cell_w = width // cols
-    cell_h = height // rows
-    scale = max(1.2, min(cell_w, cell_h) / 90)
-    thickness = max(3, int(scale * 3))
-    font = cv2.FONT_HERSHEY_SIMPLEX
-
-    for idx in range(rows * cols):
-        r = idx // cols
-        c = idx % cols
-        label = str(idx + 1)
-        text_size, _ = cv2.getTextSize(label, font, scale, thickness)
-        text_w, text_h = text_size
-        center_x = c * cell_w + cell_w // 2
-        center_y = r * cell_h + cell_h // 2
-        x = center_x - text_w // 2
-        y = center_y + text_h // 2
-        x = max(c * cell_w + 4, min(x, (c + 1) * cell_w - text_w - 4))
-        y = max(r * cell_h + text_h + 4, min(y, (r + 1) * cell_h - 4))
-        color = colors_bgr[idx % len(colors_bgr)]
-        cv2.putText(
-            grid_bgr,
-            label,
-            (x, y),
-            font,
-            scale,
-            (0, 0, 0),
-            thickness + 2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            grid_bgr,
-            label,
-            (x, y),
-            font,
-            scale,
-            color,
-            thickness,
-            cv2.LINE_AA,
-        )
-
-    return cv2.cvtColor(grid_bgr, cv2.COLOR_BGR2RGB)
-
-
-def _rotate_image(
-    img: np.ndarray,
-    angle: float,
-    interpolation: int = cv2.INTER_LINEAR,
-    border_value: int | tuple[int, int, int] = 0,
-) -> np.ndarray:
-    h, w = img.shape[:2]
-    M = cv2.getRotationMatrix2D((w / 2, h / 2), -angle, 1.0)
-    cos = abs(M[0, 0])
-    sin = abs(M[0, 1])
-    nw = int(h * sin + w * cos)
-    nh = int(h * cos + w * sin)
-    M[0, 2] += nw / 2 - w / 2
-    M[1, 2] += nh / 2 - h / 2
-    return cv2.warpAffine(
-        img,
-        M,
-        (nw, nh),
-        flags=interpolation,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=border_value,
-    )
-
-
-def _overlay_piece_on_template(
-    template_bgr: np.ndarray,
-    piece_bgr: np.ndarray,
-    piece_mask: np.ndarray,
-    match: dict,
-    alpha: float = 0.85,
-) -> None:
-    tlx, tly = match.get("tl", (0, 0))
-    brx, bry = match.get("br", (0, 0))
-    target_w = max(1, brx - tlx)
-    target_h = max(1, bry - tly)
-    if target_w <= 0 or target_h <= 0:
-        return
-
-    mask01 = (piece_mask > 0).astype(np.uint8) * 255
-    rot = match.get("rot", 0)
-    rot_piece = _rotate_image(
-        piece_bgr, rot, interpolation=cv2.INTER_LINEAR, border_value=(0, 0, 0)
-    )
-    rot_mask = _rotate_image(
-        mask01, rot, interpolation=cv2.INTER_NEAREST, border_value=0
-    )
-    piece_rs = cv2.resize(
-        rot_piece, (target_w, target_h), interpolation=cv2.INTER_LINEAR
-    )
-    mask_rs = cv2.resize(
-        rot_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST
-    )
-
-    tmpl_h, tmpl_w = template_bgr.shape[:2]
-    src_x0 = max(0, -tlx)
-    src_y0 = max(0, -tly)
-    src_x1 = target_w - max(0, brx - tmpl_w)
-    src_y1 = target_h - max(0, bry - tmpl_h)
-    dst_x0 = max(0, tlx)
-    dst_y0 = max(0, tly)
-    dst_x1 = min(tmpl_w, brx)
-    dst_y1 = min(tmpl_h, bry)
-
-    if dst_x1 <= dst_x0 or dst_y1 <= dst_y0:
-        return
-    if src_x1 <= src_x0 or src_y1 <= src_y0:
-        return
-
-    piece_patch = piece_rs[src_y0:src_y1, src_x0:src_x1]
-    mask_patch = mask_rs[src_y0:src_y1, src_x0:src_x1]
-    template_patch = template_bgr[dst_y0:dst_y1, dst_x0:dst_x1]
-    if piece_patch.shape[:2] != template_patch.shape[:2]:
-        return
-
-    mask_norm = (mask_patch > 127).astype(np.float32)
-    if mask_norm.ndim == 2:
-        mask_norm = mask_norm[:, :, np.newaxis]
-    mask_norm = np.clip(mask_norm * alpha, 0.0, 1.0)
-    blended_patch = (template_patch * (1 - mask_norm) + piece_patch * mask_norm).astype(
-        np.uint8
-    )
-    template_bgr[dst_y0:dst_y1, dst_x0:dst_x1] = blended_patch
-
-
-def _rotate_template_preview(
-    image: Optional[np.ndarray], rotation: int
-) -> Optional[np.ndarray]:
-    if image is None:
-        return None
-    if rotation == 0:
-        return image
-    k = -(rotation // 90)
-    return np.rot90(image, k=k)
-
-
-def _compute_multipiece_mask(
-    piece_bgr: np.ndarray,
-    matcher_config,
-    template_bgr: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """Compute binary mask for multipiece segmentation with optional background inversion."""
-    mask01 = compute_piece_mask(
-        piece_bgr,
-        matcher_config,
-        keep_largest_component=False,
-        template_bgr=template_bgr,
-    )
-
-    # Invert if segmentation captured mostly background.
-    if mask01.sum() > 0.5 * mask01.size:
-        mask01 = (mask01 == 0).astype(np.uint8)
-
-    return mask01
-
-
-def _find_multipiece_regions(
-    image_bgr: np.ndarray,
-    matcher_config,
-    min_area_frac: float = 0.002,
-    template_bgr: Optional[np.ndarray] = None,
-):
-    mask01 = _compute_multipiece_mask(image_bgr, matcher_config, template_bgr)
-    mask255 = (mask01 > 0).astype(np.uint8) * 255
-    contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return [], mask01
-
-    image_area = image_bgr.shape[0] * image_bgr.shape[1]
-    min_area = max(400, int(image_area * min_area_frac))
-    regions = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        regions.append({"bbox": (x, y, w, h), "contour": cnt, "area": area})
-
-    if not regions:
-        return [], mask01
-
-    heights = np.array([item["bbox"][3] for item in regions], dtype=np.float32)
-    row_thresh = float(np.median(heights) * 0.6)
-    centers = [
-        (
-            item["bbox"][0] + item["bbox"][2] / 2.0,
-            item["bbox"][1] + item["bbox"][3] / 2.0,
-            idx,
-        )
-        for idx, item in enumerate(regions)
-    ]
-    centers.sort(key=lambda t: t[1])
-    rows = []
-    for cx, cy, idx in centers:
-        if not rows:
-            rows.append({"cy": cy, "items": [(cx, cy, idx)]})
-            continue
-        if abs(cy - rows[-1]["cy"]) <= row_thresh:
-            rows[-1]["items"].append((cx, cy, idx))
-            rows[-1]["cy"] = float(np.mean([item[1] for item in rows[-1]["items"]]))
-        else:
-            rows.append({"cy": cy, "items": [(cx, cy, idx)]})
-
-    ordered = []
-    for row in rows:
-        row["items"].sort(key=lambda t: t[0])
-        ordered.extend([regions[idx] for _, _, idx in row["items"]])
-    regions = ordered
-    return regions, mask01
-
-
-def _build_multipiece_overview(
-    grid_bgr: np.ndarray,
-    regions,
-    colors,
-    max_dim: int = 1400,
-) -> np.ndarray:
-    h, w = grid_bgr.shape[:2]
-    scale = min(1.0, max_dim / max(h, w))
-    if scale < 1.0:
-        preview = cv2.resize(
-            grid_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
-        )
-    else:
-        preview = grid_bgr.copy()
-
-    for idx, region in enumerate(regions):
-        color = colors[idx % len(colors)]
-        cnt = region["contour"]
-        if scale < 1.0:
-            cnt = (cnt * scale).astype(np.int32)
-        cv2.drawContours(preview, [cnt], -1, color, 2)
-
-        x, y, bw, bh = region["bbox"]
-        if scale < 1.0:
-            x = int(x * scale)
-            y = int(y * scale)
-            bw = max(1, int(bw * scale))
-            bh = max(1, int(bh * scale))
-        cx = x + bw // 2
-        cy = y + bh // 2
-
-        label = str(idx + 1)
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = max(1.4, min(bw, bh) / 60)
-        thickness = max(2, int(font_scale * 1.5))
-        text_size, _ = cv2.getTextSize(label, font, font_scale, thickness)
-        text_w, text_h = text_size
-        label_x = int(cx - text_w / 2)
-        label_y = int(cy + text_h / 2)
-        label_x = max(x + 4, min(label_x, x + bw - text_w - 4))
-        label_y = max(y + text_h + 4, min(label_y, y + bh - 4))
-
-        pad = 6
-        box_tl = (max(0, label_x - pad), max(0, label_y - text_h - pad))
-        box_br = (
-            min(preview.shape[1] - 1, label_x + text_w + pad),
-            min(preview.shape[0] - 1, label_y + pad),
-        )
-        cv2.rectangle(preview, box_tl, box_br, (0, 0, 0), -1)
-        cv2.putText(
-            preview,
-            label,
-            (label_x, label_y),
-            font,
-            font_scale,
-            color,
-            thickness,
-            cv2.LINE_AA,
-        )
-
-    return cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
 
 
 def get_random_ad():
@@ -588,7 +250,7 @@ def _build_button_visibility(batch_state):
 
 def _blank_outputs(message: str, template_id: str, template_rotation: int):
     blank_views = {key: None for key in VIEW_KEYS}
-    rotated_template = _rotate_template_preview(
+    rotated_template = rotate_template_preview(
         TEMPLATE_IMAGES.get(template_id), template_rotation
     )
     blank_views["template_color"] = rotated_template
@@ -664,15 +326,13 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
     latest_pair = None
     latest_piece = None
     if last_result is not None:
-        outputs = list(last_result)
-        zoom_focus_idx = VIEW_KEYS.index("zoom_focus")
-        latest_zoom = outputs[zoom_focus_idx] if zoom_focus_idx < len(outputs) else None
-        zoom_pair_idx = VIEW_KEYS.index("zoom_pair")
-        latest_pair = outputs[zoom_pair_idx] if zoom_pair_idx < len(outputs) else None
-        zoom_piece_idx = VIEW_KEYS.index("zoom_piece")
-        latest_piece = (
-            outputs[zoom_piece_idx] if zoom_piece_idx < len(outputs) else None
-        )
+        try:
+            rendered = render_primary_views(last_result, 0)
+        except Exception:
+            rendered = {}
+        latest_zoom = rendered.get("zoom_focus")
+        latest_pair = rendered.get("zoom_pair")
+        latest_piece = rendered.get("zoom_piece")
 
     template_view = None
     if template_rgb is not None:
@@ -689,7 +349,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
             piece_bin = getattr(payload, "piece_bin", None)
             if piece_rgb is not None and piece_bin is not None:
                 piece_bgr = cv2.cvtColor(piece_rgb, cv2.COLOR_RGB2BGR)
-                _overlay_piece_on_template(template_marked, piece_bgr, piece_bin, match)
+                overlay_piece_on_template(template_marked, piece_bgr, piece_bin, match)
 
             contours = match.get("contours", [])
             if contours:
@@ -770,13 +430,13 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
         except Exception:
             pair_view = None
         if isinstance(pair_view, np.ndarray):
-            labeled = _annotate_pair_image(pair_view, f"Piece {pidx + 1}")
+            labeled = annotate_pair_image(pair_view, f"Piece {pidx + 1}")
             multipiece_pairs.append(labeled)
             piece_indices_with_pairs.append(pidx)
 
     piece_heights = []
     if multipiece_pairs:
-        stacked, piece_heights = _stack_images_vertical(multipiece_pairs)
+        stacked, piece_heights = stack_images_vertical(multipiece_pairs)
         views["zoom_pair"] = stacked
         # Store heights in batch_state for button alignment
         if batch_state is not None:
@@ -785,7 +445,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
     views["zoom_template"] = (
         template_view if template_view is not None else make_zoomable_plot(None)
     )
-    rotated_template = _rotate_template_preview(
+    rotated_template = rotate_template_preview(
         TEMPLATE_IMAGES.get(template_id), rotation
     )
     views["template_color"] = rotated_template
@@ -928,15 +588,7 @@ def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_st
     # Get template spec and run matcher with forced rotation (no auto-align)
     template_spec = TEMPLATE_REGISTRY.get(template_id)
     try:
-        matcher_config = build_matcher_config(
-            {
-                "rows": template_spec.rows,
-                "cols": template_spec.cols,
-                "crop_x": template_spec.crop_x,
-                "crop_y": template_spec.crop_y,
-                **template_spec.matcher_overrides,
-            }
-        )
+        matcher_config = build_matcher_config_for_template(template_spec)
 
         # Load the original piece and apply total rotation
         piece_bgr = cv2.imread(cached_piece_path)
@@ -950,35 +602,19 @@ def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_st
             rot_matrix = cv2.getRotationMatrix2D(center, total_rotation, 1.0)
             piece_bgr = cv2.warpAffine(piece_bgr, rot_matrix, (w, h))
 
-        # Save rotated piece to temp file
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp_rotated_path = tmp.name
-            cv2.imwrite(tmp_rotated_path, piece_bgr)
+        # Run matcher without auto-align (manual rotation only)
+        payload = solve_piece_payload_from_bgr(
+            piece_bgr,
+            template_spec,
+            auto_align=False,
+            template_rotation=template_rotation,
+            matcher_config=matcher_config,
+        )
 
-        try:
-            # Run matcher without auto-align
-            payload = find_piece_in_template(
-                tmp_rotated_path,
-                str(template_spec.template_path),
-                knobs_x=None,
-                knobs_y=None,
-                auto_align=False,  # Don't auto-align, use manual rotation only
-                infer_knobs=True,
-                template_rotation=template_rotation,
-                matcher_config=matcher_config,
-            )
-
-            # Update state with new payload and rotation
-            state["payload"] = payload
-            state["match_index"] = 0
-            state["manual_rotation"] = new_manual_rotation
-
-        finally:
-            try:
-                os.remove(tmp_rotated_path)
-            except OSError:
-                # Best-effort cleanup: ignoring failures to delete the temporary file
-                pass
+        # Update state with new payload and rotation
+        state["payload"] = payload
+        state["match_index"] = 0
+        state["manual_rotation"] = new_manual_rotation
 
         views = _build_multipiece_views_from_state(batch_state)
         coord_markdown = _format_multipiece_table(piece_states, total)
@@ -1043,22 +679,14 @@ def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
         )
 
     try:
-        matcher_config = build_matcher_config(
-            {
-                "rows": template_spec.rows,
-                "cols": template_spec.cols,
-                "crop_x": template_spec.crop_x,
-                "crop_y": template_spec.crop_y,
-                **template_spec.matcher_overrides,
-            }
-        )
-        payload = find_piece_in_template(
-            piece_path,
-            str(template_spec.template_path),
-            knobs_x=None,
-            knobs_y=None,
+        piece_bgr = cv2.imread(piece_path)
+        if piece_bgr is None:
+            raise ValueError(f"Could not load piece image: {piece_path}")
+        matcher_config = build_matcher_config_for_template(template_spec)
+        payload = solve_piece_payload_from_bgr(
+            piece_bgr,
+            template_spec,
             auto_align=bool(auto_align),
-            infer_knobs=True,
             template_rotation=rotation,
             matcher_config=matcher_config,
         )
@@ -1093,17 +721,9 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         return
 
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
-    matcher_config = build_matcher_config(
-        {
-            "rows": template_spec.rows,
-            "cols": template_spec.cols,
-            "crop_x": template_spec.crop_x,
-            "crop_y": template_spec.crop_y,
-            **template_spec.matcher_overrides,
-        }
-    )
-    template_rgb = None
-    if template_spec is not None:
+    matcher_config = build_matcher_config_for_template(template_spec)
+    template_rgb = TEMPLATE_IMAGES.get(template_id)
+    if template_rgb is None and template_spec is not None:
         template_rgb = get_template_image(
             template_spec.template_path,
             crop_x=template_spec.crop_x,
@@ -1114,7 +734,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         if template_rgb is not None
         else None
     )
-    regions, _ = _find_multipiece_regions(
+    regions, _ = find_multipiece_region_dicts(
         grid_bgr, matcher_config, template_bgr=template_bgr
     )
     if not regions:
@@ -1126,11 +746,10 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         return
 
     total = len(regions)
-    all_results = []
     piece_states = [None] * total
     colors = GRID_COLORS_BGR
 
-    grid_overview = _build_multipiece_overview(grid_bgr, regions, colors)
+    grid_overview = build_multipiece_overview(grid_bgr, regions, colors)
     batch_state = {
         "template_id": template_id,
         "rotation": rotation,
@@ -1140,61 +759,51 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         "total": total,
     }
 
-    for idx, region in enumerate(regions):
-        x, y, w, h = region["bbox"]
-        pad = max(4, int(min(w, h) * 0.06))
-        x0 = max(0, x - pad)
-        y0 = max(0, y - pad)
-        x1 = min(grid_bgr.shape[1], x + w + pad)
-        y1 = min(grid_bgr.shape[0], y + h + pad)
-        crop = grid_img.crop((x0, y0, x1, y1))
+    processed = 0
+    last_result = None
+    for item in iter_multipiece_payloads_from_bgr(
+        grid_bgr,
+        template_spec,
+        auto_align=bool(auto_align),
+        template_rotation=rotation,
+        matcher_config=matcher_config,
+        regions=regions,
+        template_bgr=template_bgr,
+    ):
+        idx = item.index
+        crop_bgr = item.piece_bgr
+        payload = item.payload
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             tmp_path = tmp.name
-            crop.save(tmp_path)
+            cv2.imwrite(tmp_path, crop_bgr)
 
-        try:
-            result = solve_puzzle(tmp_path, template_id, auto_align, rotation)
-            all_results.append((idx, region, result))
-            payload = None
-            if result is not None:
-                outputs = list(result)
-                state_idx = len(VIEW_KEYS) + 2
-                if state_idx < len(outputs):
-                    payload = outputs[state_idx]
-            piece_states[idx] = {
-                "payload": payload,
-                "match_index": 0,
-                "piece_path": tmp_path,  # Cache the piece path for rotation
-                "manual_rotation": 0.0,
-            }
-        except Exception:
-            all_results.append((idx, region, None))
-            piece_states[idx] = {
-                "payload": None,
-                "match_index": 0,
-                "error": True,
-                "piece_path": tmp_path,
-                "manual_rotation": 0.0,
-            }
+        state = {
+            "payload": payload,
+            "match_index": 0,
+            "piece_path": tmp_path,
+            "manual_rotation": 0.0,
+        }
+        if payload is None:
+            state["error"] = True
+        piece_states[idx] = state
+
+        processed += 1
+        last_result = payload
 
         coord_markdown = _format_multipiece_table(piece_states, total)
 
-        last_result = all_results[-1][2] if all_results else None
         streamed_views = _build_multipiece_views_from_state(
             batch_state, last_result=last_result
         )
         last_summary = ""
         if last_result is not None:
-            outputs = list(last_result)
-            summary_idx = len(VIEW_KEYS) + 1
-            if summary_idx < len(outputs):
-                last_summary = str(outputs[summary_idx])
+            last_summary = format_match_summary(last_result, 0)
         yield _views_to_outputs(
             streamed_views,
             coord_markdown,
             (
-                f"Processed {len(all_results)}/{total} pieces."
+                f"Processed {processed}/{total} pieces."
                 + (f"\n\n{last_summary}" if last_summary else "")
             ),
             None,
@@ -1205,10 +814,10 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
     combined_location = _format_multipiece_table(piece_states, total)
 
     final_views = _build_multipiece_views_from_state(
-        batch_state, last_result=all_results[-1][2] if all_results else None
+        batch_state, last_result=last_result
     )
 
-    summary = f"Processed {len(all_results)}/{total} pieces."
+    summary = f"Processed {processed}/{total} pieces."
     yield _views_to_outputs(
         final_views, combined_location, summary, None, 0, batch_state
     )
@@ -1275,7 +884,7 @@ TEMPLATE_IMAGES = {
     )
     for spec in TEMPLATE_REGISTRY.templates.values()
 }
-DEFAULT_TEMPLATE_PREVIEW = _rotate_template_preview(
+DEFAULT_TEMPLATE_PREVIEW = rotate_template_preview(
     TEMPLATE_IMAGES.get(DEFAULT_TEMPLATE_ID), DEFAULT_TEMPLATE_SPEC.default_rotation
 )
 DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
@@ -1815,4 +1424,21 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(theme=app_theme)
+    argparse_parser = argparse.ArgumentParser()
+    argparse_parser.add_argument(
+        "--accessible", action="store_true", help="Make accessible over local network"
+    )
+    argparse_parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Enable Torch acceleration (uses MPS/CUDA if available)",
+    )
+    args = argparse_parser.parse_args()
+    kwargs = {}
+    if args.gpu:
+        device = assert_torch_accel_available()
+        os.environ["WCMBOT_USE_TORCH"] = "1"
+        os.environ["WCMBOT_TORCH_DEVICE"] = device
+    if args.accessible:
+        kwargs["server_name"] = "0.0.0.0"
+    demo.launch(theme=app_theme, **kwargs)
