@@ -18,6 +18,11 @@ A Gradio web application that uses computer vision to automatically identify whe
 - **Side-by-Side View**: Template and upload area in one screen
 - **Drag & Drop Upload**: Modern file upload with preview
 - **Tab Count Configuration**: Horizontal and vertical tab inputs (0-2) for accurate scale estimation
+- **Grid Overlay**: Visual grid showing row and column numbers (enabled by default, toggleable in Settings)
+  - White dotted grid lines with black numbered labels
+  - Configurable margins and visual styling
+  - Works with template rotation
+- **Template Rotation**: Display templates at 0°, 90°, 180°, or 270° angles
 - **Zoomable Visualizations**: Interactive Plotly plots with zoom and pan controls
 - **Visual Highlighting**: Shows matched position with colored circles
 - **Real-time Processing**: Instant results with highlighted template
@@ -97,7 +102,50 @@ Key parameters in `matcher.py`:
 - `KNOB_WIDTH_FRAC`: Contribution of each knob to the estimated full width/height
 - **Required parameters**: `knobs_x` and `knobs_y` must be specified (0-2) for accurate scale estimation
 
-## Testing Coverage
+## 3. Template Grid Export
+
+The `export_template_grid.py` script enables high-quality export of puzzle templates with grid overlays to PNG files:
+
+### Export Features
+- **DPI Configuration**: Specify output resolution (default 150 DPI)
+- **Template Rotation**: Export at any orientation (0°, 90°, 180°, 270°)
+- **Dimension Calculation**: Automatically calculates physical dimensions from template configuration
+- **RGBA Handling**: Automatically converts RGBA images to RGB for PNG export
+- **Custom Output Paths**: Specify where to save exported images
+- **Template Listing**: Display all available templates
+
+### Export Usage
+
+```bash
+# Export at default DPI (150) with no rotation
+python export_template_grid.py sample_puzzle
+
+# Export at custom DPI
+python export_template_grid.py sample_puzzle --dpi 100
+
+# Export with rotation
+python export_template_grid.py sample_puzzle --rotation 90
+
+# Export to custom location
+python export_template_grid.py sample_puzzle --output ~/exports/
+
+# List available templates
+python export_template_grid.py --list
+```
+
+### Configuration
+
+Templates support the `export_width_cm` parameter in `templates.json` to specify the physical width of the template **before margins are added**. The grid overlay adds 40-pixel margins on each side for row/column labels. The script calculates dimensions at the specified DPI:
+
+```
+template_pixels = (export_width_cm / 2.54) * dpi
+total_pixels = template_pixels + margin_pixels
+```
+
+The export output shows both the template dimensions and the total dimensions including margins.
+
+## 4. Testing Coverage
+
 
 ### E2E Tests (4 tests)
 - App loads successfully

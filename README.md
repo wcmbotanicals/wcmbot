@@ -22,6 +22,9 @@ A Gradio web application that helps solve jigsaw puzzles by identifying where in
 - **Multi-match visualization** with the same diagnostic subplots as the CLI workflow
 - **Zoomable/pannable plots** using Plotly for interactive exploration of match results
 - **Confidence scoring** for match quality
+- **Grid overlay on template** showing row and column numbers (enabled by default) with customizable display
+- **Export template grids** to high-quality PNG images with configurable DPI and rotation support
+- **Template rotation** in 90° increments for different puzzle orientations
 - **Interactive Gradio interface** with modern UI/UX
 - **HuggingFace Spaces ready**
 - **Fully tested** with Playwright E2E tests
@@ -76,12 +79,37 @@ The app will:
 
 ### Using the Interface
 
-1. **View the template** - The puzzle template is displayed on the right side
-2. **Upload a piece** - Click the upload area or drag and drop a puzzle piece image
-3. **Set tab counts** - Enter the number of horizontal and vertical tabs (0-2) on your puzzle piece for accurate scale estimation
-4. **Find the match** - Click "Find Piece Location" button
-5. **View results** - See the highlighted position on the template with confidence score
-6. **Explore matches** - Use zoomable/pannable Plotly views to inspect match details and navigate between top matches
+1. **View the template** - The puzzle template is displayed on the right side with a grid overlay showing row and column numbers
+2. **Toggle grid** - Enable/disable the grid overlay using the "Show Grid" checkbox in the Settings accordion
+3. **Upload a piece** - Click the upload area or drag and drop a puzzle piece image
+4. **Set tab counts** - Enter the number of horizontal and vertical tabs (0-2) on your puzzle piece for accurate scale estimation
+5. **Find the match** - Click "Find Piece Location" button
+6. **View results** - See the highlighted position on the template with confidence score
+7. **Explore matches** - Use zoomable/pannable Plotly views to inspect match details and navigate between top matches
+8. **Rotate template** - Use the template rotation control to view the puzzle in different orientations (90° increments)
+
+### Exporting Template Grids
+
+Use the `export_template_grid.py` script to export high-quality PNG images of puzzle templates with grids:
+
+```bash
+# Export a template at default DPI (150) with default rotation
+python export_template_grid.py sample_puzzle
+
+# Export with custom DPI
+python export_template_grid.py sample_puzzle --dpi 100
+
+# Export with rotation (0, 90, 180, or 270 degrees)
+python export_template_grid.py sample_puzzle --rotation 90
+
+# Export to a custom location
+python export_template_grid.py sample_puzzle --output ~/my_templates/
+
+# List all available templates
+python export_template_grid.py --list
+```
+
+The script automatically calculates the physical dimensions based on the `export_width_cm` parameter in your template configuration.
 
 ### HuggingFace Spaces
 
@@ -111,22 +139,23 @@ pytest -v
 
 ```
 wcmbot/
-├── app.py                   # Gradio interface
-├── matcher.py               # Image matching algorithms
-├── media/                   # Puzzle templates and pieces
-│   ├── templates/           # Puzzle templates
+├── app.py                       # Gradio interface
+├── export_template_grid.py      # Script to export templates with grids as PNG
+├── matcher.py                   # Image matching algorithms
+├── media/                       # Puzzle templates and pieces
+│   ├── templates/               # Puzzle templates
 │   │   ├── sample_puzzle.png
 │   │   ├── grass_puzzle.png
 │   │   └── templates.json
-│   └── pieces/              # Sample puzzle pieces
+│   └── pieces/                  # Sample puzzle pieces
 │       └── sample_puzzle/
 │           ├── piece_1.jpg
 │           ├── piece_2.jpg
 │           └── piece_3.jpg
-├── test_gradio.py           # Playwright E2E tests
-├── pytest.ini               # Pytest configuration
-├── requirements.txt         # Python dependencies
-└── README.md                # This file
+├── test_gradio.py               # Playwright E2E tests
+├── pytest.ini                   # Pytest configuration
+├── requirements.txt             # Python dependencies
+└── README.md                    # This file
 ```
 
 ## Technology Stack
