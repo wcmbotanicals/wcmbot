@@ -20,7 +20,7 @@ import numpy as np
 from PIL import Image
 
 from wcmbot.template_settings import load_template_registry
-from wcmbot.viz import DEFAULT_GRID_MARGIN, draw_grid_on_template, rotate_template_preview
+from wcmbot.viz import draw_grid_on_template, rotate_template_preview
 
 
 def export_template_with_grid(
