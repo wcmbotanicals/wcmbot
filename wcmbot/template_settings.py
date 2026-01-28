@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEMPLATE_CONFIG_PATH = BASE_DIR / "media" / "templates" / "templates.json"
 

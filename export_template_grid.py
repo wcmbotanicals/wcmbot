@@ -20,13 +20,14 @@ import numpy as np
 from PIL import Image
 
 from wcmbot.template_settings import load_template_registry
-from wcmbot.viz import draw_grid_on_template
+from wcmbot.viz import draw_grid_on_template, rotate_template_preview
 
 
 def export_template_with_grid(
     template_id: str,
     dpi: int = 150,
     output_path: str | None = None,
+    rotation: int | None = None,
 ) -> Path:
     """Export template with grid overlay to PNG.
 
@@ -34,6 +35,7 @@ def export_template_with_grid(
         template_id: ID of the template to export
         dpi: Dots per inch for the export (default 150)
         output_path: Output file path (default: output/{template_id}_grid.png)
+        rotation: Template rotation in degrees (0, 90, 180, 270). If None, uses template default.
 
     Returns:
         Path to the exported PNG file
@@ -66,14 +68,29 @@ def export_template_with_grid(
         ]
 
     # Apply grid overlay
+    if rotation is None:
+        rotation = template_spec.default_rotation
     print(
-        f"Applying grid overlay ({template_spec.rows} rows × {template_spec.cols} cols)..."
+        f"Applying grid overlay ({template_spec.rows} rows × {template_spec.cols} cols, "
+        f"rotation: {rotation}°)..."
     )
+
+    # Rotate the image first
+    rotated_img = rotate_template_preview(template_img, rotation)
+
+    # Determine grid dimensions based on rotation
+    # When rotating 90 or 270, rows and cols swap
+    grid_rows = template_spec.rows
+    grid_cols = template_spec.cols
+    if rotation in (90, 270):
+        grid_rows, grid_cols = grid_cols, grid_rows
+
+    # Apply grid to rotated image with no additional rotation
     template_with_grid = draw_grid_on_template(
-        template_img,
-        template_spec.rows,
-        template_spec.cols,
-        rotation=0,  # Export uses original orientation
+        rotated_img,
+        grid_rows,
+        grid_cols,
+        rotation=0,  # Image is already rotated, so no rotation needed here
     )
 
     # Get target size in pixels
@@ -142,6 +159,12 @@ def main():
         help="Output file path (default: output/{template}_grid_{dpi}dpi.png)",
     )
     parser.add_argument(
+        "--rotation",
+        type=int,
+        choices=[0, 90, 180, 270],
+        help="Template rotation in degrees (default: use template's default_rotation)",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="List all available templates",
@@ -163,7 +186,9 @@ def main():
         if args.template is None:
             parser.error("template is required unless --list is used")
 
-        export_template_with_grid(args.template, dpi=args.dpi, output_path=args.output)
+        export_template_with_grid(
+            args.template, dpi=args.dpi, output_path=args.output, rotation=args.rotation
+        )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
