@@ -314,6 +314,7 @@ class TestOnPieceChange:
             state,
             idx,
             {},  # batch_state
+            False,  # show_grid
         )
 
         # Get the result and verify it's not None
@@ -363,6 +364,7 @@ class TestOnPieceChange:
                 state,
                 idx,
                 {},  # batch_state
+                False,  # show_grid
             )
 
             # Verify it yields the result from the generator
@@ -371,7 +373,12 @@ class TestOnPieceChange:
 
             # Verify solve was called with correct parameters
             mock_solve_function.assert_called_once_with(
-                piece_path, template_id, auto_align, template_rotation, batch_mode
+                piece_path,
+                template_id,
+                auto_align,
+                template_rotation,
+                batch_mode,
+                False,
             )
         finally:
             Path(piece_path).unlink(missing_ok=True)
@@ -412,6 +419,7 @@ class TestOnPieceChange:
                 state,
                 idx,
                 {},  # batch_state
+                False,  # show_grid
             )
 
             # Verify it yields all results from the generator
@@ -422,7 +430,12 @@ class TestOnPieceChange:
 
             # Verify solve was called with correct parameters
             mock_solve_function.assert_called_once_with(
-                piece_path, template_id, auto_align, template_rotation, batch_mode
+                piece_path,
+                template_id,
+                auto_align,
+                template_rotation,
+                batch_mode,
+                False,
             )
         finally:
             Path(piece_path).unlink(missing_ok=True)
@@ -448,7 +461,9 @@ class TestOnPieceChange:
                 mock_solve.return_value = mock_gen()
 
                 # Test single mode
-                gen = _on_piece_change(piece_path, "test", False, 0, False, {}, 0, {})
+                gen = _on_piece_change(
+                    piece_path, "test", False, 0, False, {}, 0, {}, False
+                )
                 result = next(gen)
 
                 # Should yield the tuple directly, not the generator

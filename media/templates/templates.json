@@ -11,6 +11,7 @@
       "crop_y": 0,
       "default_rotation": 180,
       "auto_align_default": true,
+      "export_width_cm": 66,
       "piece_dirs": [
         "media/pieces/sample_puzzle"
       ],
@@ -26,6 +27,7 @@
       "crop_y": 7,
       "default_rotation": 0,
       "auto_align_default": true,
+      "export_width_cm": 66,
       "piece_dirs": [
         "media/pieces/grass_puzzle"
       ],

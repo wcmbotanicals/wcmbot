@@ -25,6 +25,163 @@ def rotate_template_preview(
     return np.rot90(image_rgb, k=k)
 
 
+def draw_grid_on_template(
+    image_rgb: np.ndarray,
+    rows: int,
+    cols: int,
+    *,
+    rotation: int = 0,
+    line_color: Tuple[int, int, int] = (255, 255, 255),
+    line_thickness: int = 2,
+    label_color: Tuple[int, int, int] = (0, 0, 0),
+    font_scale: float = 0.8,
+    font_thickness: int = 2,
+    margin: int = 40,
+) -> np.ndarray:
+    """Draw a grid overlay on template with row/column labels outside the image.
+
+    Args:
+        image_rgb: Template image in RGB format
+        rows: Number of rows in the puzzle grid
+        cols: Number of columns in the puzzle grid
+        rotation: Template rotation (0, 90, 180, 270)
+        line_color: Color for grid lines (RGB)
+        line_thickness: Thickness of grid lines
+        label_color: Color for row/column labels (RGB), default black
+        font_scale: Scale factor for label text
+        font_thickness: Thickness of label text
+        margin: Margin in pixels for labels around the image
+
+    Returns:
+        Image with grid overlay and external labels (RGB)
+    """
+    if image_rgb is None:
+        return None
+
+    # Adjust grid dimensions based on rotation
+    if rotation in (90, 270):
+        rows, cols = cols, rows
+
+    h, w = image_rgb.shape[:2]
+
+    # Create expanded canvas with margin for labels
+    expanded_h = h + 2 * margin
+    expanded_w = w + 2 * margin
+    expanded = np.full(
+        (expanded_h, expanded_w, 3), 245, dtype=np.uint8
+    )  # Light gray background
+
+    # Place original image in center
+    expanded[margin : margin + h, margin : margin + w] = image_rgb
+
+    # Convert to BGR for OpenCV drawing
+    result_bgr = cv2.cvtColor(expanded, cv2.COLOR_RGB2BGR)
+
+    # Calculate cell dimensions
+    cell_width = w / cols
+    cell_height = h / rows
+
+    # Draw vertical grid lines (dotted)
+    dash_length = 10
+    gap_length = 10
+    for col_idx in range(cols + 1):
+        x = margin + int(col_idx * cell_width)
+        # Draw dotted line
+        for y in range(margin, margin + h, dash_length + gap_length):
+            y_end = min(y + dash_length, margin + h)
+            cv2.line(
+                result_bgr,
+                (x, y),
+                (x, y_end),
+                line_color,
+                line_thickness,
+                cv2.LINE_AA,
+            )
+
+    # Draw horizontal grid lines (dotted)
+    for row_idx in range(rows + 1):
+        y = margin + int(row_idx * cell_height)
+        # Draw dotted line
+        for x in range(margin, margin + w, dash_length + gap_length):
+            x_end = min(x + dash_length, margin + w)
+            cv2.line(
+                result_bgr,
+                (x, y),
+                (x_end, y),
+                line_color,
+                line_thickness,
+                cv2.LINE_AA,
+            )
+
+    # Draw row labels (outside left and right edges)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    for row_idx in range(rows):
+        y = margin + int((row_idx + 0.5) * cell_height)
+        label = str(row_idx + 1)
+
+        text_size, _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+        text_w, text_h = text_size
+
+        # Left side label
+        cv2.putText(
+            result_bgr,
+            label,
+            (margin // 2 - text_w // 2, y + text_h // 2),
+            font,
+            font_scale,
+            label_color,
+            font_thickness,
+            cv2.LINE_AA,
+        )
+
+        # Right side label
+        cv2.putText(
+            result_bgr,
+            label,
+            (margin + w + margin // 2 - text_w // 2, y + text_h // 2),
+            font,
+            font_scale,
+            label_color,
+            font_thickness,
+            cv2.LINE_AA,
+        )
+
+    # Draw column labels (outside top and bottom edges)
+    for col_idx in range(cols):
+        x = margin + int((col_idx + 0.5) * cell_width)
+        label = str(col_idx + 1)
+
+        text_size, _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+        text_w, text_h = text_size
+
+        # Top label
+        cv2.putText(
+            result_bgr,
+            label,
+            (x - text_w // 2, margin // 2 + text_h // 2),
+            font,
+            font_scale,
+            label_color,
+            font_thickness,
+            cv2.LINE_AA,
+        )
+
+        # Bottom label
+        cv2.putText(
+            result_bgr,
+            label,
+            (x - text_w // 2, margin + h + margin // 2 + text_h // 2),
+            font,
+            font_scale,
+            label_color,
+            font_thickness,
+            cv2.LINE_AA,
+        )
+
+    # Convert back to RGB
+    return cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+
+
 def stack_images_vertical(
     images: list[np.ndarray],
     *,
