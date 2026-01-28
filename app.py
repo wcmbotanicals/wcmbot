@@ -981,8 +981,15 @@ TEMPLATE_IMAGES = {
     )
     for spec in TEMPLATE_REGISTRY.templates.values()
 }
+# Create default template display with grid (matches checkbox default of True)
+DEFAULT_TEMPLATE_WITH_GRID = draw_grid_on_template(
+    TEMPLATE_IMAGES.get(DEFAULT_TEMPLATE_ID),
+    DEFAULT_TEMPLATE_SPEC.rows,
+    DEFAULT_TEMPLATE_SPEC.cols,
+    rotation=DEFAULT_TEMPLATE_SPEC.default_rotation,
+)
 DEFAULT_TEMPLATE_PREVIEW = rotate_template_preview(
-    TEMPLATE_IMAGES.get(DEFAULT_TEMPLATE_ID), DEFAULT_TEMPLATE_SPEC.default_rotation
+    DEFAULT_TEMPLATE_WITH_GRID, DEFAULT_TEMPLATE_SPEC.default_rotation
 )
 DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
 
@@ -1308,13 +1315,13 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         ],
     )
 
-    def _on_template_change(selected_template):
+    def _on_template_change(selected_template, show_grid):
         spec = TEMPLATE_REGISTRY.get(selected_template)
         defaults = _blank_outputs(
             "Run the matcher once a piece is uploaded.",
             selected_template,
             spec.default_rotation,
-            False,  # show_grid default
+            show_grid,  # use current checkbox state
         )
         return (
             spec.default_rotation,
@@ -1324,7 +1331,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
 
     template_selector.change(
         fn=_on_template_change,
-        inputs=[template_selector],
+        inputs=[template_selector, show_grid_checkbox],
         outputs=[
             template_rotation,
             auto_align_checkbox,
