@@ -101,9 +101,9 @@ uv run python app.py --gpu
 2. **Toggle grid** - Enable/disable the grid overlay using the "Show Grid" checkbox in the Settings accordion
 3. **Upload a piece** - Click the upload area or drag and drop a puzzle piece image
 4. **Find the match** - Matching runs automatically after upload (or click "Find Piece Location")
-6. **View results** - See the highlighted position on the template with confidence score
-7. **Explore matches** - Use zoomable/pannable Plotly views to inspect match details and navigate between top matches
-8. **Rotate template** - Use the template rotation control to view the puzzle in different orientations (90° increments)
+5. **View results** - See the highlighted position on the template with confidence score
+6. **Explore matches** - Use zoomable/pannable Plotly views to inspect match details and navigate between top matches
+7. **Rotate template** - Use the template rotation control to view the puzzle in different orientations (90° increments)
 
 Multipiece mode:
 - Enable "Multipiece mode (batch)" to detect multiple pieces in one upload and solve them in sequence.
