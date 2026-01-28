@@ -55,8 +55,12 @@ def export_template_with_grid(
 
     template_img = np.array(Image.open(template_spec.template_path))
 
-    # Convert RGBA to RGB if necessary
-    if template_img.shape[2] == 4:
+    # Normalize image to 3-channel RGB if necessary
+    if template_img.ndim == 2:
+        # Convert grayscale (2D) image to RGB by stacking the single channel
+        template_img = np.stack([template_img] * 3, axis=-1)
+    elif template_img.ndim >= 3 and template_img.shape[2] == 4:
+        # Convert RGBA to RGB by dropping the alpha channel
         template_img = template_img[:, :, :3]
 
     # Apply cropping if specified
