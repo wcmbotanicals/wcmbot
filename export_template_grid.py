@@ -86,6 +86,7 @@ def export_template_with_grid(
         grid_rows, grid_cols = grid_cols, grid_rows
 
     # Apply grid to rotated image with no additional rotation
+    # Note: draw_grid_on_template adds 40px margins on each side for labels
     template_with_grid = draw_grid_on_template(
         rotated_img,
         grid_rows,
@@ -94,19 +95,33 @@ def export_template_with_grid(
     )
 
     # Get target size in pixels
+    # export_width_cm is the width of the template *before* margins are added
     export_width_cm = template_spec.export_width_cm
     cm_per_inch = 2.54
     pixels_per_inch = dpi
     pixels_per_cm = pixels_per_inch / cm_per_inch
 
-    # Calculate target width in pixels
-    target_width = int(export_width_cm * pixels_per_cm)
+    # Calculate target width in pixels (for the template portion)
+    template_target_width = int(export_width_cm * pixels_per_cm)
+
+    # The grid image has margins, so we need to scale based on template portion
+    # Grid adds 80px total margin (40px on each side)
+    template_h, template_w = rotated_img.shape[:2]
+    grid_h, grid_w = template_with_grid.shape[:2]
+
+    # Scale to get target template width, then add margins
+    scale = template_target_width / template_w
+    target_width = int(grid_w * scale)
 
     # Resize to target size while maintaining aspect ratio
     h, w = template_with_grid.shape[:2]
-    scale = target_width / w
     target_height = int(h * scale)
-    export_height_cm = export_width_cm * (h / w)
+
+    # Calculate physical dimensions
+    template_height_cm = export_width_cm * (template_h / template_w)
+    total_width_cm = export_width_cm * (grid_w / template_w)
+    total_height_cm = template_height_cm * (grid_h / template_h)
+    margin_cm = (total_width_cm - export_width_cm) / 2
 
     print(f"Resizing to {target_width}×{target_height} pixels ({dpi} DPI)...")
     resized = cv2.resize(
@@ -131,9 +146,10 @@ def export_template_with_grid(
     # Save PNG
     output_img.save(output_path, "PNG", dpi=(dpi, dpi))
     print(f"✓ Exported to: {output_path}")
-    print(f"  Size: {target_width}×{target_height} pixels @ {dpi} DPI")
+    print(f"  Pixel size: {target_width}×{target_height} @ {dpi} DPI")
+    print(f"  Template: {export_width_cm:.1f} cm × {template_height_cm:.1f} cm")
     print(
-        f"  Physical dimensions: {export_width_cm:.1f} cm wide × {export_height_cm:.1f} cm tall"
+        f"  With margins: {total_width_cm:.1f} cm × {total_height_cm:.1f} cm (±{margin_cm:.1f} cm margins)"
     )
 
     return output_path
