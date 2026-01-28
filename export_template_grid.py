@@ -103,7 +103,7 @@ def export_template_with_grid(
     template_target_width = int(export_width_cm * pixels_per_cm)
 
     # The grid image has margins, so we need to scale based on template portion
-    # Grid adds total margin (DEFAULT_GRID_MARGIN px on each side)
+    # Grid adds DEFAULT_GRID_MARGIN px margin on each side (2×DEFAULT_GRID_MARGIN total)
     template_h, template_w = rotated_img.shape[:2]
     grid_h, grid_w = template_with_grid.shape[:2]
 
