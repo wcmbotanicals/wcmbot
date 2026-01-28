@@ -30,6 +30,7 @@ from wcmbot.solving import (
 )
 from wcmbot.template_settings import load_template_registry
 from wcmbot.viz import (
+    DEFAULT_GRID_MARGIN,
     annotate_pair_image,
     build_multipiece_overview,
     draw_grid_on_template,
@@ -374,7 +375,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
         if show_grid:
             template_spec = TEMPLATE_REGISTRY.get(template_id)
             if template_spec:
-                margin = 40  # Must match the margin in draw_grid_on_template
+                margin = DEFAULT_GRID_MARGIN
                 template_for_marking = draw_grid_on_template(
                     template_rgb,
                     template_spec.rows,
@@ -982,14 +983,9 @@ TEMPLATE_IMAGES = {
     for spec in TEMPLATE_REGISTRY.templates.values()
 }
 # Create default template display with grid (matches checkbox default of True)
-DEFAULT_TEMPLATE_WITH_GRID = draw_grid_on_template(
-    TEMPLATE_IMAGES.get(DEFAULT_TEMPLATE_ID),
-    DEFAULT_TEMPLATE_SPEC.rows,
-    DEFAULT_TEMPLATE_SPEC.cols,
-    rotation=DEFAULT_TEMPLATE_SPEC.default_rotation,
-)
-DEFAULT_TEMPLATE_PREVIEW = rotate_template_preview(
-    DEFAULT_TEMPLATE_WITH_GRID, DEFAULT_TEMPLATE_SPEC.default_rotation
+# Use prepare_template_display for consistency with the proper rotation flow
+DEFAULT_TEMPLATE_PREVIEW = prepare_template_display(
+    DEFAULT_TEMPLATE_ID, DEFAULT_TEMPLATE_SPEC.default_rotation, show_grid=True
 )
 DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
 

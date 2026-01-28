@@ -20,7 +20,7 @@ import numpy as np
 from PIL import Image
 
 from wcmbot.template_settings import load_template_registry
-from wcmbot.viz import draw_grid_on_template, rotate_template_preview
+from wcmbot.viz import DEFAULT_GRID_MARGIN, draw_grid_on_template, rotate_template_preview
 
 
 def export_template_with_grid(
@@ -82,20 +82,14 @@ def export_template_with_grid(
     # Rotate the image first
     rotated_img = rotate_template_preview(template_img, rotation)
 
-    # Determine grid dimensions based on rotation
-    # When rotating 90 or 270, rows and cols swap
-    grid_rows = template_spec.rows
-    grid_cols = template_spec.cols
-    if rotation in (90, 270):
-        grid_rows, grid_cols = grid_cols, grid_rows
-
-    # Apply grid to rotated image with no additional rotation
-    # Note: draw_grid_on_template adds 40px margins on each side for labels
+    # Apply grid to rotated image
+    # draw_grid_on_template will handle row/col swapping based on rotation parameter
+    # Note: DEFAULT_GRID_MARGIN pixels are added on each side for labels
     template_with_grid = draw_grid_on_template(
         rotated_img,
-        grid_rows,
-        grid_cols,
-        rotation=0,  # Image is already rotated, so no rotation needed here
+        template_spec.rows,
+        template_spec.cols,
+        rotation=rotation,
     )
 
     # Get target size in pixels
@@ -109,7 +103,7 @@ def export_template_with_grid(
     template_target_width = int(export_width_cm * pixels_per_cm)
 
     # The grid image has margins, so we need to scale based on template portion
-    # Grid adds 80px total margin (40px on each side)
+    # Grid adds total margin (DEFAULT_GRID_MARGIN px on each side)
     template_h, template_w = rotated_img.shape[:2]
     grid_h, grid_w = template_with_grid.shape[:2]
 
