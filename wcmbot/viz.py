@@ -12,6 +12,9 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
+# Default margin in pixels for grid labels around the template image
+DEFAULT_GRID_MARGIN = 40
+
 
 def rotate_template_preview(
     image_rgb: Optional[np.ndarray], rotation: int
@@ -36,7 +39,7 @@ def draw_grid_on_template(
     label_color: Tuple[int, int, int] = (0, 0, 0),
     font_scale: float = 0.8,
     font_thickness: int = 2,
-    margin: int = 40,
+    margin: int = DEFAULT_GRID_MARGIN,
 ) -> np.ndarray:
     """Draw a grid overlay on template with row/column labels outside the image.
 
