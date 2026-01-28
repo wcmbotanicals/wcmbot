@@ -993,18 +993,21 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         f"""
     # 🧩 WCMBot v{__version__}
 
-    Upload a picture of a jigsaw puzzle piece and let WCMBot infer its tab
-    counts and location in the full puzzle template!
+    Upload a photo of a jigsaw puzzle piece (or multiple pieces) and let WCMBot
+    infer its location in the full puzzle template. Tab/knob counts are inferred
+    automatically.
 
     **Features:**
     - **Grid overlay** enabled by default to show row and column numbers (toggle in Settings)
     - **Template rotation** in 90° increments for different puzzle orientations
+    - **Multipiece mode (batch)** to detect and solve multiple pieces in one upload
     - **Export templates** as high-quality PNG with grid using `export_template_grid.py`
 
     **Usage notes:**
-    - Pictures must show a single puzzle piece on a plain (not blue) background.
-    - The piece should be aligned roughly upright in the picture for best results.
-      Optional auto-align (experimental) can correct small tilts (rotations of multiples of 90° are evaluated).
+        - Use a plain background (avoid blue/green where possible).
+        - For best results, ensure good lighting and minimal shadows.
+        - Optional auto-align (experimental) can correct small tilts.
+        - Matching runs automatically after upload; the button is there if you want to re-run.
     
     This app is almost entirely vibe-coded. If you and/or your AI agents would like to
     contribute to its development, proposals and PRs are very welcome at
