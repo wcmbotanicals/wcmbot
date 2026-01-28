@@ -134,9 +134,8 @@ def export_template_with_grid(
         interpolation=cv2.INTER_LANCZOS4,
     )
 
-    # Convert RGB to BGR for OpenCV, then back to RGB for PIL
-    resized_rgb = cv2.cvtColor(resized, cv2.COLOR_RGB2BGR)
-    output_img = Image.fromarray(cv2.cvtColor(resized_rgb, cv2.COLOR_BGR2RGB))
+    # Create PIL image directly from the RGB array
+    output_img = Image.fromarray(resized)
 
     # Determine output path
     if output_path is None:
