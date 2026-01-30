@@ -201,19 +201,48 @@ def find_multipiece_region_dicts(
     The original UI/test code represented regions as dictionaries:
       {"bbox": (x, y, w, h), "contour": contour, "area": area}
 
+    When mask_mode="ai", uses AI background removal once for the entire image
+    and returns regions with piece_bgra pre-removed. This is more efficient
+    than running AI on each individual piece.
+
     Prefer using find_multipiece_regions() for typed access.
     """
+    # Check if AI mode should be used
+    # Use multipiece_mask_mode if set, otherwise use mask_mode
+    effective_mask_mode = None
+    if (
+        hasattr(matcher_config, "multipiece_mask_mode")
+        and matcher_config.multipiece_mask_mode
+    ):
+        effective_mask_mode = matcher_config.multipiece_mask_mode
+    elif hasattr(matcher_config, "mask_mode"):
+        effective_mask_mode = matcher_config.mask_mode
 
-    regions, mask01 = find_multipiece_regions(
-        image_bgr,
-        matcher_config,
-        compute_piece_mask_fn=compute_piece_mask_fn,
-        template_bgr=template_bgr,
-        template_mask=template_mask,
-        min_area_frac=min_area_frac,
-    )
+    if effective_mask_mode == "ai":
+        # Use AI background removal for efficient one-time processing
+        regions, mask01 = find_multipiece_regions_ai(
+            image_bgr,
+            matcher_config,
+            min_area_frac=min_area_frac,
+        )
+    else:
+        regions, mask01 = find_multipiece_regions(
+            image_bgr,
+            matcher_config,
+            compute_piece_mask_fn=compute_piece_mask_fn,
+            template_bgr=template_bgr,
+            template_mask=template_mask,
+            min_area_frac=min_area_frac,
+        )
+
     region_dicts = [
-        {"bbox": r.bbox, "contour": r.contour, "area": r.area} for r in regions
+        {
+            "bbox": r.bbox,
+            "contour": r.contour,
+            "area": r.area,
+            "piece_bgra": r.piece_bgra,  # Include pre-removed background if available
+        }
+        for r in regions
     ]
     return region_dicts, mask01
 
