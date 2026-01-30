@@ -2,6 +2,7 @@
  
 ## Setup commands
 - Install deps via uv if available (`uv sync --extra dev`), otherwise use pip (`pip install -e ".[dev]"`).
+- Install playwright browsers: `playwright install`.
 
 ## Repository expectations
 - After making changes, always format (`ruff format`), lint (`ruff check`) and run tests (`pytest`).
