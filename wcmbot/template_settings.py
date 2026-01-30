@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEMPLATE_CONFIG_PATH = BASE_DIR / "media" / "templates" / "templates.json"
 
@@ -23,6 +22,7 @@ class TemplateSpec:
     crop_y: int = 0
     default_rotation: int = 0
     auto_align_default: bool = True
+    export_width_cm: float = 66.0
     piece_dirs: Tuple[Path, ...] = field(default_factory=tuple)
     matcher_overrides: Dict[str, object] = field(default_factory=dict)
 
@@ -77,6 +77,7 @@ def load_template_registry(
             crop_y=int(entry.get("crop_y", 0)),
             default_rotation=int(entry.get("default_rotation", 0)),
             auto_align_default=bool(entry.get("auto_align_default", True)),
+            export_width_cm=float(entry.get("export_width_cm", 66.0)),
             piece_dirs=piece_dirs,
             matcher_overrides=matcher_overrides,
         )

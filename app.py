@@ -30,8 +30,10 @@ from wcmbot.solving import (
 )
 from wcmbot.template_settings import load_template_registry
 from wcmbot.viz import (
+    DEFAULT_GRID_MARGIN,
     annotate_pair_image,
     build_multipiece_overview,
+    draw_grid_on_template,
     overlay_piece_on_template,
     rotate_template_preview,
     stack_images_vertical,
@@ -217,6 +219,34 @@ def get_template_image(
     return None
 
 
+def prepare_template_display(
+    template_id: str, rotation: int, show_grid: bool = False
+) -> Optional[np.ndarray]:
+    """Prepare template for display with optional rotation and grid overlay."""
+    template_spec = TEMPLATE_REGISTRY.get(template_id)
+    template_img = TEMPLATE_IMAGES.get(template_id)
+
+    if template_img is None:
+        return None
+
+    # Apply rotation first
+    rotated = rotate_template_preview(template_img, rotation)
+
+    if rotated is None:
+        return None
+
+    # Apply grid if requested
+    if show_grid:
+        rotated = draw_grid_on_template(
+            rotated,
+            template_spec.rows,
+            template_spec.cols,
+            rotation=rotation,
+        )
+
+    return rotated
+
+
 def _views_to_outputs(
     views: Dict[str, Optional[np.ndarray]],
     location: str,
@@ -248,10 +278,12 @@ def _build_button_visibility(batch_state):
     return button_updates + spacer_updates
 
 
-def _blank_outputs(message: str, template_id: str, template_rotation: int):
+def _blank_outputs(
+    message: str, template_id: str, template_rotation: int, show_grid: bool = False
+):
     blank_views = {key: None for key in VIEW_KEYS}
-    rotated_template = rotate_template_preview(
-        TEMPLATE_IMAGES.get(template_id), template_rotation
+    rotated_template = prepare_template_display(
+        template_id, template_rotation, show_grid
     )
     blank_views["template_color"] = rotated_template
     blank_views["zoom_template"] = make_zoomable_plot(rotated_template)
@@ -321,6 +353,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
     template_rgb = batch_state.get("template_rgb")
     template_id = batch_state.get("template_id")
     rotation = batch_state.get("rotation", 0)
+    show_grid = batch_state.get("show_grid", False)
 
     latest_zoom = None
     latest_pair = None
@@ -336,7 +369,21 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
 
     template_view = None
     if template_rgb is not None:
-        template_marked = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR).copy()
+        # Apply grid overlay first if requested
+        template_for_marking = template_rgb
+        margin = 0  # Track margin offset for coordinate adjustments
+        if show_grid:
+            template_spec = TEMPLATE_REGISTRY.get(template_id)
+            if template_spec:
+                margin = DEFAULT_GRID_MARGIN
+                template_for_marking = draw_grid_on_template(
+                    template_rgb,
+                    template_spec.rows,
+                    template_spec.cols,
+                    rotation=rotation,
+                )
+
+        template_marked = cv2.cvtColor(template_for_marking, cv2.COLOR_RGB2BGR).copy()
         for pidx, state in enumerate(piece_states):
             payload = state.get("payload") if state else None
             if not payload or not getattr(payload, "matches", None):
@@ -349,16 +396,42 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
             piece_bin = getattr(payload, "piece_bin", None)
             if piece_rgb is not None and piece_bin is not None:
                 piece_bgr = cv2.cvtColor(piece_rgb, cv2.COLOR_RGB2BGR)
-                overlay_piece_on_template(template_marked, piece_bgr, piece_bin, match)
+                # Adjust match coordinates for margin offset
+                if margin > 0:
+                    match_adjusted = match.copy()
+                    if "tl" in match:
+                        tlx, tly = match["tl"]
+                        match_adjusted["tl"] = (tlx + margin, tly + margin)
+                    if "br" in match:
+                        brx, bry = match["br"]
+                        match_adjusted["br"] = (brx + margin, bry + margin)
+                    if "center" in match:
+                        cx, cy = match["center"]
+                        match_adjusted["center"] = (cx + margin, cy + margin)
+                    overlay_piece_on_template(
+                        template_marked, piece_bgr, piece_bin, match_adjusted
+                    )
+                else:
+                    overlay_piece_on_template(
+                        template_marked, piece_bgr, piece_bin, match
+                    )
 
             contours = match.get("contours", [])
             if contours:
                 for cnt in contours:
                     cnt = np.asarray(cnt).reshape(-1, 2).astype(np.int32)
+                    # Adjust contour coordinates for margin
+                    if margin > 0:
+                        cnt = cnt + margin
                     cv2.polylines(template_marked, [cnt], True, color, 2)
             else:
                 tlx, tly = match.get("tl", (0, 0))
                 brx, bry = match.get("br", (0, 0))
+                if margin > 0:
+                    tlx += margin
+                    tly += margin
+                    brx += margin
+                    bry += margin
                 cv2.rectangle(template_marked, (tlx, tly), (brx, bry), color, 2)
 
             tlx, tly = match.get("tl", (0, 0))
@@ -375,6 +448,10 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
             else:
                 center_x = tlx + (brx - tlx) // 2
                 center_y = tly + (bry - tly) // 2
+            # Adjust label position for margin
+            if margin > 0:
+                center_x += margin
+                center_y += margin
             x = int(center_x - text_w / 2)
             y = int(center_y + text_h / 2)
             cv2.putText(
@@ -445,9 +522,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
     views["zoom_template"] = (
         template_view if template_view is not None else make_zoomable_plot(None)
     )
-    rotated_template = rotate_template_preview(
-        TEMPLATE_IMAGES.get(template_id), rotation
-    )
+    rotated_template = prepare_template_display(template_id, rotation, show_grid)
     views["template_color"] = rotated_template
     return views
 
@@ -650,22 +725,28 @@ def _change_match(
     template_id: str,
     template_rotation: int,
     batch_state=None,
+    show_grid=False,
 ):
     if payload is None or not getattr(payload, "matches", None):
         return _blank_outputs(
             "Run the matcher once a piece is uploaded.",
             template_id,
             template_rotation,
+            show_grid,
         )
     total = len(payload.matches)
     if total == 0:
-        return _blank_outputs("No matches available.", template_id, template_rotation)
+        return _blank_outputs(
+            "No matches available.", template_id, template_rotation, show_grid
+        )
     idx = (current_index or 0) + step
     idx %= total
     return _render_match_payload(payload, idx, batch_state)
 
 
-def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
+def solve_puzzle(
+    piece_path, template_id, auto_align, template_rotation, show_grid=False
+):
     """Run the high-performance matcher and return visualization slices"""
     template_spec = TEMPLATE_REGISTRY.get(template_id)
     rotation = (
@@ -675,7 +756,7 @@ def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
     )
     if not piece_path or not os.path.exists(piece_path):
         return _blank_outputs(
-            "Please upload a puzzle piece image.", template_id, rotation
+            "Please upload a puzzle piece image.", template_id, rotation, show_grid
         )
 
     try:
@@ -692,10 +773,12 @@ def solve_puzzle(piece_path, template_id, auto_align, template_rotation):
         )
         return _render_match_payload(payload, 0)
     except Exception as exc:  # pylint: disable=broad-except
-        return _blank_outputs(f"Error: {exc}", template_id, rotation)
+        return _blank_outputs(f"Error: {exc}", template_id, rotation, show_grid)
 
 
-def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotation):
+def solve_puzzle_multipiece(
+    piece_path, template_id, auto_align, template_rotation, show_grid=False
+):
     """Detect multiple pieces in an image and stream match results."""
     template_spec = TEMPLATE_REGISTRY.get(template_id)
     rotation = (
@@ -706,7 +789,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
 
     if not piece_path or not os.path.exists(piece_path):
         yield _blank_outputs(
-            "Please upload a puzzle piece image.", template_id, rotation
+            "Please upload a puzzle piece image.", template_id, rotation, show_grid
         )
         return
 
@@ -717,6 +800,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
             f"Could not read grid image: {exc}",
             template_id,
             rotation,
+            show_grid,
         )
         return
 
@@ -742,6 +826,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
             "No pieces detected in the image.",
             template_id,
             rotation,
+            show_grid,
         )
         return
 
@@ -757,6 +842,7 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
         "template_rgb": template_rgb,
         "piece_states": piece_states,
         "total": total,
+        "show_grid": show_grid,
     }
 
     processed = 0
@@ -824,31 +910,43 @@ def solve_puzzle_multipiece(piece_path, template_id, auto_align, template_rotati
 
 
 def solve_single_or_batch(
-    piece_path, template_id, auto_align, template_rotation, batch_mode
+    piece_path, template_id, auto_align, template_rotation, batch_mode, show_grid=False
 ):
     """Dispatch to single-piece solve or streamed multipiece mode."""
     if batch_mode:
         yield from solve_puzzle_multipiece(
-            piece_path, template_id, auto_align, template_rotation
+            piece_path, template_id, auto_align, template_rotation, show_grid
         )
     else:
-        result = solve_puzzle(piece_path, template_id, auto_align, template_rotation)
+        result = solve_puzzle(
+            piece_path, template_id, auto_align, template_rotation, show_grid
+        )
         yield result
 
 
 def goto_previous_match(
-    state, current_index, template_id, template_rotation, batch_state=None
+    state,
+    current_index,
+    template_id,
+    template_rotation,
+    batch_state=None,
+    show_grid=False,
 ):
     return _change_match(
-        -1, state, current_index, template_id, template_rotation, batch_state
+        -1, state, current_index, template_id, template_rotation, batch_state, show_grid
     )
 
 
 def goto_next_match(
-    state, current_index, template_id, template_rotation, batch_state=None
+    state,
+    current_index,
+    template_id,
+    template_rotation,
+    batch_state=None,
+    show_grid=False,
 ):
     return _change_match(
-        1, state, current_index, template_id, template_rotation, batch_state
+        1, state, current_index, template_id, template_rotation, batch_state, show_grid
     )
 
 
@@ -884,8 +982,10 @@ TEMPLATE_IMAGES = {
     )
     for spec in TEMPLATE_REGISTRY.templates.values()
 }
-DEFAULT_TEMPLATE_PREVIEW = rotate_template_preview(
-    TEMPLATE_IMAGES.get(DEFAULT_TEMPLATE_ID), DEFAULT_TEMPLATE_SPEC.default_rotation
+# Create default template display with grid (matches checkbox default of True)
+# Use prepare_template_display for consistency with the proper rotation flow
+DEFAULT_TEMPLATE_PREVIEW = prepare_template_display(
+    DEFAULT_TEMPLATE_ID, DEFAULT_TEMPLATE_SPEC.default_rotation, show_grid=True
 )
 DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
 
@@ -896,14 +996,21 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         f"""
     # 🧩 WCMBot v{__version__}
 
-    Upload a picture of a jigsaw puzzle piece and let WCMBot infer its tab
-    counts and location in the full puzzle template!
+    Upload a photo of a jigsaw puzzle piece (or multiple pieces) and let WCMBot
+    infer its location in the full puzzle template. Tab/knob counts are inferred
+    automatically.
 
-    Notes:
-    - Pictures must show a single puzzle piece on a plain (not blue) background.
-    - The piece should be aligned roughly upright in the picture for best results.
-      Optional auto-align (experimental) can correct small tilts (rotations of multiples of 90° are evaluated).
-    - Template rotation can be adjusted in 90° increments.
+    **Features:**
+    - **Grid overlay** enabled by default to show row and column numbers (toggle in Settings)
+    - **Template rotation** in 90° increments for different puzzle orientations
+    - **Multipiece mode (batch)** to detect and solve multiple pieces in one upload
+    - **Export templates** as high-quality PNG with grid using `export_template_grid.py`
+
+    **Usage notes:**
+        - Use a plain background (avoid blue/green where possible).
+        - For best results, ensure good lighting and minimal shadows.
+        - Optional auto-align (experimental) can correct small tilts.
+        - Matching runs automatically after upload; the button is there if you want to re-run.
     
     This app is almost entirely vibe-coded. If you and/or your AI agents would like to
     contribute to its development, proposals and PRs are very welcome at
@@ -1002,6 +1109,11 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                     label="Template rotation (degrees)",
                     choices=TEMPLATE_ROTATION_OPTIONS,
                     value=DEFAULT_TEMPLATE_SPEC.default_rotation,
+                )
+                show_grid_checkbox = gr.Checkbox(
+                    label="Show grid on template",
+                    value=True,
+                    info="Display grid lines with row/column numbers on the template.",
                 )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
@@ -1199,12 +1311,13 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         ],
     )
 
-    def _on_template_change(selected_template):
+    def _on_template_change(selected_template, show_grid):
         spec = TEMPLATE_REGISTRY.get(selected_template)
         defaults = _blank_outputs(
             "Run the matcher once a piece is uploaded.",
             selected_template,
             spec.default_rotation,
+            show_grid,  # use current checkbox state
         )
         return (
             spec.default_rotation,
@@ -1214,7 +1327,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
 
     template_selector.change(
         fn=_on_template_change,
-        inputs=[template_selector],
+        inputs=[template_selector, show_grid_checkbox],
         outputs=[
             template_rotation,
             auto_align_checkbox,
@@ -1228,6 +1341,44 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             *batch_spacers,
         ],
     )
+
+    def _update_template_display(template_id, rotation, show_grid, state, batch_state):
+        """Update just the template display when grid or rotation changes."""
+        template_preview = prepare_template_display(template_id, rotation, show_grid)
+        template_plot = make_zoomable_plot(template_preview)
+
+        # If we have batch state, update its show_grid setting and rebuild views
+        if batch_state and "piece_states" in batch_state:
+            batch_state["show_grid"] = show_grid
+            batch_state["rotation"] = rotation
+            views = _build_multipiece_views_from_state(batch_state)
+            return (
+                views.get("template_color"),
+                views.get("zoom_template"),
+                state,
+                batch_state,
+            )
+
+        return (template_preview, template_plot, state, batch_state)
+
+    # Update template display when grid checkbox or rotation changes
+    for control in [show_grid_checkbox, template_rotation]:
+        control.change(
+            fn=_update_template_display,
+            inputs=[
+                template_selector,
+                template_rotation,
+                show_grid_checkbox,
+                match_state,
+                batch_state,
+            ],
+            outputs=[
+                image_components["template_color"],
+                image_components["zoom_template"],
+                match_state,
+                batch_state,
+            ],
+        )
 
     def _no_update_outputs(state, idx, batch_state):
         num_spacers = (
@@ -1253,12 +1404,18 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         state,
         idx,
         batch_state,
+        show_grid,
     ):
         if not piece_path:
             yield _no_update_outputs(state, idx, batch_state)
             return
         result = solve_single_or_batch(
-            piece_path, template_id, auto_align, template_rotation, batch_mode
+            piece_path,
+            template_id,
+            auto_align,
+            template_rotation,
+            batch_mode,
+            show_grid,
         )
         yield from result
 
@@ -1274,6 +1431,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_state,
             match_index,
             batch_state,
+            show_grid_checkbox,
         ],
         outputs=[
             *ordered_components,
@@ -1295,6 +1453,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             auto_align_checkbox,
             template_rotation,
             batch_grid_checkbox,
+            show_grid_checkbox,
         ],
         outputs=[
             *ordered_components,
@@ -1315,6 +1474,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             template_selector,
             template_rotation,
             batch_state,
+            show_grid_checkbox,
         ],
         outputs=[
             *ordered_components,
@@ -1335,6 +1495,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             template_selector,
             template_rotation,
             batch_state,
+            show_grid_checkbox,
         ],
         outputs=[
             *ordered_components,

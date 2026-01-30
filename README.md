@@ -18,10 +18,14 @@ A Gradio web application that helps solve jigsaw puzzles by identifying where in
 ## Features
 
 - **Upload puzzle piece images** and automatically find their position in the template
-- **Tab count configuration** with horizontal and vertical tab inputs for accurate scale estimation
+- **Automatic tab/knob inference** (no manual input required)
 - **Multi-match visualization** with the same diagnostic subplots as the CLI workflow
 - **Zoomable/pannable plots** using Plotly for interactive exploration of match results
 - **Confidence scoring** for match quality
+- **Grid overlay on template** showing row and column numbers (enabled by default) with customizable display
+- **Multipiece mode (batch)**: upload a photo containing multiple pieces and solve them in sequence
+- **Export template grids** to high-quality PNG images with configurable DPI and rotation support
+- **Template rotation** in 90° increments for different puzzle orientations
 - **Interactive Gradio interface** with modern UI/UX
 - **HuggingFace Spaces ready**
 - **Fully tested** with Playwright E2E tests
@@ -31,16 +35,18 @@ A Gradio web application that helps solve jigsaw puzzles by identifying where in
 The application uses an improved pipeline inspired by `1.py`:
 
 1. **Blue mask segmentation**: Uses HSV thresholds and morphological cleanup to extract the piece
-2. **Knob-aware scaling**: Estimates scale using puzzle grid cell sizes and knob counts
+2. **Knob-aware scaling**: Estimates scale using puzzle grid cell sizes and inferred knob/tab counts
 3. **Binary template matching**: Runs multi-scale, multi-rotation correlation on binary patterns with top-N ranking
-4. **Interactive diagnostics**: Displays the multi-panel plots from `show_debug_all()` directly in the web UI with next/previous navigation
+4. **Interactive diagnostics**: Displays multi-panel plots directly in the web UI with next/previous navigation
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.12 or higher
-- pip package manager
+- Python 3.10 or higher
+- Either:
+	- `uv` (recommended), or
+	- `pip`
 
 ### Setup
 
@@ -52,7 +58,11 @@ cd wcmbot
 
 2. Install dependencies:
 ```bash
-pip install -r requirements.txt
+# Recommended
+uv sync --extra dev
+
+# Or with pip
+pip install -e ".[dev]"
 ```
 
 3. Install Playwright browsers (for testing):
@@ -66,22 +76,61 @@ playwright install
 
 Simply run:
 ```bash
+uv run python app.py
+```
+
+Or, if you installed with pip:
+```bash
 python app.py
 ```
 
-The app will:
-- Automatically create a default puzzle template if none exists
-- Launch the Gradio interface in your browser
-- Display the puzzle template and allow you to upload piece images
+The app will launch the Gradio interface in your browser.
+
+Optional flags:
+```bash
+# Make accessible on your LAN (binds 0.0.0.0)
+uv run python app.py --accessible
+
+# Enable Torch acceleration (uses MPS/CUDA if available)
+uv run python app.py --gpu
+```
 
 ### Using the Interface
 
-1. **View the template** - The puzzle template is displayed on the right side
-2. **Upload a piece** - Click the upload area or drag and drop a puzzle piece image
-3. **Set tab counts** - Enter the number of horizontal and vertical tabs (0-2) on your puzzle piece for accurate scale estimation
-4. **Find the match** - Click "Find Piece Location" button
+1. **View the template** - The puzzle template is displayed on the right side with a grid overlay showing row and column numbers
+2. **Toggle grid** - Enable/disable the grid overlay using the "Show Grid" checkbox in the Settings accordion
+3. **Upload a piece** - Click the upload area or drag and drop a puzzle piece image
+4. **Find the match** - Matching runs automatically after upload (or click "Find Piece Location")
 5. **View results** - See the highlighted position on the template with confidence score
 6. **Explore matches** - Use zoomable/pannable Plotly views to inspect match details and navigate between top matches
+7. **Rotate template** - Use the template rotation control to view the puzzle in different orientations (90° increments)
+
+Multipiece mode:
+- Enable "Multipiece mode (batch)" to detect multiple pieces in one upload and solve them in sequence.
+- Use the per-piece "Next candidate" controls to cycle candidate placements per detected piece.
+
+### Exporting Template Grids
+
+Use the `export_template_grid.py` script to export high-quality PNG images of puzzle templates with grids:
+
+```bash
+# Export a template at default DPI (150) with default rotation
+python export_template_grid.py sample_puzzle
+
+# Export with custom DPI
+python export_template_grid.py sample_puzzle --dpi 100
+
+# Export with rotation (0, 90, 180, or 270 degrees)
+python export_template_grid.py sample_puzzle --rotation 90
+
+# Export to a custom location
+python export_template_grid.py sample_puzzle --output ~/my_templates/
+
+# List all available templates
+python export_template_grid.py --list
+```
+
+The script automatically calculates the physical dimensions based on the `export_width_cm` parameter in your template configuration.
 
 ### HuggingFace Spaces
 
@@ -111,22 +160,23 @@ pytest -v
 
 ```
 wcmbot/
-├── app.py                   # Gradio interface
-├── matcher.py               # Image matching algorithms
-├── media/                   # Puzzle templates and pieces
-│   ├── templates/           # Puzzle templates
+├── app.py                         # Gradio interface
+├── export_template_grid.py        # Export templates with grids as PNG
+├── media/
+│   ├── templates/                 # Template images + registry
+│   │   ├── templates.json
 │   │   ├── sample_puzzle.png
-│   │   ├── grass_puzzle.png
-│   │   └── templates.json
-│   └── pieces/              # Sample puzzle pieces
-│       └── sample_puzzle/
-│           ├── piece_1.jpg
-│           ├── piece_2.jpg
-│           └── piece_3.jpg
-├── test_gradio.py           # Playwright E2E tests
-├── pytest.ini               # Pytest configuration
-├── requirements.txt         # Python dependencies
-└── README.md                # This file
+│   │   └── grass_puzzle.png
+│   └── pieces/                    # Sample piece images
+│       ├── sample_puzzle/
+│       └── grass_puzzle/
+├── wcmbot/
+│   ├── matcher.py                 # Matching pipeline
+│   ├── solving.py                 # Reusable solve helpers
+│   ├── multipiece.py              # Multipiece detection
+│   ├── template_settings.py       # Template registry loader
+│   └── viz.py                     # Rendering helpers
+└── tests/                         # Pytest + Playwright tests
 ```
 
 ## Technology Stack

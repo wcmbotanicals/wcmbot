@@ -7,7 +7,7 @@ name = "wcmbot"
 description = "Jigsaw puzzle solver with AI-powered piece matching"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = { file = "LICENSE" }
 dynamic = ["version"]
 
 dependencies = ["Pillow", "opencv-python", "numpy", "gradio", "plotly", "torch"]
