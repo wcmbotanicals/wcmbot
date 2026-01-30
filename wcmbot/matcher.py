@@ -1536,9 +1536,13 @@ def remove_background_ai(image_bgr: np.ndarray) -> np.ndarray:
     result_rgba = remove(image_rgb, session=session)
 
     # Convert RGB channels back to BGR, keep alpha
-    result_bgra = cv2.cvtColor(result_rgba[:, :, :3], cv2.COLOR_RGB2BGR)
+    result_bgr = cv2.cvtColor(result_rgba[:, :, :3], cv2.COLOR_RGB2BGR)
     if result_rgba.shape[2] == 4:
-        result_bgra = np.dstack([result_bgra, result_rgba[:, :, 3]])
+        alpha = result_rgba[:, :, 3]
+    else:
+        # rembg should always return RGBA, but fallback to full opacity if not
+        alpha = np.full(result_bgr.shape[:2], 255, dtype=np.uint8)
+    result_bgra = np.dstack([result_bgr, alpha])
 
     return result_bgra
 

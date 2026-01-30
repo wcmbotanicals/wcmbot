@@ -530,3 +530,25 @@ class TestMaskHelpers:
         config2 = MatcherConfig(mask_mode="gradient")
         mp_config2 = _get_multipiece_config(config2)
         assert mp_config2.mask_mode == "gradient"
+
+    def test_multipiece_region_has_piece_bgra_field(self):
+        """Test MultipieceRegion dataclass has piece_bgra field."""
+        from wcmbot.multipiece import MultipieceRegion
+
+        # Create a region with piece_bgra
+        region = MultipieceRegion(
+            bbox=(0, 0, 100, 100),
+            contour=np.zeros((4, 1, 2), dtype=np.int32),
+            area=10000.0,
+            piece_bgra=np.zeros((100, 100, 4), dtype=np.uint8),
+        )
+        assert region.piece_bgra is not None
+        assert region.piece_bgra.shape == (100, 100, 4)
+
+        # Default is None
+        region_no_bgra = MultipieceRegion(
+            bbox=(0, 0, 50, 50),
+            contour=np.zeros((4, 1, 2), dtype=np.int32),
+            area=2500.0,
+        )
+        assert region_no_bgra.piece_bgra is None
