@@ -516,6 +516,29 @@ class TestMaskHelpers:
         assert result.shape == (100, 100)
         assert result.sum() == 100 * 100  # All foreground
 
+    def test_bgra_image_uses_alpha_channel_as_mask(self):
+        """Test BGRA images use alpha channel directly for masking."""
+        from wcmbot.matcher import compute_piece_mask, MatcherConfig
+
+        # Create a BGRA image with a circular alpha mask
+        piece = np.zeros((100, 100, 4), dtype=np.uint8)
+        piece[:, :, :3] = 128  # Gray BGR
+        # Create a circular alpha mask (center is foreground)
+        y, x = np.ogrid[:100, :100]
+        center_y, center_x = 50, 50
+        dist = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+        piece[:, :, 3] = np.where(dist < 30, 255, 0).astype(np.uint8)
+
+        config = MatcherConfig(mask_mode="blue")  # Mode should be ignored for BGRA
+        result = compute_piece_mask(piece, config)
+
+        assert result.shape == (100, 100)
+        # Center should be foreground
+        assert result[50, 50] == 1
+        # Corners should be background
+        assert result[0, 0] == 0
+        assert result[99, 99] == 0
+
     def test_multipiece_mask_mode_uses_different_mode(self):
         """Test multipiece_mask_mode is used for multipiece splitting."""
         from wcmbot.matcher import MatcherConfig
