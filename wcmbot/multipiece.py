@@ -252,23 +252,26 @@ def find_multipiece_regions_ai(
     matcher_config,
     *,
     min_area_frac: float = 0.002,
+    pad_frac: float = 0.06,
 ) -> tuple[list[MultipieceRegion], np.ndarray]:
     """Find piece regions using AI background removal (rembg).
 
-    This function removes the background once using the AI model, replaces
-    the background with white, then extracts individual piece regions.
-    Each region includes a piece_bgr attribute with white background.
+    This function removes the background once using the AI model, then extracts
+    individual piece regions. Each region includes a piece_bgr attribute where:
+    - Original piece colors are preserved inside the contour
+    - White background is applied ONLY outside the contour edges
 
-    The white background works well with template default HSV masking since
-    white doesn't match the green/dark HSV ranges used for piece detection.
+    The white background allows skipping masking on individual pieces since
+    they already have clean foreground/background separation.
 
     Args:
         image_bgr: BGR image containing multiple pieces.
         matcher_config: Configuration (multipiece_mask_mode not used here).
         min_area_frac: Minimum contour area as fraction of image area.
+        pad_frac: Padding fraction around each piece (default 0.06).
 
     Returns:
-        (regions, mask01) where regions have piece_bgr with white background.
+        (regions, mask01) where regions have piece_bgr with white outside contours.
     """
     # Remove background from entire image using AI
     image_bgra = remove_background_ai(image_bgr)
@@ -284,11 +287,6 @@ def find_multipiece_regions_ai(
     _, mask255 = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
     mask01 = (mask255 > 0).astype(np.uint8)
 
-    # Replace background with white: where alpha < 128, set to white
-    image_white_bg = image_bgra[:, :, :3].copy()  # BGR channels
-    background_mask = alpha < 128
-    image_white_bg[background_mask] = [255, 255, 255]  # White background
-
     # Find contours
     contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -296,6 +294,10 @@ def find_multipiece_regions_ai(
 
     image_area = int(image_bgr.shape[0] * image_bgr.shape[1])
     min_area = max(400, int(image_area * float(min_area_frac)))
+    h_img, w_img = image_bgr.shape[:2]
+
+    # Get original BGR (without background replacement)
+    image_original_bgr = image_bgra[:, :, :3].copy()
 
     regions: list[MultipieceRegion] = []
     for cnt in contours:
@@ -304,12 +306,33 @@ def find_multipiece_regions_ai(
             continue
         x, y, w, h = cv2.boundingRect(cnt)
 
-        # Extract piece with white background (BGR for standard masking)
-        piece_bgr = image_white_bg[y : y + h, x : x + w].copy()
+        # Apply padding
+        pad = max(4, int(min(w, h) * float(pad_frac)))
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(w_img, x + w + pad)
+        y1 = min(h_img, y + h + pad)
+
+        # Create piece image with white background
+        piece_bgr = np.full((y1 - y0, x1 - x0, 3), 255, dtype=np.uint8)
+
+        # Create a mask for this piece's contour (shifted to piece coordinates)
+        piece_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+        cnt_shifted = cnt.copy()
+        cnt_shifted[:, 0, 0] -= x0
+        cnt_shifted[:, 0, 1] -= y0
+        cv2.drawContours(piece_mask, [cnt_shifted], -1, 255, -1)
+
+        # Copy original piece pixels ONLY inside the contour
+        crop_original = image_original_bgr[y0:y1, x0:x1]
+        piece_bgr[piece_mask > 0] = crop_original[piece_mask > 0]
 
         regions.append(
             MultipieceRegion(
-                bbox=(x, y, w, h), contour=cnt, area=area, piece_bgr=piece_bgr
+                bbox=(x0, y0, x1 - x0, y1 - y0),
+                contour=cnt,
+                area=area,
+                piece_bgr=piece_bgr,
             )
         )
 

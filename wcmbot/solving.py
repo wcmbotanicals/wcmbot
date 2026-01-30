@@ -9,7 +9,7 @@ It deliberately avoids Gradio/Plotly imports.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterator, Optional
 
 import numpy as np
@@ -130,10 +130,13 @@ def iter_multipiece_payloads_from_bgr(
         # Use pre-processed piece image if available (white background from AI mode)
         piece_bgr_preprocessed = region.get("piece_bgr")
         if piece_bgr_preprocessed is not None:
-            # Use BGR with white background - standard template masking will work
+            # Use pre-processed image with white outside contours
+            # Skip masking since AI already cleaned the background
             crop_img = piece_bgr_preprocessed
+            piece_config = replace(config, mask_skip=True)
         else:
             crop_img = grid_bgr[y0:y1, x0:x1].copy()
+            piece_config = config
 
         payload = None
         try:
@@ -142,7 +145,7 @@ def iter_multipiece_payloads_from_bgr(
                 template_spec,
                 auto_align=auto_align,
                 template_rotation=template_rotation,
-                matcher_config=config,
+                matcher_config=piece_config,
             )
         except Exception:  # pylint: disable=broad-except
             payload = None
