@@ -6,13 +6,13 @@ by the UI layer (app.py) and by benchmarks/scripts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from wcmbot.matcher import compute_piece_mask
+from wcmbot.matcher import compute_piece_mask, remove_background_ai
 
 
 @dataclass
@@ -20,6 +20,8 @@ class MultipieceRegion:
     bbox: Tuple[int, int, int, int]
     contour: np.ndarray
     area: float
+    # If set, the piece image with background already removed (BGRA)
+    piece_bgra: Optional[np.ndarray] = None
 
 
 def _compute_piece_mask_keep_all(
@@ -59,6 +61,21 @@ def _compute_piece_mask_keep_all(
             return compute_piece_mask_fn(image_bgr, matcher_config)
 
 
+def _get_multipiece_config(matcher_config):
+    """Get config for multipiece mask computation.
+
+    If multipiece_mask_mode is set, returns a modified config that uses that
+    mode for the initial splitting. Otherwise returns the original config.
+    """
+    if (
+        hasattr(matcher_config, "multipiece_mask_mode")
+        and matcher_config.multipiece_mask_mode
+    ):
+        # Create a new config with the multipiece mask mode using replace()
+        return replace(matcher_config, mask_mode=matcher_config.multipiece_mask_mode)
+    return matcher_config
+
+
 def compute_multipiece_mask(
     image_bgr: np.ndarray,
     matcher_config,
@@ -72,11 +89,16 @@ def compute_multipiece_mask(
 
     If the mask selects mostly background, it is optionally inverted. Template
     imagery can be supplied to support template-aware segmentation.
+
+    Uses multipiece_mask_mode if set in config, otherwise uses mask_mode.
     """
+    # Use multipiece-specific mask mode if configured
+    multipiece_config = _get_multipiece_config(matcher_config)
+
     mask01 = _compute_piece_mask_keep_all(
         compute_piece_mask_fn,
         image_bgr,
-        matcher_config,
+        multipiece_config,
         template_bgr=template_bgr,
         template_mask=template_mask,
     )
@@ -194,3 +216,100 @@ def find_multipiece_region_dicts(
         {"bbox": r.bbox, "contour": r.contour, "area": r.area} for r in regions
     ]
     return region_dicts, mask01
+
+
+def find_multipiece_regions_ai(
+    image_bgr: np.ndarray,
+    matcher_config,
+    *,
+    min_area_frac: float = 0.002,
+) -> tuple[list[MultipieceRegion], np.ndarray]:
+    """Find piece regions using AI background removal (rembg).
+
+    This function removes the background once using the AI model, then extracts
+    individual piece regions with pre-removed backgrounds. Each region includes
+    a piece_bgra attribute with the background-removed piece image.
+
+    This allows subsequent matching to skip masking entirely (use mask_skip=True)
+    since the pieces already have transparent backgrounds.
+
+    Args:
+        image_bgr: BGR image containing multiple pieces.
+        matcher_config: Configuration (multipiece_mask_mode not used here).
+        min_area_frac: Minimum contour area as fraction of image area.
+
+    Returns:
+        (regions, mask01) where regions have piece_bgra set.
+    """
+    # Remove background from entire image using AI
+    image_bgra = remove_background_ai(image_bgr)
+
+    # Extract alpha channel as mask
+    if image_bgra.shape[2] == 4:
+        alpha = image_bgra[:, :, 3]
+    else:
+        # Fallback if no alpha
+        alpha = np.ones(image_bgr.shape[:2], dtype=np.uint8) * 255
+
+    # Threshold alpha to binary mask
+    _, mask255 = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
+    mask01 = (mask255 > 0).astype(np.uint8)
+
+    # Find contours
+    contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return [], mask01
+
+    image_area = int(image_bgr.shape[0] * image_bgr.shape[1])
+    min_area = max(400, int(image_area * float(min_area_frac)))
+
+    regions: list[MultipieceRegion] = []
+    for cnt in contours:
+        area = float(cv2.contourArea(cnt))
+        if area < min_area:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        # Extract piece with alpha channel (background already removed)
+        piece_bgra = image_bgra[y : y + h, x : x + w].copy()
+
+        regions.append(
+            MultipieceRegion(
+                bbox=(x, y, w, h), contour=cnt, area=area, piece_bgra=piece_bgra
+            )
+        )
+
+    if not regions:
+        return [], mask01
+
+    # Sort regions by row, then left-to-right within each row
+    heights = np.array([region.bbox[3] for region in regions], dtype=np.float32)
+    row_thresh = float(np.median(heights) * 0.6)
+
+    centers = [
+        (
+            region.bbox[0] + region.bbox[2] / 2.0,
+            region.bbox[1] + region.bbox[3] / 2.0,
+            idx,
+        )
+        for idx, region in enumerate(regions)
+    ]
+    centers.sort(key=lambda t: t[1])
+
+    rows: list[dict] = []
+    for cx, cy, idx in centers:
+        if not rows:
+            rows.append({"cy": cy, "items": [(cx, cy, idx)]})
+            continue
+        if abs(cy - rows[-1]["cy"]) <= row_thresh:
+            rows[-1]["items"].append((cx, cy, idx))
+            rows[-1]["cy"] = float(np.mean([item[1] for item in rows[-1]["items"]]))
+        else:
+            rows.append({"cy": cy, "items": [(cx, cy, idx)]})
+
+    ordered: list[MultipieceRegion] = []
+    for row in rows:
+        row["items"].sort(key=lambda t: t[0])
+        ordered.extend([regions[idx] for _, _, idx in row["items"]])
+
+    return ordered, mask01
