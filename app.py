@@ -1450,6 +1450,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         idx,
         batch_state,
         show_grid,
+        segmentation_mode,
     ):
         if not piece_path:
             yield _no_update_outputs(state, idx, batch_state)
@@ -1461,6 +1462,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             template_rotation,
             batch_mode,
             show_grid,
+            segmentation_mode,
         )
         yield from result
 
@@ -1477,6 +1479,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_index,
             batch_state,
             show_grid_checkbox,
+            segmentation_mode,
         ],
         outputs=[
             *ordered_components,
