@@ -1153,12 +1153,11 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 )
                 segmentation_mode = gr.Dropdown(
                     label="Segmentation mode",
-                    choices=["default", "ai", "gradient"],
+                    choices=["default", "ai"],
                     value="default",
                     info=(
                         "default: Use template-configured HSV segmentation. "
-                        "ai: Neural network (slow but accurate). "
-                        "gradient: Edge-based detection (fast)."
+                        "ai: Neural network (slow but accurate)."
                     ),
                 )
             solve_button = gr.Button(

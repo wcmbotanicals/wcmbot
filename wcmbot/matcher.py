@@ -4269,6 +4269,10 @@ def find_piece_in_template_bgr(
 
     if piece_bgr is None:
         raise ValueError("piece_bgr must be a numpy array")
+
+    # Preserve original for mask computation (may have alpha channel)
+    piece_original = piece_bgr
+
     if piece_bgr.ndim == 2:
         piece = cv2.cvtColor(piece_bgr, cv2.COLOR_GRAY2BGR)
     elif piece_bgr.ndim == 3 and piece_bgr.shape[2] == 4:
@@ -4293,6 +4297,9 @@ def find_piece_in_template_bgr(
         marks.append(("template", time.perf_counter()))
 
     piece = _pad_piece_image(piece)
+    # Pad original consistently if it has alpha (for mask computation)
+    if piece_original.ndim == 3 and piece_original.shape[2] == 4:
+        piece_original = _pad_piece_image(piece_original)
     if profile:
         marks.append(("piece", time.perf_counter()))
 
@@ -4307,8 +4314,11 @@ def find_piece_in_template_bgr(
 
     template_bgr = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
     template_mask01 = (template_bin > 0).astype(np.uint8)
+    # Use original (possibly BGRA) for mask computation - alpha will be used if present
     piece_mask = compute_piece_mask(
-        piece,
+        piece_original
+        if piece_original.ndim == 3 and piece_original.shape[2] == 4
+        else piece,
         config,
         template_bgr=template_bgr,
         template_mask=template_mask01,
