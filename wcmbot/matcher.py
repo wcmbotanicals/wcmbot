@@ -1337,6 +1337,92 @@ def _mask_by_hsv_ranges(
     return mask01
 
 
+def _mask_by_gradient(
+    piece_bgr: np.ndarray,
+    kernel_size: int,
+    open_iters: int,
+    close_iters: int,
+    keep_largest_component: bool = True,
+) -> np.ndarray:
+    """Segment piece using gradient-based edge detection.
+
+    This approach works by:
+    1. Converting to grayscale and applying heavy blur to smooth internal texture
+    2. Computing morphological gradient to detect edges
+    3. Thresholding and closing gaps in the edge contour
+    4. Finding the largest contour and filling it to create the mask
+
+    This is more robust than HSV-based segmentation when piece colors
+    overlap with background colors, as it relies on edge contrast rather
+    than specific color ranges.
+
+    Args:
+        piece_bgr: BGR image of the piece.
+        kernel_size: Morphological kernel size for cleanup.
+        open_iters: Opening iterations for cleanup.
+        close_iters: Closing iterations for cleanup.
+        keep_largest_component: If True, keep only the largest connected component.
+
+    Returns:
+        Binary mask (0 or 1) with the piece foreground.
+    """
+    gray = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Heavy blur to smooth internal texture while preserving piece edges
+    blur_size = max(11, kernel_size * 2 - 1)
+    if blur_size % 2 == 0:
+        blur_size += 1
+    blur = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+
+    # Morphological gradient detects edges
+    grad_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    gradient = cv2.morphologyEx(blur, cv2.MORPH_GRADIENT, grad_kernel)
+
+    # Threshold to find strong edges
+    _, edge_thresh = cv2.threshold(
+        gradient, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    # Close gaps in edge contour
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    edges_closed = cv2.morphologyEx(
+        edge_thresh, cv2.MORPH_CLOSE, close_kernel, iterations=close_iters + 1
+    )
+
+    # Find largest contour (should be the piece boundary)
+    contours, _ = cv2.findContours(
+        edges_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        raise RuntimeError(
+            "Gradient segmentation produced no contours - check image contrast"
+        )
+
+    largest = max(contours, key=cv2.contourArea)
+
+    # Create mask by filling the contour
+    mask = np.zeros(gray.shape, dtype=np.uint8)
+    cv2.drawContours(mask, [largest], -1, 255, -1)
+
+    # Apply standard cleanup
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
+    mask01 = (mask > 0).astype(np.uint8)
+
+    if keep_largest_component:
+        mask01 = _keep_largest_component(mask01)
+
+    if mask01.sum() == 0:
+        raise RuntimeError(
+            "Gradient segmentation produced empty mask - check image contrast"
+        )
+
+    return mask01
+
+
 def compute_piece_mask(
     piece_bgr: np.ndarray,
     config: MatcherConfig,
@@ -1346,8 +1432,8 @@ def compute_piece_mask(
 ) -> np.ndarray:
     """Compute a binary mask for a puzzle piece based on color mode.
 
-    Supports "blue", "green", or "hsv"/"hsv_ranges" modes. Returns a binary
-    mask (0 or 1) with the piece foreground isolated at the input image size.
+    Supports "blue", "green", "hsv"/"hsv_ranges", or "gradient" modes. Returns a
+    binary mask (0 or 1) with the piece foreground isolated at the input image size.
 
     Args:
         piece_bgr: BGR image of the piece.
@@ -1382,6 +1468,10 @@ def compute_piece_mask(
             open_iters,
             close_iters,
             keep_largest_component,
+        )
+    elif mask_mode == "gradient":
+        mask01 = _mask_by_gradient(
+            piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
         )
     else:
         raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
