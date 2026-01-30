@@ -1116,6 +1116,89 @@ def _background_distance_from_border(
     return dist_u8, int(otsu)
 
 
+def _chrominance_distance_from_border(
+    img_bgr: np.ndarray,
+) -> Tuple[Optional[np.ndarray], Optional[int]]:
+    """Compute color distance from border using only chrominance (AB channels).
+
+    Unlike _background_distance_from_border which uses full LAB distance,
+    this function ignores luminance (L channel) to be robust against shadows
+    and lighting variations. This is particularly useful for multipiece
+    segmentation where the background may have uneven lighting.
+
+    Returns:
+        (dist_u8, otsu_threshold) - Distance map and Otsu threshold, or
+        (None, None) if the border has no pixels.
+    """
+    h, w = img_bgr.shape[:2]
+    border_px = int(max(6, min(24, round(min(h, w) * 0.04))))
+    border_mask = np.zeros((h, w), dtype=np.uint8)
+    border_mask[:border_px, :] = 1
+    border_mask[-border_px:, :] = 1
+    border_mask[:, :border_px] = 1
+    border_mask[:, -border_px:] = 1
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    border_pixels = lab[border_mask == 1]
+    if border_pixels.size == 0:
+        return None, None
+    # Use only A and B channels (chrominance), ignoring L (luminance)
+    bg_color_ab = np.median(border_pixels[:, 1:3], axis=0)
+    dist = np.linalg.norm(lab[:, :, 1:3] - bg_color_ab, axis=2)
+    dist_u8 = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    dist_u8 = cv2.GaussianBlur(dist_u8, (3, 3), 0)
+    otsu, _ = cv2.threshold(dist_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return dist_u8, int(otsu)
+
+
+def compute_chrominance_mask(
+    img_bgr: np.ndarray,
+    kernel_size: int = 7,
+    open_iters: int = 2,
+    close_iters: int = 2,
+) -> np.ndarray:
+    """Compute a foreground mask using chrominance distance from image borders.
+
+    This function segments foreground objects by measuring how different each
+    pixel's color (in LAB A/B space, ignoring luminance) is from the median
+    border color. It is particularly useful for multipiece segmentation where:
+
+    1. The background color is unknown or varies from expected HSV ranges
+    2. There are shadows or lighting variations at image edges
+    3. Puzzle pieces have mixed colors that don't match simple HSV thresholds
+
+    Args:
+        img_bgr: Input BGR image.
+        kernel_size: Morphological kernel size for cleanup.
+        open_iters: Number of opening iterations.
+        close_iters: Number of closing iterations.
+
+    Returns:
+        Binary mask (0 or 1) with foreground regions marked as 1.
+    """
+    dist_u8, otsu = _chrominance_distance_from_border(img_bgr)
+    if dist_u8 is None or otsu is None:
+        return np.zeros(img_bgr.shape[:2], dtype=np.uint8)
+
+    # Create initial mask from Otsu threshold
+    mask01 = (dist_u8 >= otsu).astype(np.uint8)
+
+    # Fill holes in the mask
+    mask01 = _fill_mask_holes(mask01)
+
+    # Smooth edges
+    mask01 = _smooth_mask_edges(mask01, kernel_size)
+
+    # Apply morphological cleanup
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (max(3, kernel_size), max(3, kernel_size))
+    )
+    mask255 = mask01 * 255
+    mask255 = cv2.morphologyEx(mask255, cv2.MORPH_CLOSE, kernel, iterations=close_iters)
+    mask255 = cv2.morphologyEx(mask255, cv2.MORPH_OPEN, kernel, iterations=open_iters)
+
+    return (mask255 > 0).astype(np.uint8)
+
+
 def _recover_piece_edges(
     piece_bgr: np.ndarray, mask01: np.ndarray, kernel_size: int
 ) -> np.ndarray:

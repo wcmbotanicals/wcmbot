@@ -12,7 +12,7 @@ from typing import Callable, Optional, Tuple
 import cv2
 import numpy as np
 
-from wcmbot.matcher import compute_piece_mask
+from wcmbot.matcher import compute_chrominance_mask, compute_piece_mask
 
 
 @dataclass
@@ -67,11 +67,16 @@ def compute_multipiece_mask(
     invert_background: bool = True,
     template_bgr: Optional[np.ndarray] = None,
     template_mask: Optional[np.ndarray] = None,
+    use_chrominance_fallback: bool = True,
 ) -> np.ndarray:
     """Compute a binary mask for separating multiple pieces.
 
     If the mask selects mostly background, it is optionally inverted. Template
     imagery can be supplied to support template-aware segmentation.
+
+    When use_chrominance_fallback is True (default), the function will use
+    chrominance-based masking to fill internal holes in pieces that may be
+    caused by piece colors matching the background HSV ranges.
     """
     mask01 = _compute_piece_mask_keep_all(
         compute_piece_mask_fn,
@@ -83,6 +88,37 @@ def compute_multipiece_mask(
 
     if invert_background and mask01.sum() > 0.5 * mask01.size:
         mask01 = (mask01 == 0).astype(np.uint8)
+
+    # Use chrominance-based segmentation to fill holes within piece boundaries
+    if use_chrominance_fallback and mask01.sum() > 0:
+        kernel_size = getattr(matcher_config, "mask_kernel_size", 7)
+        open_iters = getattr(matcher_config, "mask_open_iters", 2)
+        close_iters = getattr(matcher_config, "mask_close_iters", 2)
+        chroma_mask = compute_chrominance_mask(
+            image_bgr,
+            kernel_size=kernel_size,
+            open_iters=open_iters,
+            close_iters=close_iters,
+        )
+
+        # Find the convex hull of each connected component to define piece boundaries
+        # Then fill holes within those boundaries using chrominance mask
+        mask255 = mask01 * 255
+        contours, _ = cv2.findContours(
+            mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if contours:
+            # Create a mask of convex hulls for each piece
+            hull_mask = np.zeros_like(mask01)
+            for cnt in contours:
+                if cv2.contourArea(cnt) >= 100:  # Skip tiny noise
+                    hull = cv2.convexHull(cnt)
+                    cv2.drawContours(hull_mask, [hull], -1, 1, -1)
+
+            # Fill holes: within the convex hull, add chrominance foreground
+            enhanced = np.where(hull_mask > 0, (mask01 | chroma_mask), mask01)
+            mask01 = enhanced.astype(np.uint8)
 
     return mask01
 
