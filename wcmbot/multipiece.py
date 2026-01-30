@@ -20,8 +20,6 @@ class MultipieceRegion:
     bbox: Tuple[int, int, int, int]
     contour: np.ndarray
     area: float
-    # If set, the piece image with background already removed (BGRA)
-    piece_bgra: Optional[np.ndarray] = None
     # If set, the piece image with white background (BGR) for standard masking
     piece_bgr: Optional[np.ndarray] = None
 
@@ -242,7 +240,6 @@ def find_multipiece_region_dicts(
             "bbox": r.bbox,
             "contour": r.contour,
             "area": r.area,
-            "piece_bgra": r.piece_bgra,  # Include pre-removed background if available
             "piece_bgr": r.piece_bgr,  # Include white-background piece if available
         }
         for r in regions

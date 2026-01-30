@@ -516,29 +516,6 @@ class TestMaskHelpers:
         assert result.shape == (100, 100)
         assert result.sum() == 100 * 100  # All foreground
 
-    def test_bgra_image_uses_alpha_channel_as_mask(self):
-        """Test BGRA images use alpha channel directly for masking."""
-        from wcmbot.matcher import compute_piece_mask, MatcherConfig
-
-        # Create a BGRA image with a circular alpha mask
-        piece = np.zeros((100, 100, 4), dtype=np.uint8)
-        piece[:, :, :3] = 128  # Gray BGR
-        # Create a circular alpha mask (center is foreground)
-        y, x = np.ogrid[:100, :100]
-        center_y, center_x = 50, 50
-        dist = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
-        piece[:, :, 3] = np.where(dist < 30, 255, 0).astype(np.uint8)
-
-        config = MatcherConfig(mask_mode="blue")  # Mode should be ignored for BGRA
-        result = compute_piece_mask(piece, config)
-
-        assert result.shape == (100, 100)
-        # Center should be foreground
-        assert result[50, 50] == 1
-        # Corners should be background
-        assert result[0, 0] == 0
-        assert result[99, 99] == 0
-
     def test_multipiece_mask_mode_uses_different_mode(self):
         """Test multipiece_mask_mode is used for multipiece splitting."""
         from wcmbot.matcher import MatcherConfig
@@ -554,27 +531,27 @@ class TestMaskHelpers:
         mp_config2 = _get_multipiece_config(config2)
         assert mp_config2.mask_mode == "gradient"
 
-    def test_multipiece_region_has_piece_bgra_field(self):
-        """Test MultipieceRegion dataclass has piece_bgra field."""
+    def test_multipiece_region_has_piece_bgr_field(self):
+        """Test MultipieceRegion dataclass has piece_bgr field."""
         from wcmbot.multipiece import MultipieceRegion
 
-        # Create a region with piece_bgra
+        # Create a region with piece_bgr
         region = MultipieceRegion(
             bbox=(0, 0, 100, 100),
             contour=np.zeros((4, 1, 2), dtype=np.int32),
             area=10000.0,
-            piece_bgra=np.zeros((100, 100, 4), dtype=np.uint8),
+            piece_bgr=np.zeros((100, 100, 3), dtype=np.uint8),
         )
-        assert region.piece_bgra is not None
-        assert region.piece_bgra.shape == (100, 100, 4)
+        assert region.piece_bgr is not None
+        assert region.piece_bgr.shape == (100, 100, 3)
 
         # Default is None
-        region_no_bgra = MultipieceRegion(
+        region_no_bgr = MultipieceRegion(
             bbox=(0, 0, 50, 50),
             contour=np.zeros((4, 1, 2), dtype=np.int32),
             area=2500.0,
         )
-        assert region_no_bgra.piece_bgra is None
+        assert region_no_bgr.piece_bgr is None
 
     def test_mask_by_ai_creates_valid_mask(self):
         """Test _mask_by_ai produces a valid binary mask."""

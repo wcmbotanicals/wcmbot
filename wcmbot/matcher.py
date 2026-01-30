@@ -1563,12 +1563,8 @@ def compute_piece_mask(
     If config.mask_skip is True, returns an all-foreground mask (useful when
     background has already been removed, e.g., by AI preprocessing).
 
-    If the input image has 4 channels (BGRA), the alpha channel is used directly
-    as the mask, skipping color-based segmentation. This enables efficient
-    multipiece matching when background has been pre-removed.
-
     Args:
-        piece_bgr: BGR or BGRA image of the piece. If BGRA, alpha is used as mask.
+        piece_bgr: BGR image of the piece.
         config: MatcherConfig with mask settings.
         keep_largest_component: If True, keep only the largest connected component.
                                If False, keep all detected foreground. Defaults to True.
@@ -1581,15 +1577,6 @@ def compute_piece_mask(
     # If mask_skip is set, return all-foreground mask
     if config.mask_skip:
         return np.ones(piece_bgr.shape[:2], dtype=np.uint8)
-
-    # If input is BGRA (4 channels), use alpha channel directly as mask
-    if piece_bgr.ndim == 3 and piece_bgr.shape[2] == 4:
-        alpha = piece_bgr[:, :, 3]
-        # Threshold alpha to binary (alpha > 127 means foreground)
-        mask01 = (alpha > 127).astype(np.uint8)
-        if keep_largest_component and mask01.sum() > 0:
-            mask01 = _keep_largest_component(mask01)
-        return mask01
 
     mask_mode = (config.mask_mode or "blue").lower()
     kernel_size = int(config.mask_kernel_size)
@@ -4270,9 +4257,6 @@ def find_piece_in_template_bgr(
     if piece_bgr is None:
         raise ValueError("piece_bgr must be a numpy array")
 
-    # Preserve original for mask computation (may have alpha channel)
-    piece_original = piece_bgr
-
     if piece_bgr.ndim == 2:
         piece = cv2.cvtColor(piece_bgr, cv2.COLOR_GRAY2BGR)
     elif piece_bgr.ndim == 3 and piece_bgr.shape[2] == 4:
@@ -4297,9 +4281,6 @@ def find_piece_in_template_bgr(
         marks.append(("template", time.perf_counter()))
 
     piece = _pad_piece_image(piece)
-    # Pad original consistently if it has alpha (for mask computation)
-    if piece_original.ndim == 3 and piece_original.shape[2] == 4:
-        piece_original = _pad_piece_image(piece_original)
     if profile:
         marks.append(("piece", time.perf_counter()))
 
@@ -4314,11 +4295,8 @@ def find_piece_in_template_bgr(
 
     template_bgr = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
     template_mask01 = (template_bin > 0).astype(np.uint8)
-    # Use original (possibly BGRA) for mask computation - alpha will be used if present
     piece_mask = compute_piece_mask(
-        piece_original
-        if piece_original.ndim == 3 and piece_original.shape[2] == 4
-        else piece,
+        piece,
         config,
         template_bgr=template_bgr,
         template_mask=template_mask01,
