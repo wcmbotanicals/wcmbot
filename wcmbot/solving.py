@@ -127,11 +127,15 @@ def iter_multipiece_payloads_from_bgr(
         x1 = min(grid_bgr.shape[1], x + w + pad)
         y1 = min(grid_bgr.shape[0], y + h + pad)
 
-        # Use pre-removed background (BGRA) if available, otherwise crop BGR
-        # The piece_bgra comes from find_multipiece_regions_ai and has the
-        # background already removed - compute_piece_mask will use alpha channel
+        # Use pre-processed piece image if available:
+        # - piece_bgr: white background (from AI mode), use with template default masking
+        # - piece_bgra: transparent background (legacy), uses alpha as mask
+        piece_bgr_preprocessed = region.get("piece_bgr")
         piece_bgra = region.get("piece_bgra")
-        if piece_bgra is not None:
+        if piece_bgr_preprocessed is not None:
+            # Use BGR with white background - standard template masking will work
+            crop_img = piece_bgr_preprocessed
+        elif piece_bgra is not None:
             # Use BGRA directly - alpha channel will be used as mask
             crop_img = piece_bgra
         else:
