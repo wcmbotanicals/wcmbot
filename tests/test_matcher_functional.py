@@ -13,6 +13,7 @@ from wcmbot.matcher import (
     _fill_mask_holes,
     _smooth_mask_edges,
     _background_distance_from_border,
+    _chrominance_distance_from_border,
     _recover_piece_edges,
     _smooth_piece_contour,
     _template_color_clusters,
@@ -20,6 +21,7 @@ from wcmbot.matcher import (
     _background_color_clusters,
     _apply_background_cluster_mask,
     build_matcher_config,
+    compute_chrominance_mask,
     find_piece_in_template,
 )
 from wcmbot.multipiece import find_multipiece_region_dicts
@@ -479,3 +481,66 @@ class TestMaskHelpers:
         assert result.shape == (100, 100)
         # With zero threshold, result should be all zeros or mostly zeros
         assert result.sum() == 0
+
+    def test_chrominance_distance_from_border_valid_image(self):
+        """Test _chrominance_distance_from_border with a valid image."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        # Add a distinct border (different color)
+        img[:10, :] = [100, 100, 100]
+        img[-10:, :] = [100, 100, 100]
+        img[:, :10] = [100, 100, 100]
+        img[:, -10:] = [100, 100, 100]
+        dist_u8, otsu = _chrominance_distance_from_border(img)
+        assert dist_u8 is not None
+        assert otsu is not None
+        assert dist_u8.shape == (100, 100)
+
+    def test_chrominance_distance_from_border_uniform_image(self):
+        """Test _chrominance_distance_from_border with uniform image."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        dist_u8, otsu = _chrominance_distance_from_border(img)
+        # May return valid values even for uniform images
+        if dist_u8 is not None:
+            assert dist_u8.shape == (100, 100)
+
+    def test_chrominance_distance_ignores_luminance(self):
+        """Test that chrominance distance ignores luminance variations."""
+        # Create image with same chrominance but different luminance at borders
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        # Darker border (same hue, lower value)
+        img[:10, :] = [64, 64, 64]
+        img[-10:, :] = [64, 64, 64]
+        img[:, :10] = [64, 64, 64]
+        img[:, -10:] = [64, 64, 64]
+        dist_u8, otsu = _chrominance_distance_from_border(img)
+        # With same chrominance, distances should be minimal
+        if dist_u8 is not None:
+            # Most pixels should have low distance since chrominance is similar
+            assert np.median(dist_u8) < 128
+
+    def test_compute_chrominance_mask_returns_binary(self):
+        """Test compute_chrominance_mask returns a binary mask."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        # Add distinct foreground
+        img[30:70, 30:70] = [0, 255, 0]  # Green center
+        result = compute_chrominance_mask(img)
+        assert result.shape == (100, 100)
+        assert np.all((result == 0) | (result == 1))
+
+    def test_compute_chrominance_mask_empty_image(self):
+        """Test compute_chrominance_mask with uniform image."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        result = compute_chrominance_mask(img)
+        assert result.shape == (100, 100)
+        # Result should be valid (all zeros or some pattern)
+        assert result.dtype == np.uint8
+
+    def test_compute_chrominance_mask_detects_foreground(self):
+        """Test compute_chrominance_mask detects colored foreground."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 200  # Light gray bg
+        # Add distinct colored foreground
+        img[30:70, 30:70] = [0, 128, 0]  # Green center
+        result = compute_chrominance_mask(img)
+        # Should detect the green region as foreground
+        center_sum = result[35:65, 35:65].sum()
+        assert center_sum > 0, "Should detect colored foreground"

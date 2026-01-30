@@ -1094,16 +1094,30 @@ def _smooth_mask_edges(mask01: np.ndarray, kernel_size: int) -> np.ndarray:
     return (mask255 > 0).astype(np.uint8)
 
 
-def _background_distance_from_border(
-    img_bgr: np.ndarray,
-) -> Tuple[Optional[np.ndarray], Optional[int]]:
-    h, w = img_bgr.shape[:2]
+def _create_border_mask(h: int, w: int) -> Tuple[np.ndarray, int]:
+    """Create a binary mask for the image border region.
+
+    Args:
+        h: Image height.
+        w: Image width.
+
+    Returns:
+        (border_mask, border_px) - Binary mask and border width in pixels.
+    """
     border_px = int(max(6, min(24, round(min(h, w) * 0.04))))
     border_mask = np.zeros((h, w), dtype=np.uint8)
     border_mask[:border_px, :] = 1
     border_mask[-border_px:, :] = 1
     border_mask[:, :border_px] = 1
     border_mask[:, -border_px:] = 1
+    return border_mask, border_px
+
+
+def _background_distance_from_border(
+    img_bgr: np.ndarray,
+) -> Tuple[Optional[np.ndarray], Optional[int]]:
+    h, w = img_bgr.shape[:2]
+    border_mask, _ = _create_border_mask(h, w)
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     border_pixels = lab[border_mask == 1]
     if border_pixels.size == 0:
@@ -1126,17 +1140,15 @@ def _chrominance_distance_from_border(
     and lighting variations. This is particularly useful for multipiece
     segmentation where the background may have uneven lighting.
 
+    Args:
+        img_bgr: Input BGR image.
+
     Returns:
         (dist_u8, otsu_threshold) - Distance map and Otsu threshold, or
         (None, None) if the border has no pixels.
     """
     h, w = img_bgr.shape[:2]
-    border_px = int(max(6, min(24, round(min(h, w) * 0.04))))
-    border_mask = np.zeros((h, w), dtype=np.uint8)
-    border_mask[:border_px, :] = 1
-    border_mask[-border_px:, :] = 1
-    border_mask[:, :border_px] = 1
-    border_mask[:, -border_px:] = 1
+    border_mask, _ = _create_border_mask(h, w)
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     border_pixels = lab[border_mask == 1]
     if border_pixels.size == 0:
@@ -1188,13 +1200,13 @@ def compute_chrominance_mask(
     # Smooth edges
     mask01 = _smooth_mask_edges(mask01, kernel_size)
 
-    # Apply morphological cleanup
+    # Apply morphological cleanup (open first to remove noise, then close to fill gaps)
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (max(3, kernel_size), max(3, kernel_size))
     )
     mask255 = mask01 * 255
-    mask255 = cv2.morphologyEx(mask255, cv2.MORPH_CLOSE, kernel, iterations=close_iters)
     mask255 = cv2.morphologyEx(mask255, cv2.MORPH_OPEN, kernel, iterations=open_iters)
+    mask255 = cv2.morphologyEx(mask255, cv2.MORPH_CLOSE, kernel, iterations=close_iters)
 
     return (mask255 > 0).astype(np.uint8)
 

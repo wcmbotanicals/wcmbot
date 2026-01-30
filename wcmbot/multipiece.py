@@ -110,9 +110,12 @@ def compute_multipiece_mask(
 
         if contours:
             # Create a mask of convex hulls for each piece
+            # Use min_contour_area proportional to image size to filter noise
+            image_area = image_bgr.shape[0] * image_bgr.shape[1]
+            min_contour_area = max(100, int(image_area * 0.00002))
             hull_mask = np.zeros_like(mask01)
             for cnt in contours:
-                if cv2.contourArea(cnt) >= 100:  # Skip tiny noise
+                if cv2.contourArea(cnt) >= min_contour_area:
                     hull = cv2.convexHull(cnt)
                     cv2.drawContours(hull_mask, [hull], -1, 1, -1)
 
