@@ -1211,6 +1211,82 @@ def compute_chrominance_mask(
     return (mask255 > 0).astype(np.uint8)
 
 
+def compute_gradient_mask(
+    img_bgr: np.ndarray,
+    blur_fraction: float = 0.05,
+    kernel_fraction: float = 0.025,
+    gradient_threshold: int = 10,
+    close_iterations: int = 4,
+    epsilon_fraction: float = 0.005,
+) -> np.ndarray:
+    """Compute a foreground mask using morphological gradient edge detection.
+
+    This function segments foreground objects by detecting strong edges using
+    morphological gradient, then finding the largest closed contour. It is
+    particularly useful when piece colors overlap with background colors,
+    making color-based segmentation unreliable.
+
+    The approach:
+    1. Apply heavy Gaussian blur to reduce internal texture
+    2. Compute morphological gradient to detect edges
+    3. Threshold and close gaps in edge map
+    4. Find largest contour and approximate with polygon
+    5. Fill the polygon to create the mask
+
+    Args:
+        img_bgr: Input BGR image.
+        blur_fraction: Blur kernel size as fraction of min dimension.
+        kernel_fraction: Morphological kernel size as fraction of min dimension.
+        gradient_threshold: Threshold for gradient binarization.
+        close_iterations: Number of morphological close iterations.
+        epsilon_fraction: Polygon approximation epsilon as fraction of arc length.
+
+    Returns:
+        Binary mask (0 or 1) with foreground regions marked as 1.
+    """
+    h, w = img_bgr.shape[:2]
+    min_dim = min(h, w)
+
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Heavy blur to reduce internal texture
+    blur_size = max(11, int(min_dim * blur_fraction)) | 1  # Ensure odd
+    heavy_blur = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+
+    # Morphological gradient to detect edges
+    kernel_size = max(5, int(min_dim * kernel_fraction)) | 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    gradient = cv2.morphologyEx(heavy_blur, cv2.MORPH_GRADIENT, kernel)
+
+    # Threshold gradient
+    _, grad_thresh = cv2.threshold(gradient, gradient_threshold, 255, cv2.THRESH_BINARY)
+
+    # Close gaps in edge map
+    grad_closed = cv2.morphologyEx(
+        grad_thresh, cv2.MORPH_CLOSE, kernel, iterations=close_iterations
+    )
+
+    # Find contours
+    contours, _ = cv2.findContours(
+        grad_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return np.zeros((h, w), dtype=np.uint8)
+
+    # Get largest contour
+    largest = max(contours, key=cv2.contourArea)
+
+    # Approximate with polygon for smoother boundary
+    epsilon = epsilon_fraction * cv2.arcLength(largest, True)
+    approx = cv2.approxPolyDP(largest, epsilon, True)
+
+    # Create filled mask
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(mask, [approx], -1, 1, -1)
+
+    return mask
+
+
 def _recover_piece_edges(
     piece_bgr: np.ndarray, mask01: np.ndarray, kernel_size: int
 ) -> np.ndarray:

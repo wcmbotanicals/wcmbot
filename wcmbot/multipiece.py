@@ -12,7 +12,11 @@ from typing import Callable, Optional, Tuple
 import cv2
 import numpy as np
 
-from wcmbot.matcher import compute_chrominance_mask, compute_piece_mask
+from wcmbot.matcher import (
+    compute_chrominance_mask,
+    compute_gradient_mask,
+    compute_piece_mask,
+)
 
 
 @dataclass
@@ -68,6 +72,7 @@ def compute_multipiece_mask(
     template_bgr: Optional[np.ndarray] = None,
     template_mask: Optional[np.ndarray] = None,
     use_chrominance_fallback: bool = True,
+    use_gradient_enhancement: bool = True,
 ) -> np.ndarray:
     """Compute a binary mask for separating multiple pieces.
 
@@ -77,6 +82,10 @@ def compute_multipiece_mask(
     When use_chrominance_fallback is True (default), the function will use
     chrominance-based masking to fill internal holes in pieces that may be
     caused by piece colors matching the background HSV ranges.
+
+    When use_gradient_enhancement is True (default), the function will use
+    gradient-based edge detection to improve piece boundaries, which is
+    particularly useful when piece colors overlap with background colors.
     """
     mask01 = _compute_piece_mask_keep_all(
         compute_piece_mask_fn,
@@ -89,7 +98,94 @@ def compute_multipiece_mask(
     if invert_background and mask01.sum() > 0.5 * mask01.size:
         mask01 = (mask01 == 0).astype(np.uint8)
 
-    # Use chrominance-based segmentation to fill holes within piece boundaries
+    # Enhance each detected piece region using gradient-based edge detection
+    # This is applied per-piece because gradient detection works best on
+    # individual piece crops, not the full multi-piece image
+    # Only apply if pieces have significant color overlap with background
+    if use_gradient_enhancement and mask01.sum() > 0:
+        mask255 = mask01 * 255
+        contours, _ = cv2.findContours(
+            mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if contours:
+            image_area = image_bgr.shape[0] * image_bgr.shape[1]
+            min_contour_area = max(100, int(image_area * 0.0005))
+
+            # Check if pieces have significant color overlap with background
+            # by sampling a few pieces
+            hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+            sample_contours = [
+                c for c in contours if cv2.contourArea(c) >= min_contour_area
+            ][:5]
+            total_overlap = 0.0
+
+            for cnt in sample_contours:
+                x, y, w, h = cv2.boundingRect(cnt)
+                pad = max(10, int(min(w, h) * 0.15))
+                x0, y0 = max(0, x - pad), max(0, y - pad)
+                x1, y1 = (
+                    min(image_bgr.shape[1], x + w + pad),
+                    min(image_bgr.shape[0], y + h + pad),
+                )
+
+                piece_hsv = hsv[y0:y1, x0:x1]
+                piece_mask = mask01[y0:y1, x0:x1]
+
+                bg_mask = (piece_mask == 0).astype(np.uint8)
+                fg_mask = (piece_mask > 0).astype(np.uint8)
+
+                if bg_mask.sum() >= 100 and fg_mask.sum() >= 100:
+                    bg_hue = piece_hsv[bg_mask == 1, 0]
+                    fg_hue = piece_hsv[fg_mask == 1, 0]
+                    bg_h_low, bg_h_high = np.percentile(bg_hue, [10, 90])
+                    fg_in_bg = ((fg_hue >= bg_h_low) & (fg_hue <= bg_h_high)).sum()
+                    overlap = fg_in_bg / len(fg_hue) if len(fg_hue) > 0 else 0
+                    total_overlap += overlap
+
+            avg_overlap = total_overlap / len(sample_contours) if sample_contours else 0
+
+            # Only apply gradient enhancement if average overlap > 5%
+            # This indicates piece colors overlap with background
+            if avg_overlap > 0.05:
+                for cnt in contours:
+                    if cv2.contourArea(cnt) >= min_contour_area:
+                        x, y, w, h = cv2.boundingRect(cnt)
+                        pad = max(5, int(min(w, h) * 0.1))
+                        x0 = max(0, x - pad)
+                        y0 = max(0, y - pad)
+                        x1 = min(image_bgr.shape[1], x + w + pad)
+                        y1 = min(image_bgr.shape[0], y + h + pad)
+
+                        # Extract piece region and compute gradient mask
+                        piece_region = image_bgr[y0:y1, x0:x1]
+                        piece_gradient = compute_gradient_mask(piece_region)
+
+                        # Create a convex hull mask to constrain gradient updates
+                        # This prevents the gradient mask from merging adjacent pieces
+                        hull = cv2.convexHull(cnt)
+                        hull_local = hull - [x0, y0]
+                        hull_constraint = np.zeros_like(piece_gradient)
+                        cv2.drawContours(hull_constraint, [hull_local], -1, 1, -1)
+
+                        # Dilate hull slightly to allow for edge recovery
+                        dilate_kernel = cv2.getStructuringElement(
+                            cv2.MORPH_ELLIPSE, (5, 5)
+                        )
+                        hull_constraint = cv2.dilate(
+                            hull_constraint, dilate_kernel, iterations=2
+                        )
+
+                        # Apply gradient only within hull constraint
+                        piece_gradient = piece_gradient & hull_constraint
+
+                        # Update the mask in this region
+                        current_region = mask01[y0:y1, x0:x1]
+                        mask01[y0:y1, x0:x1] = np.maximum(
+                            current_region, piece_gradient
+                        )
+
+    # Use chrominance-based segmentation to fill remaining holes
     if use_chrominance_fallback and mask01.sum() > 0:
         kernel_size = getattr(matcher_config, "mask_kernel_size", 7)
         open_iters = getattr(matcher_config, "mask_open_iters", 2)

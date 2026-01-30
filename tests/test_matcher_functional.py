@@ -22,6 +22,7 @@ from wcmbot.matcher import (
     _apply_background_cluster_mask,
     build_matcher_config,
     compute_chrominance_mask,
+    compute_gradient_mask,
     find_piece_in_template,
 )
 from wcmbot.multipiece import find_multipiece_region_dicts
@@ -544,3 +545,29 @@ class TestMaskHelpers:
         # Should detect the green region as foreground
         center_sum = result[35:65, 35:65].sum()
         assert center_sum > 0, "Should detect colored foreground"
+
+    def test_compute_gradient_mask_returns_binary(self):
+        """Test compute_gradient_mask returns a binary mask."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        # Add a distinct foreground with edges
+        img[30:70, 30:70] = [50, 100, 50]
+        result = compute_gradient_mask(img)
+        assert result.shape == (100, 100)
+        assert np.all((result == 0) | (result == 1))
+
+    def test_compute_gradient_mask_empty_image(self):
+        """Test compute_gradient_mask with uniform image."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        result = compute_gradient_mask(img)
+        assert result.shape == (100, 100)
+        assert result.dtype == np.uint8
+
+    def test_compute_gradient_mask_detects_edges(self):
+        """Test compute_gradient_mask detects object with clear edges."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 200  # Light gray bg
+        # Add a square with distinct edges
+        img[25:75, 25:75] = [50, 80, 50]  # Darker square
+        result = compute_gradient_mask(img)
+        # Should detect the square region as foreground
+        center_sum = result[30:70, 30:70].sum()
+        assert center_sum > 0, "Should detect object with edges"
