@@ -1453,8 +1453,8 @@ def _mask_by_ai(
 ) -> np.ndarray:
     """Segment piece using AI-based background removal (rembg).
 
-    Uses the U2Net model via rembg for high-quality background removal.
-    This produces excellent masks but is slower (~1s per piece) than
+    Uses the ISNet-general-use model via rembg for high-quality background
+    removal. This produces excellent masks but is slower (~1s per piece) than
     color-based methods.
 
     Args:
