@@ -9,7 +9,7 @@ It deliberately avoids Gradio/Plotly imports.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Iterator, Optional
 
 import numpy as np
@@ -131,12 +131,15 @@ def iter_multipiece_payloads_from_bgr(
         piece_bgr_preprocessed = region.get("piece_bgr")
         if piece_bgr_preprocessed is not None:
             # Use pre-processed image with white outside contours
-            # Skip masking since AI already cleaned the background
+            # Normal template HSV masking will run (not AI mode)
+            # White background doesn't match green/dark HSV ranges, so masking works well
             crop_img = piece_bgr_preprocessed
-            piece_config = replace(config, mask_skip=True)
         else:
             crop_img = grid_bgr[y0:y1, x0:x1].copy()
-            piece_config = config
+        
+        # Always use template default masking for individual pieces
+        # (Even if AI was used for multipiece detection, we use HSV for individual matching)
+        piece_config = config
 
         payload = None
         try:
