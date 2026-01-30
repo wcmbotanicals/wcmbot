@@ -1250,10 +1250,12 @@ def compute_gradient_mask(
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
     # Heavy blur to reduce internal texture
-    blur_size = max(11, int(min_dim * blur_fraction)) | 1  # Ensure odd
+    # Use bitwise OR with 1 to ensure odd kernel size (required by GaussianBlur)
+    blur_size = max(11, int(min_dim * blur_fraction)) | 1
     heavy_blur = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
 
     # Morphological gradient to detect edges
+    # Use bitwise OR with 1 to ensure odd kernel size
     kernel_size = max(5, int(min_dim * kernel_fraction)) | 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     gradient = cv2.morphologyEx(heavy_blur, cv2.MORPH_GRADIENT, kernel)

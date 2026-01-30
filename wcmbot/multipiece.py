@@ -84,8 +84,12 @@ def compute_multipiece_mask(
     caused by piece colors matching the background HSV ranges.
 
     When use_gradient_enhancement is True (default), the function will use
-    gradient-based edge detection to improve piece boundaries, which is
-    particularly useful when piece colors overlap with background colors.
+    gradient-based edge detection to improve piece boundaries. This is only
+    applied when significant hue overlap (>5%) is detected between piece
+    foreground and background colors, which indicates that color-based
+    segmentation is unreliable for the image. When piece/background colors
+    are distinct (like blue background with green pieces), gradient
+    enhancement is skipped to preserve the accurate HSV-based segmentation.
     """
     mask01 = _compute_piece_mask_keep_all(
         compute_piece_mask_fn,
@@ -139,15 +143,29 @@ def compute_multipiece_mask(
                     bg_hue = piece_hsv[bg_mask == 1, 0]
                     fg_hue = piece_hsv[fg_mask == 1, 0]
                     bg_h_low, bg_h_high = np.percentile(bg_hue, [10, 90])
-                    fg_in_bg = ((fg_hue >= bg_h_low) & (fg_hue <= bg_h_high)).sum()
-                    overlap = fg_in_bg / len(fg_hue) if len(fg_hue) > 0 else 0
+
+                    # Check for hue overlap, accounting for circular hue wraparound
+                    # Hue wraps at 180 in OpenCV (0-179), so red can be near 0 or 179
+                    if bg_h_high - bg_h_low > 90:
+                        # Background hue spans more than half the range, likely wraparound
+                        # In this case, treat as non-overlapping (background is mixed)
+                        fg_in_bg = 0
+                    else:
+                        fg_in_bg = ((fg_hue >= bg_h_low) & (fg_hue <= bg_h_high)).sum()
+
+                    # fg_hue is guaranteed non-empty by fg_mask.sum() >= 100 check
+                    overlap = fg_in_bg / len(fg_hue)
                     total_overlap += overlap
 
             avg_overlap = total_overlap / len(sample_contours) if sample_contours else 0
 
-            # Only apply gradient enhancement if average overlap > 5%
-            # This indicates piece colors overlap with background
-            if avg_overlap > 0.05:
+            # Apply gradient enhancement if average hue overlap exceeds threshold.
+            # The 5% threshold was determined empirically:
+            # - many_pieces.jpg (blue bg): ~0.1% overlap - no enhancement needed
+            # - difficult_multipiece.jpg (brown bg): ~12% overlap - enhancement helps
+            # Values above 5% indicate significant color overlap where HSV fails.
+            hue_overlap_threshold = 0.05
+            if avg_overlap > hue_overlap_threshold:
                 for cnt in contours:
                     if cv2.contourArea(cnt) >= min_contour_area:
                         x, y, w, h = cv2.boundingRect(cnt)
