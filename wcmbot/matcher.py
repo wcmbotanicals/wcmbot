@@ -1390,7 +1390,7 @@ def _mask_by_gradient(
         cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
     )
     edges_closed = cv2.morphologyEx(
-        edge_thresh, cv2.MORPH_CLOSE, close_kernel, iterations=close_iters + 1
+        edge_thresh, cv2.MORPH_CLOSE, close_kernel, iterations=close_iters
     )
 
     # Find largest contour (should be the piece boundary)
