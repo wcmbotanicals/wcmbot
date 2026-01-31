@@ -105,6 +105,7 @@ DIFFICULT_MULTIPIECE_EXPECTED = {
     2: (4, 17),
     3: (12, 21),
     4: (3, 8),
+    5: (21, 9),
     6: (17, 2),
     7: (22, 7),
     8: (2, 8),
@@ -122,6 +123,7 @@ DIFFICULT_MULTIPIECE_EXPECTED = {
     20: (9, 21),
     21: (26, 20),
     22: (21, 2),
+    23: (12, 22),
     24: (9, 35),
     25: (18, 8),
     26: (10, 5),
@@ -330,10 +332,10 @@ def test_find_piece_with_template_rotation(template_rotation):
 @pytest.mark.parametrize(
     "grid_filename,expected_count,mask_mode,test_type,minimum_correct,check_knobs",
     [
-        ("many_pieces.jpg", 25, None, "many_pieces", 23, True),
-        # ("many_pieces.jpg", 25, "ai", "many_pieces", 23, True),
-        ("difficult_multipiece.jpg", 28, None, "difficult_multipiece", 22, False),
-        # ("difficult_multipiece.jpg", 28, "ai", "difficult_multipiece", 22, False),
+        ("many_pieces.jpg", 25, None, "many_pieces", 24, True),
+        # ("many_pieces.jpg", 25, "ai", "many_pieces", 24, True),
+        ("difficult_multipiece.jpg", 28, None, "difficult_multipiece", 24, False),
+        # ("difficult_multipiece.jpg", 28, "ai", "difficult_multipiece", 24, False),
     ],
 )
 def test_multipiece_batch_parameterised(
@@ -431,9 +433,12 @@ def test_multipiece_batch_parameterised(
         expected_idx = expected.get(idx)
         if expected_idx is not None and expected_idx == placements[idx]:
             correct += 1
+        elif expected_idx is not None:
+            mismatches.append((idx, placements[idx], expected_idx))
 
     assert correct >= minimum_correct, (
-        f"Expected at least {minimum_correct} correctly placed pieces, got {correct}: {placements}"
+        f"Expected at least {minimum_correct} correctly placed pieces, got {correct}:"
+        f" mismatches (piece, placement, expected): {mismatches}"
     )
 
     if check_knobs:

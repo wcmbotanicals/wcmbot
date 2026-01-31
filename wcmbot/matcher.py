@@ -48,9 +48,10 @@ CROP_X_PX = 0
 CROP_Y_PX = 0
 MATCH_DILATE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 LOW_SCORE_THRESHOLD = 0.5
+LOW_GRID_SCORE_THRESHOLD = 0.6
 LOW_SCORE_ROTATIONS = [-5, -2.5, 2.5, 5]
 LOW_SCORE_MASK_EDGE_FRAC = 0.0
-LOW_SCORE_SCALE_SAMPLES = 17
+LOW_SCORE_SCALE_SAMPLES = 11
 
 LOWER_BLUE1 = np.array([90, 60, 40], dtype=np.uint8)
 UPPER_BLUE1 = np.array([140, 255, 255], dtype=np.uint8)
@@ -113,6 +114,7 @@ class MatcherConfig:
     parallel_matching: bool = True
     grid_center_weight: float = GRID_CENTER_WEIGHT
     low_score_threshold: Optional[float] = LOW_SCORE_THRESHOLD
+    low_grid_score_threshold: Optional[float] = LOW_GRID_SCORE_THRESHOLD
     low_score_rotations: List[float] = field(
         default_factory=lambda: list(LOW_SCORE_ROTATIONS)
     )
@@ -189,6 +191,7 @@ def build_matcher_config(
         "torch_device": torch_device_env,
         "grid_center_weight": GRID_CENTER_WEIGHT,
         "low_score_threshold": LOW_SCORE_THRESHOLD,
+        "low_grid_score_threshold": LOW_GRID_SCORE_THRESHOLD,
         "low_score_rotations": list(LOW_SCORE_ROTATIONS),
         "low_score_mask_edge_frac": LOW_SCORE_MASK_EDGE_FRAC,
         "low_score_scale_samples": LOW_SCORE_SCALE_SAMPLES,
@@ -4310,6 +4313,13 @@ def _top_match_score_raw(matches: List[Dict]) -> float:
     return float(score_raw)
 
 
+def _top_match_grid_score(matches: List[Dict]) -> float:
+    if not matches:
+        return float("-inf")
+    match = matches[0]
+    return float(match.get("grid_score", 0.0))
+
+
 def _match_piece_bgr_against_template(
     piece_bgr: np.ndarray,
     template_rgb: np.ndarray,
@@ -4359,6 +4369,7 @@ def _match_piece_bgr_against_template(
     knob_mask: Optional[np.ndarray] = None
     if (config.mask_mode or "blue").lower() in ("hsv", "hsv_ranges"):
         knob_mask = compute_piece_mask(piece, config)
+    mask_mode = (config.mask_mode or "blue").lower()
     if profile:
         marks.append(("mask", time.perf_counter()))
 
@@ -4455,6 +4466,8 @@ def _match_piece_bgr_against_template(
         match_knobs_x, match_knobs_y = knobs_x, knobs_y
 
     mask_edge_frac = max(0.0, float(mask_edge_frac))
+    if mask_mode == "ai":
+        mask_edge_frac = max(mask_edge_frac, 0.02)
     if mask_edge_frac > 0:
         piece_mask_crop = _erode_mask_edges(piece_mask_crop, mask_edge_frac)
         piece_bin = piece_bin * piece_mask_crop
@@ -4616,61 +4629,73 @@ def find_piece_in_template_bgr(
     )
 
     low_score_threshold = config.low_score_threshold
+    low_grid_score_threshold = config.low_grid_score_threshold
     base_score = _top_match_score_raw(payload.matches)
+    grid_score = _top_match_grid_score(payload.matches)
+
+    # Trigger low score behavior if either raw score or grid score is below threshold
     if (
         low_score_threshold is not None
         and float(low_score_threshold) > 0
         and base_score < float(low_score_threshold)
+    ) or (
+        low_grid_score_threshold is not None
+        and float(low_grid_score_threshold) > 0
+        and grid_score < float(low_grid_score_threshold)
     ):
         scale_window = _dense_scale_window(
             config.est_scale_window, config.low_score_scale_samples
         )
         mask_edge_frac = max(0.0, float(config.low_score_mask_edge_frac))
-        # For AI mask mode, use higher edge fraction to remove edge artifacts
-        if config.mask_mode == "ai":
-            mask_edge_frac = max(mask_edge_frac, 0.01)
         candidates = [payload]
 
-        if mask_edge_frac > 0 or scale_window != config.est_scale_window:
-            candidates.append(
-                _match_piece_bgr_against_template(
-                    piece,
-                    template_rgb,
-                    template_bin,
-                    config,
-                    knobs_x=knobs_x,
-                    knobs_y=knobs_y,
-                    auto_align=auto_align,
-                    infer_knobs=infer_knobs,
-                    template_blur_cache=template_blur_cache,
-                    template_blur_f32=template_blur_f32,
-                    scale_window=scale_window,
-                    mask_edge_frac=mask_edge_frac,
-                    profile=False,
-                )
-            )
+        # Parallelize low_score rotation sweeps
+        low_score_rots = [
+            r for r in (config.low_score_rotations or []) if abs(r) >= 1e-6
+        ]
+        if low_score_rots:
+            cpu_count = os.cpu_count() or 1
+            max_workers = min(len(low_score_rots), cpu_count)
 
-        for rot in config.low_score_rotations or []:
-            if abs(rot) < 1e-6:
-                continue
-            piece_rot = _rotate_piece_variant(piece, float(rot))
-            candidates.append(
-                _match_piece_bgr_against_template(
-                    piece_rot,
-                    template_rgb,
-                    template_bin,
-                    config,
-                    knobs_x=knobs_x,
-                    knobs_y=knobs_y,
-                    auto_align=auto_align,
-                    infer_knobs=infer_knobs,
-                    template_blur_cache=template_blur_cache,
-                    template_blur_f32=template_blur_f32,
-                    scale_window=scale_window,
-                    mask_edge_frac=mask_edge_frac,
-                    profile=False,
-                )
-            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                for rot in low_score_rots:
+                    # Apply the low-score sweep rotation on top of any previously
+                    # computed auto-align correction.
+                    # NOTE: _rotate_img uses clockwise-positive angles, which matches
+                    # the auto-align convention used elsewhere in this module.
+                    combined_rot = float(rot) + float(payload.auto_align_deg)
+                    piece_rot = _rotate_img(
+                        piece,
+                        combined_rot,
+                        interpolation=cv2.INTER_LINEAR,
+                        border_value=_background_bgr(piece),
+                    )
+                    future = executor.submit(
+                        _match_piece_bgr_against_template,
+                        piece_rot,
+                        template_rgb,
+                        template_bin,
+                        config,
+                        knobs_x=knobs_x,
+                        knobs_y=knobs_y,
+                        auto_align=False,
+                        infer_knobs=infer_knobs,
+                        template_blur_cache=template_blur_cache,
+                        template_blur_f32=template_blur_f32,
+                        scale_window=scale_window,
+                        mask_edge_frac=mask_edge_frac,
+                        profile=False,
+                    )
+                    futures.append(future)
+
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        candidates.append(result)
+                    except Exception as e:
+                        logger.warning("Low score rotation match failed: %s", e)
+                        continue
 
         payload = max(candidates, key=lambda item: _top_match_score_raw(item.matches))
 
