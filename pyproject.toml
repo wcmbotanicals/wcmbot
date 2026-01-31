@@ -12,7 +12,7 @@ dynamic = ["version"]
 
 dependencies = [
     "Pillow",
-    "opencv-python",
+    "opencv-python-headless",
     "numpy",
     "gradio",
     "plotly",

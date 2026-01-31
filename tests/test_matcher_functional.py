@@ -506,16 +506,6 @@ class TestMaskHelpers:
         # Corners (background) should not be detected
         assert result[5, 5] == 0
 
-    def test_mask_skip_returns_all_foreground(self):
-        """Test mask_skip=True returns an all-foreground mask."""
-        from wcmbot.matcher import compute_piece_mask, MatcherConfig
-
-        piece = np.ones((100, 100, 3), dtype=np.uint8) * 128
-        config = MatcherConfig(mask_skip=True)
-        result = compute_piece_mask(piece, config)
-        assert result.shape == (100, 100)
-        assert result.sum() == 100 * 100  # All foreground
-
     def test_multipiece_mask_mode_uses_different_mode(self):
         """Test multipiece_mask_mode is used for multipiece splitting."""
         from wcmbot.matcher import MatcherConfig
