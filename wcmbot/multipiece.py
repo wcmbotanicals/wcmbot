@@ -62,7 +62,8 @@ def _compute_piece_mask_keep_all(
 def _get_multipiece_config(matcher_config):
     """Get config for multipiece mask computation.
 
-    Returns the original config (retained for backward compatibility).
+    Currently just returns the original config unchanged.
+    Retained as a compatibility layer for potential future extensions.
     """
     return matcher_config
 
@@ -81,7 +82,6 @@ def compute_multipiece_mask(
     If the mask selects mostly background, it is optionally inverted. Template
     imagery can be supplied to support template-aware segmentation.
     """
-    # Use multipiece-specific mask mode if configured
     multipiece_config = _get_multipiece_config(matcher_config)
 
     mask01 = _compute_piece_mask_keep_all(
