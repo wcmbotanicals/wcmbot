@@ -99,6 +99,36 @@ MANY_PIECES_EXPECTED = {
 }
 
 
+DIFFICULT_MULTIPIECE_EXPECTED = {
+    1: (17, 21),
+    2: (4, 17),
+    3: (12, 21),
+    4: (3, 8),
+    6: (17, 2),
+    7: (22, 7),
+    8: (2, 8),
+    9: (3, 32),
+    10: (8, 22),
+    11: (8, 5),
+    12: (19, 18),
+    13: (26, 8),
+    14: (21, 5),
+    15: (26, 4),
+    16: (25, 34),
+    17: (25, 21),
+    18: (6, 5),
+    19: (9, 5),
+    20: (9, 21),
+    21: (26, 20),
+    22: (21, 2),
+    24: (9, 35),
+    25: (18, 8),
+    26: (10, 5),
+    27: (5, 5),
+    28: (26, 9),
+}
+
+
 MANY_PIECES_EXPECTED_KNOBS = {
     1: (1, 1),
     2: (1, 2),
@@ -368,6 +398,68 @@ def test_multipiece_many_pieces_batch():
     assert correct_knobs >= 12, (
         "Knob inference mismatches for some pieces: "
         f"{knob_mismatches}. All inferred: {inferred_knobs}"
+    )
+
+
+@pytest.mark.e2e
+def test_multipiece_difficult_multipiece_batch():
+    spec = TEMPLATE_REGISTRY.get("grass_puzzle")
+    matcher_config = build_matcher_config(
+        {
+            "rows": spec.rows,
+            "cols": spec.cols,
+            "crop_x": spec.crop_x,
+            "crop_y": spec.crop_y,
+            **spec.matcher_overrides,
+        }
+    )
+    grid_path = os.path.join(GRASS_PIECES_DIR, "difficult_multipiece.jpg")
+    grid_img = Image.open(grid_path).convert("RGB")
+    grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
+
+    regions, _ = find_multipiece_region_dicts(grid_bgr, matcher_config)
+    assert len(regions) == 28, "Expected 28 pieces detected"
+
+    placements = {}
+    mismatches = []
+    template_path = os.fspath(spec.template_path)
+    for idx, region in enumerate(regions, start=1):
+        x, y, w, h = region["bbox"]
+        pad = max(4, int(min(w, h) * 0.06))
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(grid_bgr.shape[1], x + w + pad)
+        y1 = min(grid_bgr.shape[0], y + h + pad)
+        crop = grid_img.crop((x0, y0, x1, y1))
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            crop.save(tmp.name)
+            crop_path = tmp.name
+        try:
+            payload = find_piece_in_template(
+                piece_image_path=crop_path,
+                template_image_path=template_path,
+                knobs_x=None,
+                knobs_y=None,
+                infer_knobs=True,
+                auto_align=True,
+                template_rotation=spec.default_rotation,
+                matcher_config=matcher_config,
+            )
+        finally:
+            os.unlink(crop_path)
+
+        assert payload.matches, f"No match returned for piece {idx}"
+
+        top = payload.matches[0]
+        placements[idx] = (top["row"], top["col"])
+        expected = DIFFICULT_MULTIPIECE_EXPECTED.get(idx)
+        if expected is not None and placements[idx] != expected:
+            mismatches.append((idx, placements[idx], expected))
+
+    assert not mismatches, (
+        "Expected all known pieces placed correctly. "
+        f"Mismatches: {mismatches}. All placements: {placements}"
     )
 
 
