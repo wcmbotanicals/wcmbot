@@ -4672,7 +4672,8 @@ def find_piece_in_template_bgr(
                 for future, applied_rot in futures:
                     try:
                         result = future.result()
-                        # Restore the rotation that was applied
+                        # Since auto_align=False was passed, result.auto_align_deg will be 0.0.
+                        # We restore the actual rotation that was applied to this variant.
                         result = result._replace(auto_align_deg=applied_rot)
                         candidates.append(result)
                     except Exception as e:
