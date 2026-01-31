@@ -10,7 +10,15 @@ requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dynamic = ["version"]
 
-dependencies = ["Pillow", "opencv-python", "numpy", "gradio", "plotly", "torch"]
+dependencies = [
+    "Pillow",
+    "opencv-python",
+    "numpy",
+    "gradio",
+    "plotly",
+    "torch",
+    "rembg[cpu]",
+]
 
 [project.urls]
 repository = "https://github.com/wcmbotanicals/wcmbot"
@@ -18,7 +26,7 @@ space = "https://huggingface.co/spaces/wcmbotanicals/wcmbot"
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest", "playwright", "pytest-playwright", "versioneer[toml]"]
-ai = ["rembg[cpu]"]  # For AI-based background removal (mask_mode="ai")
+gpu = ["rembg[gpu]"]
 
 [tool.versioneer]
 VCS = "git"
