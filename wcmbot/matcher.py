@@ -2027,14 +2027,24 @@ def _infer_knob_counts(
     template_shape: Tuple[int, int],
     config: MatcherConfig,
 ) -> Tuple[int, int]:
+    scored, fill_ratio = _infer_knob_candidates(piece_mask, template_shape, config)
+    knobs_x, knobs_y, _ = _choose_knobs_from_candidates(scored, fill_ratio)
+    return knobs_x, knobs_y
+
+
+def _infer_knob_candidates(
+    piece_mask: np.ndarray,
+    template_shape: Tuple[int, int],
+    config: MatcherConfig,
+) -> Tuple[List[Tuple[float, int, int]], float]:
     mask01 = (piece_mask > 0).astype(np.uint8)
     mh, mw = mask01.shape
     if mw == 0 or mh == 0:
-        return 0, 0
+        return [], 0.0
 
     piece_area_px = float(mask01.sum())
     if piece_area_px <= 0:
-        return 0, 0
+        return [], 0.0
 
     fill_ratio = piece_area_px / float(mw * mh)
 
@@ -2059,8 +2069,16 @@ def _infer_knob_counts(
                 + 0.5 * abs(est_scale_h - est_scale_area)
             )
             scored.append((float(diff), kx, ky))
-
     scored.sort(key=lambda item: item[0])
+    return scored, fill_ratio
+
+
+def _choose_knobs_from_candidates(
+    scored: List[Tuple[float, int, int]],
+    fill_ratio: float,
+) -> Tuple[int, int, List[Tuple[float, int, int]]]:
+    if not scored:
+        return 0, 0, []
     best_diff = scored[0][0]
     candidates = [item for item in scored if item[0] <= best_diff + INFER_KNOBS_TIE_EPS]
     if fill_ratio <= INFER_KNOBS_LOW_FILL:
@@ -2068,7 +2086,7 @@ def _infer_knob_counts(
     elif fill_ratio >= INFER_KNOBS_HIGH_FILL:
         candidates.sort(key=lambda item: ((item[1] + item[2]), item[0]))
     chosen = candidates[0]
-    return chosen[1], chosen[2]
+    return chosen[1], chosen[2], candidates
 
 
 def _rotate_knob_counts(
@@ -4368,20 +4386,36 @@ def find_piece_in_template_bgr(
         if knob_mask is not None:
             ky0, ky1, kx0, kx1 = _mask_bbox(knob_mask)
             knob_mask_crop = knob_mask[ky0:ky1, kx0:kx1].copy()
-        knobs_x, knobs_y = _infer_knob_counts(
+        scored, fill_ratio = _infer_knob_candidates(
             knob_mask_crop,
             template_bin.shape,
             config,
         )
+        knobs_x, knobs_y, _tied = _choose_knobs_from_candidates(scored, fill_ratio)
+        match_knobs_x, match_knobs_y = knobs_x, knobs_y
+
+        mask_mode = (config.mask_mode or "blue").lower()
+        if mask_mode in ("hsv", "hsv_ranges"):
+            fill_mask = _fill_mask_holes(knob_mask_crop)
+            fill_ratio = float(fill_mask.sum()) / float(
+                knob_mask_crop.shape[0] * knob_mask_crop.shape[1]
+            )
+            if fill_ratio >= INFER_KNOBS_HIGH_FILL:
+                knobs_x = min(knobs_x, 1)
+                knobs_y = min(knobs_y, 1)
+            elif fill_ratio <= INFER_KNOBS_LOW_FILL:
+                knobs_x = max(knobs_x, 1)
+                knobs_y = max(knobs_y, 1)
         knobs_inferred = True
         if profile:
             marks.append(("knob_infer", time.perf_counter()))
     else:
         knobs_x = int(knobs_x)
         knobs_y = int(knobs_y)
+        match_knobs_x, match_knobs_y = knobs_x, knobs_y
 
     _, scales = _estimate_scales(
-        template_bin.shape, piece_mask_crop, knobs_x, knobs_y, config
+        template_bin.shape, piece_mask_crop, match_knobs_x, match_knobs_y, config
     )
     if profile:
         marks.append(("scale", time.perf_counter()))
@@ -4398,8 +4432,8 @@ def find_piece_in_template_bgr(
         scales,
         config.rotations,
         config,
-        knobs_x=knobs_x,
-        knobs_y=knobs_y,
+        knobs_x=match_knobs_x,
+        knobs_y=match_knobs_y,
         blur_ksz=config.match_blur_ksz,
         corr_method=cv2.TM_CCORR_NORMED,
         template_blur_f32=template_blur_f32,
