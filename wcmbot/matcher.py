@@ -303,28 +303,6 @@ def _erode_mask_edges(mask01: np.ndarray, edge_frac: float) -> np.ndarray:
     return eroded
 
 
-def _rotate_piece_variant(piece_bgr: np.ndarray, angle_deg: float) -> np.ndarray:
-    if abs(angle_deg) < 1e-6:
-        return piece_bgr
-    h, w = piece_bgr.shape[:2]
-    bg = _background_bgr(piece_bgr)
-    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle_deg, 1.0)
-    cos = abs(M[0, 0])
-    sin = abs(M[0, 1])
-    nw = int(h * sin + w * cos)
-    nh = int(h * cos + w * sin)
-    M[0, 2] += nw / 2 - w / 2
-    M[1, 2] += nh / 2 - h / 2
-    return cv2.warpAffine(
-        piece_bgr,
-        M,
-        (nw, nh),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=bg,
-    )
-
-
 def _load_image(path: str) -> np.ndarray:
     img = cv2.imread(path, cv2.IMREAD_COLOR)
     if img is None:
@@ -4445,7 +4423,6 @@ def _match_piece_bgr_against_template(
         knobs_x, knobs_y, _tied = _choose_knobs_from_candidates(scored, fill_ratio)
         match_knobs_x, match_knobs_y = knobs_x, knobs_y
 
-        mask_mode = (config.mask_mode or "blue").lower()
         if mask_mode in ("hsv", "hsv_ranges"):
             fill_mask = _fill_mask_holes(knob_mask_crop)
             fill_ratio = float(fill_mask.sum()) / float(
@@ -4457,6 +4434,8 @@ def _match_piece_bgr_against_template(
             elif fill_ratio <= INFER_KNOBS_LOW_FILL:
                 knobs_x = max(knobs_x, 1)
                 knobs_y = max(knobs_y, 1)
+            # Update match knobs to reflect adjustments
+            match_knobs_x, match_knobs_y = knobs_x, knobs_y
         knobs_inferred = True
         if profile:
             marks.append(("knob_infer", time.perf_counter()))
@@ -4687,11 +4666,14 @@ def find_piece_in_template_bgr(
                         mask_edge_frac=mask_edge_frac,
                         profile=False,
                     )
-                    futures.append(future)
+                    # Store rotation with future so we can restore it later
+                    futures.append((future, combined_rot))
 
-                for future in as_completed(futures):
+                for future, applied_rot in futures:
                     try:
                         result = future.result()
+                        # Restore the rotation that was applied
+                        result = result._replace(auto_align_deg=applied_rot)
                         candidates.append(result)
                     except Exception as e:
                         logger.warning("Low score rotation match failed: %s", e)
