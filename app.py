@@ -39,6 +39,33 @@ from wcmbot.viz import (
     stack_images_vertical,
 )
 
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--accessible", action="store_true", help="Make accessible over local network"
+    )
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Enable Torch acceleration (uses MPS/CUDA if available)",
+    )
+    parser.add_argument(
+        "--ai-seg",
+        action="store_true",
+        help="Default segmentation mode to AI (still overridable in the UI)",
+    )
+    return parser
+
+
+DEFAULT_SEGMENTATION_MODE = "default"
+_CLI_ARGS = None
+if __name__ == "__main__":
+    # Parse early so UI defaults can reflect CLI flags.
+    _CLI_ARGS, _ = _build_arg_parser().parse_known_args()
+    if getattr(_CLI_ARGS, "ai_seg", False):
+        DEFAULT_SEGMENTATION_MODE = "ai"
+
 BASE_DIR = Path(__file__).resolve().parent
 MUSPAN_LOGO_PATH = BASE_DIR / "media" / "muspan_logo.png"
 
@@ -1158,7 +1185,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                 segmentation_mode = gr.Dropdown(
                     label="Segmentation mode",
                     choices=["default", "ai"],
-                    value="default",
+                    value=DEFAULT_SEGMENTATION_MODE,
                     info=(
                         "default: Use template-configured HSV segmentation. "
                         "ai: Neural network (slow but accurate)."
@@ -1638,16 +1665,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
 
 if __name__ == "__main__":
-    argparse_parser = argparse.ArgumentParser()
-    argparse_parser.add_argument(
-        "--accessible", action="store_true", help="Make accessible over local network"
-    )
-    argparse_parser.add_argument(
-        "--gpu",
-        action="store_true",
-        help="Enable Torch acceleration (uses MPS/CUDA if available)",
-    )
-    args = argparse_parser.parse_args()
+    args = _CLI_ARGS
+    if args is None:
+        args = _build_arg_parser().parse_args()
     kwargs = {}
     if args.gpu:
         device = assert_torch_accel_available()
