@@ -4429,20 +4429,20 @@ def _match_piece_bgr_against_template(
             # candidate inference to ensure consistency.
             original_fill_ratio = fill_ratio
             fill_mask = _fill_mask_holes(knob_mask_crop)
-            filled_fill_ratio = float(fill_mask.sum()) / float(
+            hole_filled_ratio = float(fill_mask.sum()) / float(
                 knob_mask_crop.shape[0] * knob_mask_crop.shape[1]
             )
             # Only adjust knobs when both the original and HSV-refined
             # fill ratios agree about being in the "high" or "low" regime.
             if (
                 original_fill_ratio >= INFER_KNOBS_HIGH_FILL
-                and filled_fill_ratio >= INFER_KNOBS_HIGH_FILL
+                and hole_filled_ratio >= INFER_KNOBS_HIGH_FILL
             ):
                 knobs_x = min(knobs_x, 1)
                 knobs_y = min(knobs_y, 1)
             elif (
                 original_fill_ratio <= INFER_KNOBS_LOW_FILL
-                and filled_fill_ratio <= INFER_KNOBS_LOW_FILL
+                and hole_filled_ratio <= INFER_KNOBS_LOW_FILL
             ):
                 knobs_x = max(knobs_x, 1)
                 knobs_y = max(knobs_y, 1)
