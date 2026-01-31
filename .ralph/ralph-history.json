@@ -2,35 +2,9 @@
   "iterations": [
     {
       "iteration": 1,
-      "startedAt": "2026-01-31T14:31:24.862Z",
-      "endedAt": "2026-01-31T14:31:27.969Z",
-      "durationMs": 1504,
-      "toolsUsed": {},
-      "filesModified": [],
-      "exitCode": 0,
-      "completionDetected": false,
-      "errors": [
-        "ProviderModelNotFoundError: ProviderModelNotFoundError"
-      ]
-    },
-    {
-      "iteration": 2,
-      "startedAt": "2026-01-31T14:31:30.823Z",
-      "endedAt": "2026-01-31T14:31:33.457Z",
-      "durationMs": 1122,
-      "toolsUsed": {},
-      "filesModified": [],
-      "exitCode": 0,
-      "completionDetected": false,
-      "errors": [
-        "ProviderModelNotFoundError: ProviderModelNotFoundError"
-      ]
-    },
-    {
-      "iteration": 3,
-      "startedAt": "2026-01-31T14:31:36.060Z",
-      "endedAt": "2026-01-31T14:31:38.976Z",
-      "durationMs": 1286,
+      "startedAt": "2026-01-31T14:32:08.720Z",
+      "endedAt": "2026-01-31T14:32:11.656Z",
+      "durationMs": 1421,
       "toolsUsed": {},
       "filesModified": [],
       "exitCode": 0,
@@ -40,12 +14,12 @@
       ]
     }
   ],
-  "totalDurationMs": 3912,
+  "totalDurationMs": 1421,
   "struggleIndicators": {
     "repeatedErrors": {
-      "ProviderModelNotFoundError: ProviderModelNotFoundError": 3
+      "ProviderModelNotFoundError: ProviderModelNotFoundError": 1
     },
-    "noProgressIterations": 3,
-    "shortIterations": 3
+    "noProgressIterations": 1,
+    "shortIterations": 1
   }
 }
