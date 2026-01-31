@@ -315,6 +315,7 @@ class TestOnPieceChange:
             idx,
             {},  # batch_state
             False,  # show_grid
+            "default",  # segmentation_mode
         )
 
         # Get the result and verify it's not None
@@ -365,6 +366,7 @@ class TestOnPieceChange:
                 idx,
                 {},  # batch_state
                 False,  # show_grid
+                "default",  # segmentation_mode
             )
 
             # Verify it yields the result from the generator
@@ -379,6 +381,7 @@ class TestOnPieceChange:
                 template_rotation,
                 batch_mode,
                 False,
+                "default",
             )
         finally:
             Path(piece_path).unlink(missing_ok=True)
@@ -420,6 +423,7 @@ class TestOnPieceChange:
                 idx,
                 {},  # batch_state
                 False,  # show_grid
+                "default",  # segmentation_mode
             )
 
             # Verify it yields all results from the generator
@@ -436,6 +440,7 @@ class TestOnPieceChange:
                 template_rotation,
                 batch_mode,
                 False,
+                "default",
             )
         finally:
             Path(piece_path).unlink(missing_ok=True)
@@ -462,7 +467,7 @@ class TestOnPieceChange:
 
                 # Test single mode
                 gen = _on_piece_change(
-                    piece_path, "test", False, 0, False, {}, 0, {}, False
+                    piece_path, "test", False, 0, False, {}, 0, {}, False, "default"
                 )
                 result = next(gen)
 

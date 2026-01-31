@@ -39,6 +39,33 @@ from wcmbot.viz import (
     stack_images_vertical,
 )
 
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--accessible", action="store_true", help="Make accessible over local network"
+    )
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Enable Torch acceleration (uses MPS/CUDA if available)",
+    )
+    parser.add_argument(
+        "--ai-seg",
+        action="store_true",
+        help="Default segmentation mode to AI (still overridable in the UI)",
+    )
+    return parser
+
+
+DEFAULT_SEGMENTATION_MODE = "default"
+_CLI_ARGS = None
+if __name__ == "__main__":
+    # Parse early so UI defaults can reflect CLI flags.
+    _CLI_ARGS, _ = _build_arg_parser().parse_known_args()
+    if getattr(_CLI_ARGS, "ai_seg", False):
+        DEFAULT_SEGMENTATION_MODE = "ai"
+
 BASE_DIR = Path(__file__).resolve().parent
 MUSPAN_LOGO_PATH = BASE_DIR / "media" / "muspan_logo.png"
 
@@ -745,7 +772,12 @@ def _change_match(
 
 
 def solve_puzzle(
-    piece_path, template_id, auto_align, template_rotation, show_grid=False
+    piece_path,
+    template_id,
+    auto_align,
+    template_rotation,
+    show_grid=False,
+    segmentation_mode="default",
 ):
     """Run the high-performance matcher and return visualization slices"""
     template_spec = TEMPLATE_REGISTRY.get(template_id)
@@ -763,7 +795,13 @@ def solve_puzzle(
         piece_bgr = cv2.imread(piece_path)
         if piece_bgr is None:
             raise ValueError(f"Could not load piece image: {piece_path}")
-        matcher_config = build_matcher_config_for_template(template_spec)
+        # Apply segmentation mode override if not "default"
+        extra_overrides = {}
+        if segmentation_mode and segmentation_mode != "default":
+            extra_overrides["mask_mode"] = segmentation_mode
+        matcher_config = build_matcher_config_for_template(
+            template_spec, extra_overrides
+        )
         payload = solve_piece_payload_from_bgr(
             piece_bgr,
             template_spec,
@@ -777,7 +815,12 @@ def solve_puzzle(
 
 
 def solve_puzzle_multipiece(
-    piece_path, template_id, auto_align, template_rotation, show_grid=False
+    piece_path,
+    template_id,
+    auto_align,
+    template_rotation,
+    show_grid=False,
+    segmentation_mode="default",
 ):
     """Detect multiple pieces in an image and stream match results."""
     template_spec = TEMPLATE_REGISTRY.get(template_id)
@@ -805,7 +848,15 @@ def solve_puzzle_multipiece(
         return
 
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
-    matcher_config = build_matcher_config_for_template(template_spec)
+    # Segmentation behavior in multipiece mode:
+    # - Initial split (finding multiple piece regions) should use the template default.
+    # - Per-piece matching may use an override selected in the UI (e.g. AI segmentation).
+    split_config = build_matcher_config_for_template(template_spec)
+
+    match_overrides = {}
+    if segmentation_mode and segmentation_mode != "default":
+        match_overrides["mask_mode"] = segmentation_mode
+    match_config = build_matcher_config_for_template(template_spec, match_overrides)
     template_rgb = TEMPLATE_IMAGES.get(template_id)
     if template_rgb is None and template_spec is not None:
         template_rgb = get_template_image(
@@ -819,7 +870,7 @@ def solve_puzzle_multipiece(
         else None
     )
     regions, _ = find_multipiece_region_dicts(
-        grid_bgr, matcher_config, template_bgr=template_bgr
+        grid_bgr, split_config, template_bgr=template_bgr
     )
     if not regions:
         yield _blank_outputs(
@@ -852,7 +903,7 @@ def solve_puzzle_multipiece(
         template_spec,
         auto_align=bool(auto_align),
         template_rotation=rotation,
-        matcher_config=matcher_config,
+        matcher_config=match_config,
         regions=regions,
         template_bgr=template_bgr,
     ):
@@ -910,16 +961,32 @@ def solve_puzzle_multipiece(
 
 
 def solve_single_or_batch(
-    piece_path, template_id, auto_align, template_rotation, batch_mode, show_grid=False
+    piece_path,
+    template_id,
+    auto_align,
+    template_rotation,
+    batch_mode,
+    show_grid=False,
+    segmentation_mode="default",
 ):
     """Dispatch to single-piece solve or streamed multipiece mode."""
     if batch_mode:
         yield from solve_puzzle_multipiece(
-            piece_path, template_id, auto_align, template_rotation, show_grid
+            piece_path,
+            template_id,
+            auto_align,
+            template_rotation,
+            show_grid,
+            segmentation_mode,
         )
     else:
         result = solve_puzzle(
-            piece_path, template_id, auto_align, template_rotation, show_grid
+            piece_path,
+            template_id,
+            auto_align,
+            template_rotation,
+            show_grid,
+            segmentation_mode,
         )
         yield result
 
@@ -1114,6 +1181,15 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                     label="Show grid on template",
                     value=True,
                     info="Display grid lines with row/column numbers on the template.",
+                )
+                segmentation_mode = gr.Dropdown(
+                    label="Segmentation mode",
+                    choices=["default", "ai"],
+                    value=DEFAULT_SEGMENTATION_MODE,
+                    info=(
+                        "default: Use template-configured segmentation (HSV/blue/green/etc.). "
+                        "ai: Neural network (slow but accurate)."
+                    ),
                 )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
@@ -1405,6 +1481,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         idx,
         batch_state,
         show_grid,
+        segmentation_mode,
     ):
         if not piece_path:
             yield _no_update_outputs(state, idx, batch_state)
@@ -1416,6 +1493,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             template_rotation,
             batch_mode,
             show_grid,
+            segmentation_mode,
         )
         yield from result
 
@@ -1432,6 +1510,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_index,
             batch_state,
             show_grid_checkbox,
+            segmentation_mode,
         ],
         outputs=[
             *ordered_components,
@@ -1454,6 +1533,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             template_rotation,
             batch_grid_checkbox,
             show_grid_checkbox,
+            segmentation_mode,
         ],
         outputs=[
             *ordered_components,
@@ -1585,16 +1665,9 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
     )
 
 if __name__ == "__main__":
-    argparse_parser = argparse.ArgumentParser()
-    argparse_parser.add_argument(
-        "--accessible", action="store_true", help="Make accessible over local network"
-    )
-    argparse_parser.add_argument(
-        "--gpu",
-        action="store_true",
-        help="Enable Torch acceleration (uses MPS/CUDA if available)",
-    )
-    args = argparse_parser.parse_args()
+    args = _CLI_ARGS
+    if args is None:
+        args = _build_arg_parser().parse_args()
     kwargs = {}
     if args.gpu:
         device = assert_torch_accel_available()

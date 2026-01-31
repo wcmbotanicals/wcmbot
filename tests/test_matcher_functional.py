@@ -19,6 +19,7 @@ from wcmbot.matcher import (
     _apply_template_cluster_mask,
     _background_color_clusters,
     _apply_background_cluster_mask,
+    _mask_by_gradient,
     build_matcher_config,
     find_piece_in_template,
 )
@@ -479,3 +480,83 @@ class TestMaskHelpers:
         assert result.shape == (100, 100)
         # With zero threshold, result should be all zeros or mostly zeros
         assert result.sum() == 0
+
+    def test_mask_by_gradient_creates_valid_mask(self):
+        """Test _mask_by_gradient produces a valid binary mask."""
+        # Create a synthetic piece image with distinct foreground
+        piece = np.ones((200, 200, 3), dtype=np.uint8) * 180  # Light background
+        # Draw a dark circle as the "piece"
+        cv2.circle(piece, (100, 100), 60, (50, 80, 50), -1)
+        result = _mask_by_gradient(piece, kernel_size=7, open_iters=2, close_iters=2)
+        assert result.shape == (200, 200)
+        assert result.dtype == np.uint8
+        assert set(np.unique(result)).issubset({0, 1})
+        # Should detect the circle region
+        assert result.sum() > 0
+
+    def test_mask_by_gradient_detects_piece_boundary(self):
+        """Test _mask_by_gradient correctly detects a piece-like boundary."""
+        # Create image with a rectangle representing a piece
+        piece = np.ones((150, 150, 3), dtype=np.uint8) * 200  # Light gray background
+        # Draw a dark rectangle as the "piece"
+        piece[30:120, 30:120] = [40, 60, 40]
+        result = _mask_by_gradient(piece, kernel_size=5, open_iters=1, close_iters=2)
+        # Center of the piece should be detected
+        assert result[75, 75] == 1
+        # Corners (background) should not be detected
+        assert result[5, 5] == 0
+
+    def test_mask_by_ai_creates_valid_mask(self):
+        """Test _mask_by_ai produces a valid binary mask."""
+        pytest.importorskip("rembg")  # Skip if rembg not installed
+        from unittest.mock import patch, MagicMock
+
+        from wcmbot.matcher import _mask_by_ai
+
+        # Create a piece image with distinct foreground/background
+        piece = np.zeros((100, 100, 3), dtype=np.uint8)
+        piece[20:80, 20:80] = [128, 128, 128]  # Gray center "piece"
+
+        # Mock rembg to return a plausible RGBA result
+        mock_rgba = np.zeros((100, 100, 4), dtype=np.uint8)
+        mock_rgba[20:80, 20:80, :3] = [128, 128, 128]
+        mock_rgba[20:80, 20:80, 3] = 255  # Alpha = 255 for foreground
+
+        with patch("rembg.remove") as mock_remove:
+            with patch("wcmbot.matcher._get_rembg_session") as mock_session:
+                mock_remove.return_value = mock_rgba
+                mock_session.return_value = MagicMock()
+
+                result = _mask_by_ai(piece, kernel_size=7, open_iters=2, close_iters=2)
+
+        # Should be valid binary mask
+        assert result.dtype == np.uint8
+        assert result.shape == (100, 100)
+        assert set(np.unique(result)).issubset({0, 1})
+
+    def test_mask_by_ai_detects_piece_boundary(self):
+        """Test _mask_by_ai correctly identifies piece boundaries."""
+        pytest.importorskip("rembg")  # Skip if rembg not installed
+        from unittest.mock import patch, MagicMock
+
+        from wcmbot.matcher import _mask_by_ai
+
+        piece = np.ones((100, 100, 3), dtype=np.uint8) * 128
+
+        # Mock rembg to return alpha with circular mask
+        mock_rgba = np.ones((100, 100, 4), dtype=np.uint8) * 128
+        y, x = np.ogrid[:100, :100]
+        dist = np.sqrt((x - 50) ** 2 + (y - 50) ** 2)
+        mock_rgba[:, :, 3] = np.where(dist < 40, 255, 0).astype(np.uint8)
+
+        with patch("rembg.remove") as mock_remove:
+            with patch("wcmbot.matcher._get_rembg_session") as mock_session:
+                mock_remove.return_value = mock_rgba
+                mock_session.return_value = MagicMock()
+
+                result = _mask_by_ai(piece, kernel_size=7, open_iters=2, close_iters=2)
+
+        # Center should be foreground
+        assert result[50, 50] == 1
+        # Corners should be background
+        assert result[0, 0] == 0

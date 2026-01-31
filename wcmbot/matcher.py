@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -1337,6 +1338,218 @@ def _mask_by_hsv_ranges(
     return mask01
 
 
+def _mask_by_gradient(
+    piece_bgr: np.ndarray,
+    kernel_size: int,
+    open_iters: int,
+    close_iters: int,
+    keep_largest_component: bool = True,
+) -> np.ndarray:
+    """Segment piece using gradient-based edge detection.
+
+    This approach works by:
+    1. Converting to grayscale and applying heavy blur to smooth internal texture
+    2. Computing morphological gradient to detect edges
+    3. Thresholding and closing gaps in the edge contour
+    4. Finding the largest contour and filling it to create the mask
+
+    This works best when there is clear contrast between the piece edge and
+    background. For images with low edge contrast, consider using mask_mode="ai"
+    instead.
+
+    Args:
+        piece_bgr: BGR image of the piece.
+        kernel_size: Morphological kernel size for cleanup.
+        open_iters: Opening iterations for cleanup.
+        close_iters: Closing iterations for cleanup.
+        keep_largest_component: If True, keep only the largest connected component.
+
+    Returns:
+        Binary mask (0 or 1) with the piece foreground.
+    """
+    gray = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Heavy blur to smooth internal texture while preserving piece edges
+    blur_size = max(11, kernel_size * 2 - 1)
+    if blur_size % 2 == 0:
+        blur_size += 1
+    blur = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+
+    # Morphological gradient detects edges
+    grad_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    gradient = cv2.morphologyEx(blur, cv2.MORPH_GRADIENT, grad_kernel)
+
+    # Threshold to find strong edges using Otsu's method
+    _, edge_thresh = cv2.threshold(
+        gradient, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    # Close gaps in edge contour
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    edges_closed = cv2.morphologyEx(
+        edge_thresh, cv2.MORPH_CLOSE, close_kernel, iterations=close_iters
+    )
+
+    # Find largest contour (should be the piece boundary)
+    contours, _ = cv2.findContours(
+        edges_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        raise RuntimeError(
+            "Gradient segmentation produced no contours - check image contrast"
+        )
+
+    largest = max(contours, key=cv2.contourArea)
+
+    # Create mask by filling the contour
+    mask = np.zeros(gray.shape, dtype=np.uint8)
+    cv2.drawContours(mask, [largest], -1, 255, -1)
+
+    # Apply standard cleanup
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
+    mask01 = (mask > 0).astype(np.uint8)
+
+    if keep_largest_component:
+        mask01 = _keep_largest_component(mask01)
+
+    if mask01.sum() == 0:
+        raise RuntimeError(
+            "Gradient segmentation produced empty mask - check image contrast"
+        )
+
+    return mask01
+
+
+# Global rembg session (lazy initialized with thread safety)
+_REMBG_SESSION = None
+_REMBG_LOCK = threading.Lock()
+
+
+def _get_rembg_session():
+    """Get or create the rembg session (lazy initialization with thread safety)."""
+    global _REMBG_SESSION
+    if _REMBG_SESSION is None:
+        with _REMBG_LOCK:
+            # Double-check pattern: another thread might have initialized while waiting
+            if _REMBG_SESSION is None:
+                try:
+                    from rembg import new_session
+
+                    _REMBG_SESSION = new_session("isnet-general-use")
+                except ImportError as e:
+                    raise RuntimeError(
+                        "rembg package not installed. Install with: pip install rembg"
+                    ) from e
+    return _REMBG_SESSION
+
+
+def _mask_by_ai(
+    piece_bgr: np.ndarray,
+    kernel_size: int,
+    open_iters: int,
+    close_iters: int,
+    keep_largest_component: bool = True,
+) -> np.ndarray:
+    """Segment piece using AI-based background removal (rembg).
+
+    Uses the ISNet-general-use model via rembg for high-quality background
+    removal. This produces excellent masks but is slower (~1s per piece) than
+    color-based methods.
+
+    Args:
+        piece_bgr: BGR image of the piece.
+        kernel_size: Morphological kernel size for cleanup.
+        open_iters: Opening iterations for cleanup.
+        close_iters: Closing iterations for cleanup.
+        keep_largest_component: If True, keep only the largest connected component.
+
+    Returns:
+        Binary mask (0 or 1) with the piece foreground.
+    """
+    try:
+        from rembg import remove
+    except ImportError as e:
+        raise RuntimeError(
+            "rembg package not installed. Install with: pip install rembg"
+        ) from e
+
+    # Convert BGR to RGB for rembg
+    piece_rgb = cv2.cvtColor(piece_bgr, cv2.COLOR_BGR2RGB)
+
+    # Get rembg session
+    session = _get_rembg_session()
+
+    # Remove background - returns RGBA with alpha channel as mask
+    result_rgba = remove(piece_rgb, session=session)
+
+    # Extract alpha channel as mask
+    if result_rgba.shape[2] == 4:
+        alpha = result_rgba[:, :, 3]
+    else:
+        # Fallback: compare to original to find changed pixels
+        alpha = np.any(result_rgba != piece_rgb, axis=2).astype(np.uint8) * 255
+
+    # Threshold to binary
+    _, mask = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
+
+    # Apply standard cleanup
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
+    mask01 = (mask > 0).astype(np.uint8)
+
+    if keep_largest_component:
+        mask01 = _keep_largest_component(mask01)
+
+    if mask01.sum() == 0:
+        raise RuntimeError("AI segmentation produced empty mask")
+
+    return mask01
+
+
+def remove_background_ai(image_bgr: np.ndarray) -> np.ndarray:
+    """Remove background from image using AI (rembg).
+
+    Returns the image with transparent background (BGRA format).
+    This is useful for preprocessing multipiece images once before
+    splitting into individual pieces.
+
+    Args:
+        image_bgr: BGR image.
+
+    Returns:
+        BGRA image with transparent background.
+    """
+    try:
+        from rembg import remove
+    except ImportError as e:
+        raise RuntimeError(
+            "rembg package not installed. Install with: pip install rembg"
+        ) from e
+
+    # Convert BGR to RGB for rembg
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+    # Get rembg session
+    session = _get_rembg_session()
+
+    # Remove background - returns RGBA
+    result_rgba = remove(image_rgb, session=session)
+
+    # Convert RGB channels back to BGR, keep alpha
+    result_bgr = cv2.cvtColor(result_rgba[:, :, :3], cv2.COLOR_RGB2BGR)
+    if result_rgba.shape[2] == 4:
+        alpha = result_rgba[:, :, 3]
+    else:
+        # rembg should always return RGBA, but fallback to full opacity if not
+        alpha = np.full(result_bgr.shape[:2], 255, dtype=np.uint8)
+    result_bgra = np.dstack([result_bgr, alpha])
+
+    return result_bgra
+
+
 def compute_piece_mask(
     piece_bgr: np.ndarray,
     config: MatcherConfig,
@@ -1346,8 +1559,9 @@ def compute_piece_mask(
 ) -> np.ndarray:
     """Compute a binary mask for a puzzle piece based on color mode.
 
-    Supports "blue", "green", or "hsv"/"hsv_ranges" modes. Returns a binary
-    mask (0 or 1) with the piece foreground isolated at the input image size.
+    Supports "blue", "green", "hsv"/"hsv_ranges", "gradient", or "ai" modes.
+    Returns a binary mask (0 or 1) with the piece foreground isolated at the
+    input image size.
 
     Args:
         piece_bgr: BGR image of the piece.
@@ -1382,6 +1596,14 @@ def compute_piece_mask(
             open_iters,
             close_iters,
             keep_largest_component,
+        )
+    elif mask_mode == "gradient":
+        mask01 = _mask_by_gradient(
+            piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
+        )
+    elif mask_mode == "ai":
+        mask01 = _mask_by_ai(
+            piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
         )
     else:
         raise RuntimeError(f"Unknown mask_mode: {config.mask_mode}")
@@ -4030,6 +4252,7 @@ def find_piece_in_template_bgr(
 
     if piece_bgr is None:
         raise ValueError("piece_bgr must be a numpy array")
+
     if piece_bgr.ndim == 2:
         piece = cv2.cvtColor(piece_bgr, cv2.COLOR_GRAY2BGR)
     elif piece_bgr.ndim == 3 and piece_bgr.shape[2] == 4:

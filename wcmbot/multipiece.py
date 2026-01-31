@@ -59,6 +59,15 @@ def _compute_piece_mask_keep_all(
             return compute_piece_mask_fn(image_bgr, matcher_config)
 
 
+def _get_multipiece_config(matcher_config):
+    """Get config for multipiece mask computation.
+
+    Currently just returns the original config unchanged.
+    Retained as a compatibility layer for potential future extensions.
+    """
+    return matcher_config
+
+
 def compute_multipiece_mask(
     image_bgr: np.ndarray,
     matcher_config,
@@ -73,10 +82,12 @@ def compute_multipiece_mask(
     If the mask selects mostly background, it is optionally inverted. Template
     imagery can be supplied to support template-aware segmentation.
     """
+    multipiece_config = _get_multipiece_config(matcher_config)
+
     mask01 = _compute_piece_mask_keep_all(
         compute_piece_mask_fn,
         image_bgr,
-        matcher_config,
+        multipiece_config,
         template_bgr=template_bgr,
         template_mask=template_mask,
     )
@@ -181,7 +192,6 @@ def find_multipiece_region_dicts(
 
     Prefer using find_multipiece_regions() for typed access.
     """
-
     regions, mask01 = find_multipiece_regions(
         image_bgr,
         matcher_config,
@@ -190,7 +200,13 @@ def find_multipiece_region_dicts(
         template_mask=template_mask,
         min_area_frac=min_area_frac,
     )
+
     region_dicts = [
-        {"bbox": r.bbox, "contour": r.contour, "area": r.area} for r in regions
+        {
+            "bbox": r.bbox,
+            "contour": r.contour,
+            "area": r.area,
+        }
+        for r in regions
     ]
     return region_dicts, mask01
