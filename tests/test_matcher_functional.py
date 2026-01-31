@@ -506,21 +506,6 @@ class TestMaskHelpers:
         # Corners (background) should not be detected
         assert result[5, 5] == 0
 
-    def test_multipiece_mask_mode_uses_different_mode(self):
-        """Test multipiece_mask_mode is used for multipiece splitting."""
-        from wcmbot.matcher import MatcherConfig
-        from wcmbot.multipiece import _get_multipiece_config
-
-        # Config with different modes for piece and multipiece
-        config = MatcherConfig(mask_mode="gradient", multipiece_mask_mode="hsv")
-        mp_config = _get_multipiece_config(config)
-        assert mp_config.mask_mode == "hsv"
-
-        # When multipiece_mask_mode is not set, use regular mask_mode
-        config2 = MatcherConfig(mask_mode="gradient")
-        mp_config2 = _get_multipiece_config(config2)
-        assert mp_config2.mask_mode == "gradient"
-
     def test_mask_by_ai_creates_valid_mask(self):
         """Test _mask_by_ai produces a valid binary mask."""
         pytest.importorskip("rembg")  # Skip if rembg not installed

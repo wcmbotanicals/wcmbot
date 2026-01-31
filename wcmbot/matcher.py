@@ -115,7 +115,6 @@ class MatcherConfig:
     resize_rethreshold: bool = RESIZE_RETHRESHOLD
     match_blur_ksz: Optional[Tuple[int, int]] = MATCH_BLUR_KSZ
     mask_mode: str = "blue"
-    multipiece_mask_mode: Optional[str] = None  # If set, use this mode for multipiece
     mask_hsv_ranges: Optional[List[Tuple[List[int], List[int]]]] = None
     mask_kernel_size: int = 7
     mask_open_iters: int = OPEN_ITERS
@@ -186,7 +185,6 @@ def build_matcher_config(
         "resize_rethreshold": RESIZE_RETHRESHOLD,
         "match_blur_ksz": MATCH_BLUR_KSZ,
         "mask_mode": "blue",
-        "multipiece_mask_mode": None,
         "mask_hsv_ranges": None,
         "mask_kernel_size": 7,
         "mask_open_iters": OPEN_ITERS,
