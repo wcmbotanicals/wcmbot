@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -4674,7 +4674,7 @@ def find_piece_in_template_bgr(
                         result = future.result()
                         # Since auto_align=False was passed, result.auto_align_deg will be 0.0.
                         # We restore the actual rotation that was applied to this variant.
-                        result = result._replace(auto_align_deg=applied_rot)
+                        result = replace(result, auto_align_deg=applied_rot)
                         candidates.append(result)
                     except Exception as e:
                         logger.warning("Low score rotation match failed: %s", e)
