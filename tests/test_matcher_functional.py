@@ -9,17 +9,16 @@ from PIL import Image
 from wcmbot.matcher import (
     COLS,
     ROWS,
+    _apply_background_cluster_mask,
+    _apply_template_cluster_mask,
     _background_bgr,
-    _fill_mask_holes,
-    _smooth_mask_edges,
+    _background_color_clusters,
     _background_distance_from_border,
+    _fill_mask_holes,
     _recover_piece_edges,
+    _smooth_mask_edges,
     _smooth_piece_contour,
     _template_color_clusters,
-    _apply_template_cluster_mask,
-    _background_color_clusters,
-    _apply_background_cluster_mask,
-    _mask_by_gradient,
     build_matcher_config,
     find_piece_in_template,
 )
@@ -97,6 +96,35 @@ MANY_PIECES_EXPECTED = {
     23: (13, 14),
     24: (14, 25),
     25: (12, 3),
+}
+
+
+MANY_PIECES_EXPECTED_KNOBS = {
+    1: (1, 1),
+    2: (1, 2),
+    3: (1, 1),
+    4: (1, 1),
+    5: (1, 1),
+    6: (1, 1),
+    7: (1, 2),
+    8: (1, 1),
+    9: (1, 1),
+    10: (1, 1),
+    11: (1, 1),
+    12: (1, 1),
+    13: (1, 2),
+    14: (1, 1),
+    15: (1, 1),
+    16: (1, 1),
+    17: (1, 1),
+    18: (1, 1),
+    19: (1, 1),
+    20: (1, 1),
+    21: (1, 1),
+    22: (1, 1),
+    23: (1, 1),
+    24: (1, 1),
+    25: (1, 1),
 }
 
 
@@ -287,6 +315,8 @@ def test_multipiece_many_pieces_batch():
     assert len(regions) == 25, "Expected 25 pieces detected"
 
     placements = {}
+    inferred_knobs = {}
+    knob_mismatches = []
     correct = 0
     template_path = os.fspath(spec.template_path)
     for idx, region in enumerate(regions, start=1):
@@ -316,6 +346,15 @@ def test_multipiece_many_pieces_batch():
             os.unlink(crop_path)
 
         assert payload.matches, f"No match returned for piece {idx}"
+
+        assert payload.knobs_inferred, f"knob inference off for piece {idx}"
+        inferred_knobs[idx] = (payload.knobs_x, payload.knobs_y)
+        exp_knobs_x, exp_knobs_y = MANY_PIECES_EXPECTED_KNOBS[idx]
+        if payload.knobs_x != exp_knobs_x or payload.knobs_y != exp_knobs_y:
+            knob_mismatches.append(
+                (idx, (payload.knobs_x, payload.knobs_y), (exp_knobs_x, exp_knobs_y))
+            )
+
         top = payload.matches[0]
         placements[idx] = (top["row"], top["col"])
         if MANY_PIECES_EXPECTED.get(idx) == placements[idx]:
@@ -323,6 +362,11 @@ def test_multipiece_many_pieces_batch():
 
     assert correct >= 23, (
         f"Expected at least 23 correctly placed pieces, got {correct}: {placements}"
+    )
+
+    assert not knob_mismatches, (
+        "Knob inference mismatches for some pieces: "
+        f"{knob_mismatches}. All inferred: {inferred_knobs}"
     )
 
 
@@ -509,7 +553,7 @@ class TestMaskHelpers:
     def test_mask_by_ai_creates_valid_mask(self):
         """Test _mask_by_ai produces a valid binary mask."""
         pytest.importorskip("rembg")  # Skip if rembg not installed
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         from wcmbot.matcher import _mask_by_ai
 
@@ -537,7 +581,7 @@ class TestMaskHelpers:
     def test_mask_by_ai_detects_piece_boundary(self):
         """Test _mask_by_ai correctly identifies piece boundaries."""
         pytest.importorskip("rembg")  # Skip if rembg not installed
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         from wcmbot.matcher import _mask_by_ai
 
