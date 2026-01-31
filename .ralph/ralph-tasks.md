@@ -18,7 +18,7 @@ as well as the existing test test_multipiece_many_pieces_batch(), by adjusting
 some/all of LOW_SCORE_ROTATIONS, LOW_SCORE_MASK_EDGE_FRAC and LOW_SCORE_SCALE_SAMPLES in matcher.py. Ideally we would make the new test pass, but this is not strictly required
 at this stage (other tests must still pass). Report any improvements in number of
 correct matches.
-- [ ] Add new variants of the difficult_multipiece.jpg test, as well as the existing
+- [x] Add new variants of the difficult_multipiece.jpg test, as well as the existing
 test_multipiece_many_pieces_batch() test, that use mask_mode="ai" for background
 removal of individual pieces (not the initial stage of separating into individual
 pieces - see similar logic in the app). These should check for the same expected

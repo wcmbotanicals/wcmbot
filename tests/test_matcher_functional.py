@@ -15,6 +15,7 @@ from wcmbot.matcher import (
     _background_color_clusters,
     _background_distance_from_border,
     _fill_mask_holes,
+    _mask_by_gradient,
     _recover_piece_edges,
     _smooth_mask_edges,
     _smooth_piece_contour,
@@ -402,6 +403,82 @@ def test_multipiece_many_pieces_batch():
 
 
 @pytest.mark.e2e
+def test_multipiece_many_pieces_batch_ai_mask():
+    spec = TEMPLATE_REGISTRY.get("grass_puzzle")
+    base_config = {
+        "rows": spec.rows,
+        "cols": spec.cols,
+        "crop_x": spec.crop_x,
+        "crop_y": spec.crop_y,
+        **spec.matcher_overrides,
+    }
+    split_config = build_matcher_config(base_config)
+    match_config = build_matcher_config({**base_config, "mask_mode": "ai"})
+    grid_path = os.path.join(GRASS_PIECES_DIR, "many_pieces.jpg")
+    grid_img = Image.open(grid_path).convert("RGB")
+    grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
+
+    regions, _ = find_multipiece_region_dicts(grid_bgr, split_config)
+    assert len(regions) == 25, "Expected 25 pieces detected"
+
+    placements = {}
+    inferred_knobs = {}
+    knob_mismatches = []
+    correct = 0
+    template_path = os.fspath(spec.template_path)
+    for idx, region in enumerate(regions, start=1):
+        x, y, w, h = region["bbox"]
+        pad = max(4, int(min(w, h) * 0.06))
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(grid_bgr.shape[1], x + w + pad)
+        y1 = min(grid_bgr.shape[0], y + h + pad)
+        crop = grid_img.crop((x0, y0, x1, y1))
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            crop.save(tmp.name)
+            crop_path = tmp.name
+        try:
+            payload = find_piece_in_template(
+                piece_image_path=crop_path,
+                template_image_path=template_path,
+                knobs_x=None,
+                knobs_y=None,
+                infer_knobs=True,
+                auto_align=True,
+                template_rotation=spec.default_rotation,
+                matcher_config=match_config,
+            )
+        finally:
+            os.unlink(crop_path)
+
+        assert payload.matches, f"No match returned for piece {idx}"
+
+        assert payload.knobs_inferred, f"knob inference off for piece {idx}"
+        inferred_knobs[idx] = (payload.knobs_x, payload.knobs_y)
+        exp_knobs_x, exp_knobs_y = MANY_PIECES_EXPECTED_KNOBS[idx]
+        if payload.knobs_x != exp_knobs_x or payload.knobs_y != exp_knobs_y:
+            knob_mismatches.append(
+                (idx, (payload.knobs_x, payload.knobs_y), (exp_knobs_x, exp_knobs_y))
+            )
+
+        top = payload.matches[0]
+        placements[idx] = (top["row"], top["col"])
+        if MANY_PIECES_EXPECTED.get(idx) == placements[idx]:
+            correct += 1
+
+    assert correct >= 23, (
+        f"Expected at least 23 correctly placed pieces, got {correct}: {placements}"
+    )
+
+    correct_knobs = len(regions) - len(knob_mismatches)
+    assert correct_knobs >= 12, (
+        "Knob inference mismatches for some pieces: "
+        f"{knob_mismatches}. All inferred: {inferred_knobs}"
+    )
+
+
+@pytest.mark.e2e
 def test_multipiece_difficult_multipiece_batch():
     spec = TEMPLATE_REGISTRY.get("grass_puzzle")
     matcher_config = build_matcher_config(
@@ -445,6 +522,68 @@ def test_multipiece_difficult_multipiece_batch():
                 auto_align=True,
                 template_rotation=spec.default_rotation,
                 matcher_config=matcher_config,
+            )
+        finally:
+            os.unlink(crop_path)
+
+        assert payload.matches, f"No match returned for piece {idx}"
+
+        top = payload.matches[0]
+        placements[idx] = (top["row"], top["col"])
+        expected = DIFFICULT_MULTIPIECE_EXPECTED.get(idx)
+        if expected is not None and placements[idx] != expected:
+            mismatches.append((idx, placements[idx], expected))
+
+    assert not mismatches, (
+        "Expected all known pieces placed correctly. "
+        f"Mismatches: {mismatches}. All placements: {placements}"
+    )
+
+
+@pytest.mark.e2e
+def test_multipiece_difficult_multipiece_batch_ai_mask():
+    spec = TEMPLATE_REGISTRY.get("grass_puzzle")
+    base_config = {
+        "rows": spec.rows,
+        "cols": spec.cols,
+        "crop_x": spec.crop_x,
+        "crop_y": spec.crop_y,
+        **spec.matcher_overrides,
+    }
+    split_config = build_matcher_config(base_config)
+    match_config = build_matcher_config({**base_config, "mask_mode": "ai"})
+    grid_path = os.path.join(GRASS_PIECES_DIR, "difficult_multipiece.jpg")
+    grid_img = Image.open(grid_path).convert("RGB")
+    grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
+
+    regions, _ = find_multipiece_region_dicts(grid_bgr, split_config)
+    assert len(regions) == 28, "Expected 28 pieces detected"
+
+    placements = {}
+    mismatches = []
+    template_path = os.fspath(spec.template_path)
+    for idx, region in enumerate(regions, start=1):
+        x, y, w, h = region["bbox"]
+        pad = max(4, int(min(w, h) * 0.06))
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(grid_bgr.shape[1], x + w + pad)
+        y1 = min(grid_bgr.shape[0], y + h + pad)
+        crop = grid_img.crop((x0, y0, x1, y1))
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            crop.save(tmp.name)
+            crop_path = tmp.name
+        try:
+            payload = find_piece_in_template(
+                piece_image_path=crop_path,
+                template_image_path=template_path,
+                knobs_x=None,
+                knobs_y=None,
+                infer_knobs=True,
+                auto_align=True,
+                template_rotation=spec.default_rotation,
+                matcher_config=match_config,
             )
         finally:
             os.unlink(crop_path)
