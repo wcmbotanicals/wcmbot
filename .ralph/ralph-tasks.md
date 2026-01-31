@@ -7,7 +7,7 @@ to tmp/matching_score_table.csv
 consider replacing the current grid centre weighting with a system where matching scores
 are not weighted, but potential matches with grid centre scores below a threshold are
 rejected.
-- [ ] Identify a matching score threshold (with or without grid centre score weighting
+- [x] Identify a matching score threshold (with or without grid centre score weighting
 as appropriate) that is indicative of a possible failed match.
 - [ ] Using the currently failing pieces in test_multipiece_many_pieces_batch() as a
 guide, consider options for finding better matches when the initial best match
