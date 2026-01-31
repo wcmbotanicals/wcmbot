@@ -277,7 +277,7 @@ def _dense_scale_window(
 ) -> List[float]:
     if samples is None or samples <= 0:
         return list(scale_window)
-    if len(scale_window) <= 1 or samples <= len(scale_window):
+    if len(scale_window) <= 1 or samples < len(scale_window):
         return list(scale_window)
     min_scale = float(min(scale_window))
     max_scale = float(max(scale_window))
@@ -4424,17 +4424,29 @@ def _match_piece_bgr_against_template(
         match_knobs_x, match_knobs_y = knobs_x, knobs_y
 
         if mask_mode in ("hsv", "hsv_ranges"):
+            # For HSV-based masks, we can refine our understanding of the fill
+            # using a hole-filled mask. We store the original fill_ratio from
+            # candidate inference to ensure consistency.
+            original_fill_ratio = fill_ratio
             fill_mask = _fill_mask_holes(knob_mask_crop)
-            fill_ratio = float(fill_mask.sum()) / float(
+            filled_fill_ratio = float(fill_mask.sum()) / float(
                 knob_mask_crop.shape[0] * knob_mask_crop.shape[1]
             )
-            if fill_ratio >= INFER_KNOBS_HIGH_FILL:
+            # Only adjust knobs when both the original and HSV-refined
+            # fill ratios agree about being in the "high" or "low" regime.
+            if (
+                original_fill_ratio >= INFER_KNOBS_HIGH_FILL
+                and filled_fill_ratio >= INFER_KNOBS_HIGH_FILL
+            ):
                 knobs_x = min(knobs_x, 1)
                 knobs_y = min(knobs_y, 1)
-            elif fill_ratio <= INFER_KNOBS_LOW_FILL:
+            elif (
+                original_fill_ratio <= INFER_KNOBS_LOW_FILL
+                and filled_fill_ratio <= INFER_KNOBS_LOW_FILL
+            ):
                 knobs_x = max(knobs_x, 1)
                 knobs_y = max(knobs_y, 1)
-            # Update match knobs to reflect adjustments
+            # Update match knobs to reflect any adjustments
             match_knobs_x, match_knobs_y = knobs_x, knobs_y
         knobs_inferred = True
         if profile:
@@ -4444,6 +4456,10 @@ def _match_piece_bgr_against_template(
         knobs_y = int(knobs_y)
         match_knobs_x, match_knobs_y = knobs_x, knobs_y
 
+    # Apply mask edge erosion after knob inference so that the eroded mask
+    # is used for scale estimation and matching, but knob count inference uses
+    # the full mask. This ordering ensures knobs are inferred from the complete
+    # piece shape before any edge effects are removed.
     mask_edge_frac = max(0.0, float(mask_edge_frac))
     if mask_mode == "ai":
         mask_edge_frac = max(mask_edge_frac, 0.02)
@@ -4672,9 +4688,12 @@ def find_piece_in_template_bgr(
                 for future, applied_rot in futures:
                     try:
                         result = future.result()
-                        # Since auto_align=False was passed, result.auto_align_deg will be 0.0.
-                        # We restore the actual rotation that was applied to this variant.
-                        result = replace(result, auto_align_deg=applied_rot)
+                        # Since auto_align=False was passed, result.auto_align_deg is expected
+                        # to be 0.0. To avoid clobbering any future behavior where the matcher
+                        # might still set a non-zero auto_align_deg even when auto-align is
+                        # disabled, only overwrite it when it is effectively zero.
+                        if abs(float(getattr(result, "auto_align_deg", 0.0))) <= 1e-6:
+                            result = replace(result, auto_align_deg=applied_rot)
                         candidates.append(result)
                     except Exception as e:
                         logger.warning("Low score rotation match failed: %s", e)
