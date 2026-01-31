@@ -1,7 +1,7 @@
 # Ralph Tasks
 - [x] Make a table of matching scores (not including grid centre weighting), and a separate table of grid centre scores, for each piece tested in test_matcher_functional(). Save
 to tmp/matching_score_table.csv
-- [ ] Investigate whether or not the score table gives clear signals, either in the match score or the grid score, in the pieces not placed correctly in
+- [x] Investigate whether or not the score table gives clear signals, either in the match score or the grid score, in the pieces not placed correctly in
 'test_multipiece_many_pieces_batch()' that could be used to identify failed matches.
 - [ ] If (AND ONLY IF) the grid centre score is notably lower in the failing pieces, 
 consider replacing the current grid centre weighting with a system where matching scores
