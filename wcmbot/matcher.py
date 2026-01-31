@@ -47,6 +47,10 @@ KNOB_WIDTH_FRAC = 1.0 / 3.0
 CROP_X_PX = 0
 CROP_Y_PX = 0
 MATCH_DILATE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+LOW_SCORE_THRESHOLD = 0.5
+LOW_SCORE_ROTATIONS = [-5.0, -2.5, 2.5, 5.0]
+LOW_SCORE_MASK_EDGE_FRAC = 0.0
+LOW_SCORE_SCALE_SAMPLES = 17
 
 LOWER_BLUE1 = np.array([90, 60, 40], dtype=np.uint8)
 UPPER_BLUE1 = np.array([140, 255, 255], dtype=np.uint8)
@@ -108,6 +112,12 @@ class MatcherConfig:
     preserve_edges_coarse: bool = False
     parallel_matching: bool = True
     grid_center_weight: float = GRID_CENTER_WEIGHT
+    low_score_threshold: Optional[float] = LOW_SCORE_THRESHOLD
+    low_score_rotations: List[float] = field(
+        default_factory=lambda: list(LOW_SCORE_ROTATIONS)
+    )
+    low_score_mask_edge_frac: float = LOW_SCORE_MASK_EDGE_FRAC
+    low_score_scale_samples: Optional[int] = LOW_SCORE_SCALE_SAMPLES
     knob_width_frac: float = KNOB_WIDTH_FRAC
     crop_x: int = CROP_X_PX
     crop_y: int = CROP_Y_PX
@@ -178,6 +188,10 @@ def build_matcher_config(
         "use_torch": use_torch_env,
         "torch_device": torch_device_env,
         "grid_center_weight": GRID_CENTER_WEIGHT,
+        "low_score_threshold": LOW_SCORE_THRESHOLD,
+        "low_score_rotations": list(LOW_SCORE_ROTATIONS),
+        "low_score_mask_edge_frac": LOW_SCORE_MASK_EDGE_FRAC,
+        "low_score_scale_samples": LOW_SCORE_SCALE_SAMPLES,
         "knob_width_frac": KNOB_WIDTH_FRAC,
         "crop_x": CROP_X_PX,
         "crop_y": CROP_Y_PX,
@@ -252,6 +266,60 @@ def _normalize_kernel(
     if isinstance(kernel, (list, tuple)) and len(kernel) == 2:
         return int(kernel[0]), int(kernel[1])
     raise ValueError("binarize_blur_ksz must be a 2-item list/tuple or null.")
+
+
+def _dense_scale_window(
+    scale_window: List[float],
+    samples: Optional[int],
+) -> List[float]:
+    if samples is None or samples <= 0:
+        return list(scale_window)
+    if len(scale_window) <= 1 or samples <= len(scale_window):
+        return list(scale_window)
+    min_scale = float(min(scale_window))
+    max_scale = float(max(scale_window))
+    if min_scale == max_scale:
+        return list(scale_window)
+    return np.linspace(min_scale, max_scale, num=int(samples)).tolist()
+
+
+def _erode_mask_edges(mask01: np.ndarray, edge_frac: float) -> np.ndarray:
+    if edge_frac <= 0:
+        return mask01
+    h, w = mask01.shape[:2]
+    min_dim = min(h, w)
+    edge_px = int(round(min_dim * float(edge_frac)))
+    if edge_px < 1:
+        return mask01
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (edge_px * 2 + 1, edge_px * 2 + 1)
+    )
+    eroded = cv2.erode((mask01 > 0).astype(np.uint8), kernel, iterations=1)
+    if eroded.sum() == 0:
+        return mask01
+    return eroded
+
+
+def _rotate_piece_variant(piece_bgr: np.ndarray, angle_deg: float) -> np.ndarray:
+    if abs(angle_deg) < 1e-6:
+        return piece_bgr
+    h, w = piece_bgr.shape[:2]
+    bg = _background_bgr(piece_bgr)
+    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle_deg, 1.0)
+    cos = abs(M[0, 0])
+    sin = abs(M[0, 1])
+    nw = int(h * sin + w * cos)
+    nh = int(h * cos + w * sin)
+    M[0, 2] += nw / 2 - w / 2
+    M[1, 2] += nh / 2 - h / 2
+    return cv2.warpAffine(
+        piece_bgr,
+        M,
+        (nw, nh),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=bg,
+    )
 
 
 def _load_image(path: str) -> np.ndarray:
@@ -1983,6 +2051,7 @@ def _estimate_scales(
     knobs_x: int,
     knobs_y: int,
     config: MatcherConfig,
+    scale_window: Optional[List[float]] = None,
 ) -> Tuple[float, List[float]]:
     th, tw = template_shape
     cell_w = tw / config.cols
@@ -2005,7 +2074,8 @@ def _estimate_scales(
     else:
         est_scale_area = (est_scale_w + est_scale_h) / 2.0
     est_scale = (est_scale_w * 0.45) + (est_scale_h * 0.45) + (est_scale_area * 0.10)
-    scales = [est_scale * f for f in config.est_scale_window]
+    window = scale_window if scale_window is not None else config.est_scale_window
+    scales = [est_scale * f for f in window]
     valid_scales: List[float] = []
     for scale in scales:
         ws = int(round(mw * scale))
@@ -4230,38 +4300,31 @@ def _render_zoom_image(
     return cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
 
 
-def find_piece_in_template(
-    piece_image_path: str,
-    template_image_path: str,
-    knobs_x: Optional[int],
-    knobs_y: Optional[int],
-    auto_align: bool = False,
-    infer_knobs: Optional[bool] = None,
-    template_rotation: Optional[int] = None,
-    matcher_config: Optional[MatcherConfig] = None,
-) -> MatchPayload:
-    piece_bgr = _load_image(piece_image_path)
-    return find_piece_in_template_bgr(
-        piece_bgr,
-        template_image_path,
-        knobs_x=knobs_x,
-        knobs_y=knobs_y,
-        auto_align=auto_align,
-        infer_knobs=infer_knobs,
-        template_rotation=template_rotation,
-        matcher_config=matcher_config,
-    )
+def _top_match_score_raw(matches: List[Dict]) -> float:
+    if not matches:
+        return float("-inf")
+    match = matches[0]
+    score_raw = match.get("score_raw")
+    if score_raw is None:
+        return float(match.get("score", 0.0))
+    return float(score_raw)
 
 
-def find_piece_in_template_bgr(
+def _match_piece_bgr_against_template(
     piece_bgr: np.ndarray,
-    template_image_path: str,
+    template_rgb: np.ndarray,
+    template_bin: np.ndarray,
+    config: MatcherConfig,
+    *,
     knobs_x: Optional[int],
     knobs_y: Optional[int],
-    auto_align: bool = False,
-    infer_knobs: Optional[bool] = None,
-    template_rotation: Optional[int] = None,
-    matcher_config: Optional[MatcherConfig] = None,
+    auto_align: bool,
+    infer_knobs: Optional[bool],
+    template_blur_cache: Optional[Dict[Optional[Tuple[int, int]], np.ndarray]] = None,
+    template_blur_f32: Optional[np.ndarray] = None,
+    scale_window: Optional[List[float]] = None,
+    mask_edge_frac: float = 0.0,
+    profile: bool = False,
 ) -> MatchPayload:
     """Like find_piece_in_template, but accepts a BGR numpy array for the piece.
 
@@ -4277,35 +4340,13 @@ def find_piece_in_template_bgr(
         piece = cv2.cvtColor(piece_bgr, cv2.COLOR_BGRA2BGR)
     else:
         piece = piece_bgr
-
-    config = matcher_config or build_matcher_config()
-    profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
-    profile = profile_value not in ("", "0", "false", "no")
     if profile:
         t0 = time.perf_counter()
         marks: List[Tuple[str, float]] = []
 
-    template_entry = _load_template_cached(
-        template_image_path,
-        config.binarize_blur_ksz,
-        crop_x=config.crop_x,
-        crop_y=config.crop_y,
-    )
-    if profile:
-        marks.append(("template", time.perf_counter()))
-
     piece = _pad_piece_image(piece)
     if profile:
         marks.append(("piece", time.perf_counter()))
-
-    template_rgb = template_entry.template_rgb
-    template_bin = template_entry.template_bin
-    rotation = _normalize_template_rotation(template_rotation)
-    template_blur_cache = template_entry.blur_cache
-    if rotation:
-        template_rgb = _rotate_template_quadrant(template_rgb, rotation)
-        template_bin = _rotate_template_quadrant(template_bin, rotation)
-        template_blur_cache = {}
 
     template_bgr = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
     template_mask01 = (template_bin > 0).astype(np.uint8)
@@ -4345,9 +4386,8 @@ def find_piece_in_template_bgr(
     if isinstance(knobs_y, (int, float)) and knobs_y < 0:
         infer_knobs_enabled = True
 
-    auto_align_enabled = auto_align
     auto_align_deg = 0.0
-    if auto_align_enabled:
+    if auto_align:
         align_mask = _compute_piece_mask_for_alignment(piece, config)
         correction = _estimate_alignment_from_mask(align_mask)
         if abs(correction) >= AUTO_ALIGN_MIN_DEG:
@@ -4414,15 +4454,26 @@ def find_piece_in_template_bgr(
         knobs_y = int(knobs_y)
         match_knobs_x, match_knobs_y = knobs_x, knobs_y
 
+    mask_edge_frac = max(0.0, float(mask_edge_frac))
+    if mask_edge_frac > 0:
+        piece_mask_crop = _erode_mask_edges(piece_mask_crop, mask_edge_frac)
+        piece_bin = piece_bin * piece_mask_crop
+
     _, scales = _estimate_scales(
-        template_bin.shape, piece_mask_crop, match_knobs_x, match_knobs_y, config
+        template_bin.shape,
+        piece_mask_crop,
+        match_knobs_x,
+        match_knobs_y,
+        config,
+        scale_window=scale_window,
     )
     if profile:
         marks.append(("scale", time.perf_counter()))
 
-    template_blur_f32 = _get_template_blur_f32(
-        template_bin, config.match_blur_ksz, template_blur_cache
-    )
+    if template_blur_f32 is None:
+        template_blur_f32 = _get_template_blur_f32(
+            template_bin, config.match_blur_ksz, template_blur_cache or {}
+        )
     _, top_matches = _match_template_multiscale_binary(
         template_bin,
         piece_bin,
@@ -4479,6 +4530,148 @@ def find_piece_in_template_bgr(
         resize_rethreshold=config.resize_rethreshold,
         render_full_res=config.render_full_res,
     )
+
+
+def find_piece_in_template(
+    piece_image_path: str,
+    template_image_path: str,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    auto_align: bool = False,
+    infer_knobs: Optional[bool] = None,
+    template_rotation: Optional[int] = None,
+    matcher_config: Optional[MatcherConfig] = None,
+) -> MatchPayload:
+    piece_bgr = _load_image(piece_image_path)
+    return find_piece_in_template_bgr(
+        piece_bgr,
+        template_image_path,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
+        auto_align=auto_align,
+        infer_knobs=infer_knobs,
+        template_rotation=template_rotation,
+        matcher_config=matcher_config,
+    )
+
+
+def find_piece_in_template_bgr(
+    piece_bgr: np.ndarray,
+    template_image_path: str,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    auto_align: bool = False,
+    infer_knobs: Optional[bool] = None,
+    template_rotation: Optional[int] = None,
+    matcher_config: Optional[MatcherConfig] = None,
+) -> MatchPayload:
+    """Like find_piece_in_template, but accepts a BGR numpy array for the piece.
+
+    This avoids repeated disk I/O when solving multi-piece images.
+    """
+
+    if piece_bgr is None:
+        raise ValueError("piece_bgr must be a numpy array")
+    if piece_bgr.ndim == 2:
+        piece = cv2.cvtColor(piece_bgr, cv2.COLOR_GRAY2BGR)
+    elif piece_bgr.ndim == 3 and piece_bgr.shape[2] == 4:
+        piece = cv2.cvtColor(piece_bgr, cv2.COLOR_BGRA2BGR)
+    else:
+        piece = piece_bgr
+
+    config = matcher_config or build_matcher_config()
+    profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
+    profile = profile_value not in ("", "0", "false", "no")
+
+    template_entry = _load_template_cached(
+        template_image_path,
+        config.binarize_blur_ksz,
+        crop_x=config.crop_x,
+        crop_y=config.crop_y,
+    )
+
+    template_rgb = template_entry.template_rgb
+    template_bin = template_entry.template_bin
+    rotation = _normalize_template_rotation(template_rotation)
+    template_blur_cache = template_entry.blur_cache
+    if rotation:
+        template_rgb = _rotate_template_quadrant(template_rgb, rotation)
+        template_bin = _rotate_template_quadrant(template_bin, rotation)
+        template_blur_cache = {}
+    template_blur_f32 = _get_template_blur_f32(
+        template_bin, config.match_blur_ksz, template_blur_cache
+    )
+    payload = _match_piece_bgr_against_template(
+        piece,
+        template_rgb,
+        template_bin,
+        config,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
+        auto_align=auto_align,
+        infer_knobs=infer_knobs,
+        template_blur_cache=template_blur_cache,
+        template_blur_f32=template_blur_f32,
+        profile=profile,
+    )
+
+    low_score_threshold = config.low_score_threshold
+    base_score = _top_match_score_raw(payload.matches)
+    if (
+        low_score_threshold is not None
+        and float(low_score_threshold) > 0
+        and base_score < float(low_score_threshold)
+    ):
+        scale_window = _dense_scale_window(
+            config.est_scale_window, config.low_score_scale_samples
+        )
+        mask_edge_frac = max(0.0, float(config.low_score_mask_edge_frac))
+        candidates = [payload]
+
+        if mask_edge_frac > 0 or scale_window != config.est_scale_window:
+            candidates.append(
+                _match_piece_bgr_against_template(
+                    piece,
+                    template_rgb,
+                    template_bin,
+                    config,
+                    knobs_x=knobs_x,
+                    knobs_y=knobs_y,
+                    auto_align=auto_align,
+                    infer_knobs=infer_knobs,
+                    template_blur_cache=template_blur_cache,
+                    template_blur_f32=template_blur_f32,
+                    scale_window=scale_window,
+                    mask_edge_frac=mask_edge_frac,
+                    profile=False,
+                )
+            )
+
+        for rot in config.low_score_rotations or []:
+            if abs(rot) < 1e-6:
+                continue
+            piece_rot = _rotate_piece_variant(piece, float(rot))
+            candidates.append(
+                _match_piece_bgr_against_template(
+                    piece_rot,
+                    template_rgb,
+                    template_bin,
+                    config,
+                    knobs_x=knobs_x,
+                    knobs_y=knobs_y,
+                    auto_align=auto_align,
+                    infer_knobs=infer_knobs,
+                    template_blur_cache=template_blur_cache,
+                    template_blur_f32=template_blur_f32,
+                    scale_window=scale_window,
+                    mask_edge_frac=mask_edge_frac,
+                    profile=False,
+                )
+            )
+
+        payload = max(candidates, key=lambda item: _top_match_score_raw(item.matches))
+
+    return payload
 
 
 def _static_views(payload: MatchPayload) -> Dict[str, np.ndarray]:

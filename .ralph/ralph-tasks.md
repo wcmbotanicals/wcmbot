@@ -9,7 +9,7 @@ are not weighted, but potential matches with grid centre scores below a threshol
 rejected.
 - [x] Identify a matching score threshold (with or without grid centre score weighting
 as appropriate) that is indicative of a possible failed match.
-- [ ] Using the currently failing pieces in test_multipiece_many_pieces_batch() as a
+- [x] Using the currently failing pieces in test_multipiece_many_pieces_batch() as a
 guide, consider options for finding better matches when the initial best match
 score is below the identified threshold. Possible options include: (1) adding rotations
 of (+/- 2.5 degrees and +/- 5 degrees) to the piece (post auto-alignment) and re-running 
