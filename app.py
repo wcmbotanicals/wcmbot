@@ -1187,7 +1187,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                     choices=["default", "ai"],
                     value=DEFAULT_SEGMENTATION_MODE,
                     info=(
-                        "default: Use template-configured HSV segmentation. "
+                        "default: Use template-configured segmentation (HSV/blue/green/etc.). "
                         "ai: Neural network (slow but accurate)."
                     ),
                 )

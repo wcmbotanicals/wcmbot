@@ -6,7 +6,7 @@ by the UI layer (app.py) and by benchmarks/scripts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
 
 import cv2
@@ -62,15 +62,9 @@ def _compute_piece_mask_keep_all(
 def _get_multipiece_config(matcher_config):
     """Get config for multipiece mask computation.
 
-    If multipiece_mask_mode is set, returns a modified config that uses that
-    mode for the initial splitting. Otherwise returns the original config.
+    Currently just returns the original config unchanged.
+    Retained as a compatibility layer for potential future extensions.
     """
-    if (
-        hasattr(matcher_config, "multipiece_mask_mode")
-        and matcher_config.multipiece_mask_mode
-    ):
-        # Create a new config with the multipiece mask mode using replace()
-        return replace(matcher_config, mask_mode=matcher_config.multipiece_mask_mode)
     return matcher_config
 
 
@@ -87,10 +81,7 @@ def compute_multipiece_mask(
 
     If the mask selects mostly background, it is optionally inverted. Template
     imagery can be supplied to support template-aware segmentation.
-
-    Uses multipiece_mask_mode if set in config, otherwise uses mask_mode.
     """
-    # Use multipiece-specific mask mode if configured
     multipiece_config = _get_multipiece_config(matcher_config)
 
     mask01 = _compute_piece_mask_keep_all(

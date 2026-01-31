@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -114,13 +115,11 @@ class MatcherConfig:
     resize_rethreshold: bool = RESIZE_RETHRESHOLD
     match_blur_ksz: Optional[Tuple[int, int]] = MATCH_BLUR_KSZ
     mask_mode: str = "blue"
-    multipiece_mask_mode: Optional[str] = None  # If set, use this mode for multipiece
     mask_hsv_ranges: Optional[List[Tuple[List[int], List[int]]]] = None
     mask_kernel_size: int = 7
     mask_open_iters: int = OPEN_ITERS
     mask_close_iters: int = CLOSE_ITERS
     mask_shape_refine: bool = False
-    mask_skip: bool = False  # If True, assume already background-removed (all fg)
     template_clustering: bool = False
     template_cluster_k: int = 4
     template_cluster_percentile: float = 98.0
@@ -1425,22 +1424,26 @@ def _mask_by_gradient(
     return mask01
 
 
-# Global rembg session (lazy initialized)
+# Global rembg session (lazy initialized with thread safety)
 _REMBG_SESSION = None
+_REMBG_LOCK = threading.Lock()
 
 
 def _get_rembg_session():
-    """Get or create the rembg session (lazy initialization)."""
+    """Get or create the rembg session (lazy initialization with thread safety)."""
     global _REMBG_SESSION
     if _REMBG_SESSION is None:
-        try:
-            from rembg import new_session
+        with _REMBG_LOCK:
+            # Double-check pattern: another thread might have initialized while waiting
+            if _REMBG_SESSION is None:
+                try:
+                    from rembg import new_session
 
-            _REMBG_SESSION = new_session("isnet-general-use")
-        except ImportError as e:
-            raise RuntimeError(
-                "rembg package not installed. Install with: pip install rembg"
-            ) from e
+                    _REMBG_SESSION = new_session("isnet-general-use")
+                except ImportError as e:
+                    raise RuntimeError(
+                        "rembg package not installed. Install with: pip install rembg"
+                    ) from e
     return _REMBG_SESSION
 
 
@@ -1560,9 +1563,6 @@ def compute_piece_mask(
     Returns a binary mask (0 or 1) with the piece foreground isolated at the
     input image size.
 
-    If config.mask_skip is True, returns an all-foreground mask (useful when
-    background has already been removed, e.g., by AI preprocessing).
-
     Args:
         piece_bgr: BGR image of the piece.
         config: MatcherConfig with mask settings.
@@ -1574,10 +1574,6 @@ def compute_piece_mask(
             with ``dtype`` ``uint8`` and values 0 or 1, where 1 indicates the
             piece foreground and 0 indicates background.
     """
-    # If mask_skip is set, return all-foreground mask
-    if config.mask_skip:
-        return np.ones(piece_bgr.shape[:2], dtype=np.uint8)
-
     mask_mode = (config.mask_mode or "blue").lower()
     kernel_size = int(config.mask_kernel_size)
     open_iters = int(config.mask_open_iters)
