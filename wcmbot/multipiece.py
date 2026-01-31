@@ -12,7 +12,7 @@ from typing import Callable, Optional, Tuple
 import cv2
 import numpy as np
 
-from wcmbot.matcher import compute_piece_mask, remove_background_ai
+from wcmbot.matcher import compute_piece_mask
 
 
 @dataclass
@@ -20,8 +20,6 @@ class MultipieceRegion:
     bbox: Tuple[int, int, int, int]
     contour: np.ndarray
     area: float
-    # If set, the piece image with white background (BGR) for standard masking
-    piece_bgr: Optional[np.ndarray] = None
 
 
 def _compute_piece_mask_keep_all(
@@ -201,172 +199,23 @@ def find_multipiece_region_dicts(
     The original UI/test code represented regions as dictionaries:
       {"bbox": (x, y, w, h), "contour": contour, "area": area}
 
-    When mask_mode="ai", uses AI background removal once for the entire image
-    and returns regions with piece_bgra pre-removed. This is more efficient
-    than running AI on each individual piece.
-
     Prefer using find_multipiece_regions() for typed access.
     """
-    # Check if AI mode should be used
-    # Use multipiece_mask_mode if set, otherwise use mask_mode
-    effective_mask_mode = None
-    if (
-        hasattr(matcher_config, "multipiece_mask_mode")
-        and matcher_config.multipiece_mask_mode
-    ):
-        effective_mask_mode = matcher_config.multipiece_mask_mode
-    elif hasattr(matcher_config, "mask_mode"):
-        effective_mask_mode = matcher_config.mask_mode
-
-    if effective_mask_mode == "ai":
-        # Use AI background removal for efficient one-time processing
-        regions, mask01 = find_multipiece_regions_ai(
-            image_bgr,
-            matcher_config,
-            min_area_frac=min_area_frac,
-        )
-    else:
-        regions, mask01 = find_multipiece_regions(
-            image_bgr,
-            matcher_config,
-            compute_piece_mask_fn=compute_piece_mask_fn,
-            template_bgr=template_bgr,
-            template_mask=template_mask,
-            min_area_frac=min_area_frac,
-        )
+    regions, mask01 = find_multipiece_regions(
+        image_bgr,
+        matcher_config,
+        compute_piece_mask_fn=compute_piece_mask_fn,
+        template_bgr=template_bgr,
+        template_mask=template_mask,
+        min_area_frac=min_area_frac,
+    )
 
     region_dicts = [
         {
             "bbox": r.bbox,
             "contour": r.contour,
             "area": r.area,
-            "piece_bgr": r.piece_bgr,  # Include white-background piece if available
         }
         for r in regions
     ]
     return region_dicts, mask01
-
-
-def find_multipiece_regions_ai(
-    image_bgr: np.ndarray,
-    matcher_config,
-    *,
-    min_area_frac: float = 0.002,
-    pad_frac: float = 0.06,
-) -> tuple[list[MultipieceRegion], np.ndarray]:
-    """Find piece regions using AI background removal (rembg).
-
-    This function removes the background once using the AI model, then extracts
-    individual piece regions. Each region includes a piece_bgr attribute where:
-    - Original piece colors are preserved inside the contour
-    - White background is applied ONLY outside the contour edges
-
-    The white background allows skipping masking on individual pieces since
-    they already have clean foreground/background separation.
-
-    Args:
-        image_bgr: BGR image containing multiple pieces.
-        matcher_config: Configuration (multipiece_mask_mode not used here).
-        min_area_frac: Minimum contour area as fraction of image area.
-        pad_frac: Padding fraction around each piece (default 0.06).
-
-    Returns:
-        (regions, mask01) where regions have piece_bgr with white outside contours.
-    """
-    # Remove background from entire image using AI
-    image_bgra = remove_background_ai(image_bgr)
-
-    # Extract alpha channel as mask
-    if image_bgra.shape[2] == 4:
-        alpha = image_bgra[:, :, 3]
-    else:
-        # Fallback if no alpha
-        alpha = np.ones(image_bgr.shape[:2], dtype=np.uint8) * 255
-
-    # Threshold alpha to binary mask
-    _, mask255 = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
-    mask01 = (mask255 > 0).astype(np.uint8)
-
-    # Find contours
-    contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return [], mask01
-
-    image_area = int(image_bgr.shape[0] * image_bgr.shape[1])
-    min_area = max(400, int(image_area * float(min_area_frac)))
-    h_img, w_img = image_bgr.shape[:2]
-
-    # Get original BGR (without background replacement)
-    image_original_bgr = image_bgra[:, :, :3].copy()
-
-    regions: list[MultipieceRegion] = []
-    for cnt in contours:
-        area = float(cv2.contourArea(cnt))
-        if area < min_area:
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-
-        # Apply padding
-        pad = max(4, int(min(w, h) * float(pad_frac)))
-        x0 = max(0, x - pad)
-        y0 = max(0, y - pad)
-        x1 = min(w_img, x + w + pad)
-        y1 = min(h_img, y + h + pad)
-
-        # Create piece image with white background
-        piece_bgr = np.full((y1 - y0, x1 - x0, 3), 255, dtype=np.uint8)
-
-        # Create a mask for this piece's contour (shifted to piece coordinates)
-        piece_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-        cnt_shifted = cnt.copy()
-        cnt_shifted[:, 0, 0] -= x0
-        cnt_shifted[:, 0, 1] -= y0
-        cv2.drawContours(piece_mask, [cnt_shifted], -1, 255, -1)
-
-        # Copy original piece pixels ONLY inside the contour
-        crop_original = image_original_bgr[y0:y1, x0:x1]
-        piece_bgr[piece_mask > 0] = crop_original[piece_mask > 0]
-
-        regions.append(
-            MultipieceRegion(
-                bbox=(x0, y0, x1 - x0, y1 - y0),
-                contour=cnt,
-                area=area,
-                piece_bgr=piece_bgr,
-            )
-        )
-
-    if not regions:
-        return [], mask01
-
-    # Sort regions by row, then left-to-right within each row
-    heights = np.array([region.bbox[3] for region in regions], dtype=np.float32)
-    row_thresh = float(np.median(heights) * 0.6)
-
-    centers = [
-        (
-            region.bbox[0] + region.bbox[2] / 2.0,
-            region.bbox[1] + region.bbox[3] / 2.0,
-            idx,
-        )
-        for idx, region in enumerate(regions)
-    ]
-    centers.sort(key=lambda t: t[1])
-
-    rows: list[dict] = []
-    for cx, cy, idx in centers:
-        if not rows:
-            rows.append({"cy": cy, "items": [(cx, cy, idx)]})
-            continue
-        if abs(cy - rows[-1]["cy"]) <= row_thresh:
-            rows[-1]["items"].append((cx, cy, idx))
-            rows[-1]["cy"] = float(np.mean([item[1] for item in rows[-1]["items"]]))
-        else:
-            rows.append({"cy": cy, "items": [(cx, cy, idx)]})
-
-    ordered: list[MultipieceRegion] = []
-    for row in rows:
-        row["items"].sort(key=lambda t: t[0])
-        ordered.extend([regions[idx] for _, _, idx in row["items"]])
-
-    return ordered, mask01

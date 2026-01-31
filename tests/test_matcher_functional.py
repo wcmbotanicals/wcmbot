@@ -531,28 +531,6 @@ class TestMaskHelpers:
         mp_config2 = _get_multipiece_config(config2)
         assert mp_config2.mask_mode == "gradient"
 
-    def test_multipiece_region_has_piece_bgr_field(self):
-        """Test MultipieceRegion dataclass has piece_bgr field."""
-        from wcmbot.multipiece import MultipieceRegion
-
-        # Create a region with piece_bgr
-        region = MultipieceRegion(
-            bbox=(0, 0, 100, 100),
-            contour=np.zeros((4, 1, 2), dtype=np.int32),
-            area=10000.0,
-            piece_bgr=np.zeros((100, 100, 3), dtype=np.uint8),
-        )
-        assert region.piece_bgr is not None
-        assert region.piece_bgr.shape == (100, 100, 3)
-
-        # Default is None
-        region_no_bgr = MultipieceRegion(
-            bbox=(0, 0, 50, 50),
-            contour=np.zeros((4, 1, 2), dtype=np.int32),
-            area=2500.0,
-        )
-        assert region_no_bgr.piece_bgr is None
-
     def test_mask_by_ai_creates_valid_mask(self):
         """Test _mask_by_ai produces a valid binary mask."""
         pytest.importorskip("rembg")  # Skip if rembg not installed

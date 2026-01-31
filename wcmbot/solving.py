@@ -127,19 +127,7 @@ def iter_multipiece_payloads_from_bgr(
         x1 = min(grid_bgr.shape[1], x + w + pad)
         y1 = min(grid_bgr.shape[0], y + h + pad)
 
-        # Use pre-processed piece image if available (white background from AI mode)
-        piece_bgr_preprocessed = region.get("piece_bgr")
-        if piece_bgr_preprocessed is not None:
-            # Use pre-processed image with white outside contours
-            # Normal template HSV masking will run (not AI mode)
-            # White background doesn't match green/dark HSV ranges, so masking works well
-            crop_img = piece_bgr_preprocessed
-        else:
-            crop_img = grid_bgr[y0:y1, x0:x1].copy()
-        
-        # Always use template default masking for individual pieces
-        # (Even if AI was used for multipiece detection, we use HSV for individual matching)
-        piece_config = config
+        crop_img = grid_bgr[y0:y1, x0:x1].copy()
 
         payload = None
         try:
@@ -148,7 +136,7 @@ def iter_multipiece_payloads_from_bgr(
                 template_spec,
                 auto_align=auto_align,
                 template_rotation=template_rotation,
-                matcher_config=piece_config,
+                matcher_config=config,
             )
         except Exception:  # pylint: disable=broad-except
             payload = None
