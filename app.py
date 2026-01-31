@@ -821,11 +821,15 @@ def solve_puzzle_multipiece(
         return
 
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
-    # Apply segmentation mode override if not "default"
-    extra_overrides = {}
+    # Segmentation behavior in multipiece mode:
+    # - Initial split (finding multiple piece regions) should use the template default.
+    # - Per-piece matching may use an override selected in the UI (e.g. AI segmentation).
+    split_config = build_matcher_config_for_template(template_spec)
+
+    match_overrides = {}
     if segmentation_mode and segmentation_mode != "default":
-        extra_overrides["mask_mode"] = segmentation_mode
-    matcher_config = build_matcher_config_for_template(template_spec, extra_overrides)
+        match_overrides["mask_mode"] = segmentation_mode
+    match_config = build_matcher_config_for_template(template_spec, match_overrides)
     template_rgb = TEMPLATE_IMAGES.get(template_id)
     if template_rgb is None and template_spec is not None:
         template_rgb = get_template_image(
@@ -839,7 +843,7 @@ def solve_puzzle_multipiece(
         else None
     )
     regions, _ = find_multipiece_region_dicts(
-        grid_bgr, matcher_config, template_bgr=template_bgr
+        grid_bgr, split_config, template_bgr=template_bgr
     )
     if not regions:
         yield _blank_outputs(
@@ -872,7 +876,7 @@ def solve_puzzle_multipiece(
         template_spec,
         auto_align=bool(auto_align),
         template_rotation=rotation,
-        matcher_config=matcher_config,
+        matcher_config=match_config,
         regions=regions,
         template_bgr=template_bgr,
     ):
