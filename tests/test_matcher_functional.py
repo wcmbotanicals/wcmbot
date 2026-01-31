@@ -9,17 +9,17 @@ from PIL import Image
 from wcmbot.matcher import (
     COLS,
     ROWS,
+    _apply_background_cluster_mask,
+    _apply_template_cluster_mask,
     _background_bgr,
-    _fill_mask_holes,
-    _smooth_mask_edges,
+    _background_color_clusters,
     _background_distance_from_border,
+    _fill_mask_holes,
+    _mask_by_gradient,
     _recover_piece_edges,
+    _smooth_mask_edges,
     _smooth_piece_contour,
     _template_color_clusters,
-    _apply_template_cluster_mask,
-    _background_color_clusters,
-    _apply_background_cluster_mask,
-    _mask_by_gradient,
     build_matcher_config,
     find_piece_in_template,
 )
@@ -97,6 +97,67 @@ MANY_PIECES_EXPECTED = {
     23: (13, 14),
     24: (14, 25),
     25: (12, 3),
+}
+
+
+DIFFICULT_MULTIPIECE_EXPECTED = {
+    1: (17, 21),
+    2: (4, 17),
+    3: (12, 21),
+    4: (3, 8),
+    5: (21, 9),
+    6: (17, 2),
+    7: (22, 7),
+    8: (2, 8),
+    9: (3, 32),
+    10: (8, 22),
+    11: (8, 5),
+    12: (19, 18),
+    13: (26, 8),
+    14: (21, 5),
+    15: (26, 4),
+    16: (25, 34),
+    17: (25, 21),
+    18: (6, 5),
+    19: (9, 5),
+    20: (9, 21),
+    21: (26, 20),
+    22: (21, 2),
+    23: (12, 22),
+    24: (9, 35),
+    25: (18, 8),
+    26: (10, 5),
+    27: (5, 5),
+    28: (26, 9),
+}
+
+
+MANY_PIECES_EXPECTED_KNOBS = {
+    1: (1, 1),
+    2: (1, 2),
+    3: (1, 1),
+    4: (1, 1),
+    5: (1, 1),
+    6: (1, 1),
+    7: (1, 2),
+    8: (1, 1),
+    9: (1, 1),
+    10: (1, 1),
+    11: (1, 1),
+    12: (1, 1),
+    13: (1, 2),
+    14: (1, 1),
+    15: (1, 1),
+    16: (1, 1),
+    17: (1, 1),
+    18: (1, 1),
+    19: (1, 1),
+    20: (1, 1),
+    21: (1, 1),
+    22: (1, 1),
+    23: (1, 1),
+    24: (1, 1),
+    25: (1, 1),
 }
 
 
@@ -268,27 +329,61 @@ def test_find_piece_with_template_rotation(template_rotation):
 
 
 @pytest.mark.e2e
-def test_multipiece_many_pieces_batch():
+@pytest.mark.parametrize(
+    "grid_filename,expected_count,mask_mode,test_type,minimum_correct,check_knobs",
+    [
+        ("many_pieces.jpg", 25, None, "many_pieces", 24, True),
+        # ("many_pieces.jpg", 25, "ai", "many_pieces", 24, True),
+        ("difficult_multipiece.jpg", 28, None, "difficult_multipiece", 24, False),
+        # ("difficult_multipiece.jpg", 28, "ai", "difficult_multipiece", 24, False),
+    ],
+)
+def test_multipiece_batch_parameterised(
+    grid_filename, expected_count, mask_mode, test_type, minimum_correct, check_knobs
+):
+    """Test multipiece matching with different configurations and mask modes."""
     spec = TEMPLATE_REGISTRY.get("grass_puzzle")
-    matcher_config = build_matcher_config(
-        {
-            "rows": spec.rows,
-            "cols": spec.cols,
-            "crop_x": spec.crop_x,
-            "crop_y": spec.crop_y,
-            **spec.matcher_overrides,
-        }
-    )
-    grid_path = os.path.join(GRASS_PIECES_DIR, "many_pieces.jpg")
+
+    if test_type == "many_pieces":
+        expected = MANY_PIECES_EXPECTED
+    elif test_type == "difficult_multipiece":
+        expected = DIFFICULT_MULTIPIECE_EXPECTED
+    else:
+        raise ValueError(f"Unknown test_type: {test_type}")
+
+    # Build configurations
+    base_config = {
+        "rows": spec.rows,
+        "cols": spec.cols,
+        "crop_x": spec.crop_x,
+        "crop_y": spec.crop_y,
+        **spec.matcher_overrides,
+    }
+
+    if mask_mode == "ai":
+        split_config = build_matcher_config(base_config)
+        match_config = build_matcher_config({**base_config, "mask_mode": "ai"})
+    else:
+        split_config = build_matcher_config(base_config)
+        match_config = split_config
+
+    # Load grid image
+    grid_path = os.path.join(GRASS_PIECES_DIR, grid_filename)
     grid_img = Image.open(grid_path).convert("RGB")
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
 
-    regions, _ = find_multipiece_region_dicts(grid_bgr, matcher_config)
-    assert len(regions) == 25, "Expected 25 pieces detected"
+    # Find regions
+    regions, _ = find_multipiece_region_dicts(grid_bgr, split_config)
+    assert len(regions) == expected_count, f"Expected {expected_count} pieces detected"
 
+    # Track results
     placements = {}
+    inferred_knobs = {}
+    knob_mismatches = []
+    mismatches = []
     correct = 0
     template_path = os.fspath(spec.template_path)
+
     for idx, region in enumerate(regions, start=1):
         x, y, w, h = region["bbox"]
         pad = max(4, int(min(w, h) * 0.06))
@@ -310,20 +405,53 @@ def test_multipiece_many_pieces_batch():
                 infer_knobs=True,
                 auto_align=True,
                 template_rotation=spec.default_rotation,
-                matcher_config=matcher_config,
+                matcher_config=match_config,
             )
         finally:
             os.unlink(crop_path)
 
         assert payload.matches, f"No match returned for piece {idx}"
+
+        # Track knob inference if this test type requires it
+        if check_knobs:
+            assert payload.knobs_inferred, f"knob inference off for piece {idx}"
+            inferred_knobs[idx] = (payload.knobs_x, payload.knobs_y)
+            # Only perform expectation checks when we have expected knob values
+            if idx in MANY_PIECES_EXPECTED_KNOBS:
+                exp_knobs_x, exp_knobs_y = MANY_PIECES_EXPECTED_KNOBS[idx]
+                if payload.knobs_x != exp_knobs_x or payload.knobs_y != exp_knobs_y:
+                    knob_mismatches.append(
+                        (
+                            idx,
+                            (payload.knobs_x, payload.knobs_y),
+                            (exp_knobs_x, exp_knobs_y),
+                        )
+                    )
+
         top = payload.matches[0]
         placements[idx] = (top["row"], top["col"])
-        if MANY_PIECES_EXPECTED.get(idx) == placements[idx]:
-            correct += 1
 
-    assert correct >= 23, (
-        f"Expected at least 23 correctly placed pieces, got {correct}: {placements}"
+        # Check correctness based on test type
+        expected_idx = expected.get(idx)
+        if expected_idx is not None and expected_idx == placements[idx]:
+            correct += 1
+        elif expected_idx is not None:
+            mismatches.append((idx, placements[idx], expected_idx))
+
+    assert correct >= minimum_correct, (
+        f"Expected at least {minimum_correct} correctly placed pieces, got {correct}:"
+        f" mismatches (piece, placement, expected): {mismatches}"
     )
+
+    if check_knobs:
+        correct_knobs = len(regions) - len(knob_mismatches)
+        # Note: The threshold of 12 out of 25 (48%) is intentionally low to account
+        # for current knob inference limitations. This should be raised (e.g., to 20
+        # or 80%) once the knob inference logic is improved to handle edge cases better.
+        assert correct_knobs >= 12, (
+            "Knob inference mismatches for some pieces: "
+            f"{knob_mismatches}. All inferred: {inferred_knobs}"
+        )
 
 
 # Tests for new mask processing helper functions
@@ -509,7 +637,7 @@ class TestMaskHelpers:
     def test_mask_by_ai_creates_valid_mask(self):
         """Test _mask_by_ai produces a valid binary mask."""
         pytest.importorskip("rembg")  # Skip if rembg not installed
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         from wcmbot.matcher import _mask_by_ai
 
@@ -537,7 +665,7 @@ class TestMaskHelpers:
     def test_mask_by_ai_detects_piece_boundary(self):
         """Test _mask_by_ai correctly identifies piece boundaries."""
         pytest.importorskip("rembg")  # Skip if rembg not installed
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         from wcmbot.matcher import _mask_by_ai
 

@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -47,6 +47,11 @@ KNOB_WIDTH_FRAC = 1.0 / 3.0
 CROP_X_PX = 0
 CROP_Y_PX = 0
 MATCH_DILATE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+LOW_SCORE_THRESHOLD = 0.5
+LOW_GRID_SCORE_THRESHOLD = 0.6
+LOW_SCORE_ROTATIONS = [-5, -2.5, 2.5, 5]
+LOW_SCORE_MASK_EDGE_FRAC = 0.0
+LOW_SCORE_SCALE_SAMPLES = 11
 
 LOWER_BLUE1 = np.array([90, 60, 40], dtype=np.uint8)
 UPPER_BLUE1 = np.array([140, 255, 255], dtype=np.uint8)
@@ -108,6 +113,13 @@ class MatcherConfig:
     preserve_edges_coarse: bool = False
     parallel_matching: bool = True
     grid_center_weight: float = GRID_CENTER_WEIGHT
+    low_score_threshold: Optional[float] = LOW_SCORE_THRESHOLD
+    low_grid_score_threshold: Optional[float] = LOW_GRID_SCORE_THRESHOLD
+    low_score_rotations: List[float] = field(
+        default_factory=lambda: list(LOW_SCORE_ROTATIONS)
+    )
+    low_score_mask_edge_frac: float = LOW_SCORE_MASK_EDGE_FRAC
+    low_score_scale_samples: Optional[int] = LOW_SCORE_SCALE_SAMPLES
     knob_width_frac: float = KNOB_WIDTH_FRAC
     crop_x: int = CROP_X_PX
     crop_y: int = CROP_Y_PX
@@ -178,6 +190,11 @@ def build_matcher_config(
         "use_torch": use_torch_env,
         "torch_device": torch_device_env,
         "grid_center_weight": GRID_CENTER_WEIGHT,
+        "low_score_threshold": LOW_SCORE_THRESHOLD,
+        "low_grid_score_threshold": LOW_GRID_SCORE_THRESHOLD,
+        "low_score_rotations": list(LOW_SCORE_ROTATIONS),
+        "low_score_mask_edge_frac": LOW_SCORE_MASK_EDGE_FRAC,
+        "low_score_scale_samples": LOW_SCORE_SCALE_SAMPLES,
         "knob_width_frac": KNOB_WIDTH_FRAC,
         "crop_x": CROP_X_PX,
         "crop_y": CROP_Y_PX,
@@ -252,6 +269,38 @@ def _normalize_kernel(
     if isinstance(kernel, (list, tuple)) and len(kernel) == 2:
         return int(kernel[0]), int(kernel[1])
     raise ValueError("binarize_blur_ksz must be a 2-item list/tuple or null.")
+
+
+def _dense_scale_window(
+    scale_window: List[float],
+    samples: Optional[int],
+) -> List[float]:
+    if samples is None or samples <= 0:
+        return list(scale_window)
+    if len(scale_window) <= 1 or samples < len(scale_window):
+        return list(scale_window)
+    min_scale = float(min(scale_window))
+    max_scale = float(max(scale_window))
+    if min_scale == max_scale:
+        return list(scale_window)
+    return np.linspace(min_scale, max_scale, num=int(samples)).tolist()
+
+
+def _erode_mask_edges(mask01: np.ndarray, edge_frac: float) -> np.ndarray:
+    if edge_frac <= 0:
+        return mask01
+    h, w = mask01.shape[:2]
+    min_dim = min(h, w)
+    edge_px = int(round(min_dim * float(edge_frac)))
+    if edge_px < 1:
+        return mask01
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (edge_px * 2 + 1, edge_px * 2 + 1)
+    )
+    eroded = cv2.erode((mask01 > 0).astype(np.uint8), kernel, iterations=1)
+    if eroded.sum() == 0:
+        return mask01
+    return eroded
 
 
 def _load_image(path: str) -> np.ndarray:
@@ -1983,6 +2032,7 @@ def _estimate_scales(
     knobs_x: int,
     knobs_y: int,
     config: MatcherConfig,
+    scale_window: Optional[List[float]] = None,
 ) -> Tuple[float, List[float]]:
     th, tw = template_shape
     cell_w = tw / config.cols
@@ -2005,7 +2055,8 @@ def _estimate_scales(
     else:
         est_scale_area = (est_scale_w + est_scale_h) / 2.0
     est_scale = (est_scale_w * 0.45) + (est_scale_h * 0.45) + (est_scale_area * 0.10)
-    scales = [est_scale * f for f in config.est_scale_window]
+    window = scale_window if scale_window is not None else config.est_scale_window
+    scales = [est_scale * f for f in window]
     valid_scales: List[float] = []
     for scale in scales:
         ws = int(round(mw * scale))
@@ -2027,14 +2078,24 @@ def _infer_knob_counts(
     template_shape: Tuple[int, int],
     config: MatcherConfig,
 ) -> Tuple[int, int]:
+    scored, fill_ratio = _infer_knob_candidates(piece_mask, template_shape, config)
+    knobs_x, knobs_y, _ = _choose_knobs_from_candidates(scored, fill_ratio)
+    return knobs_x, knobs_y
+
+
+def _infer_knob_candidates(
+    piece_mask: np.ndarray,
+    template_shape: Tuple[int, int],
+    config: MatcherConfig,
+) -> Tuple[List[Tuple[float, int, int]], float]:
     mask01 = (piece_mask > 0).astype(np.uint8)
     mh, mw = mask01.shape
     if mw == 0 or mh == 0:
-        return 0, 0
+        return [], 0.0
 
     piece_area_px = float(mask01.sum())
     if piece_area_px <= 0:
-        return 0, 0
+        return [], 0.0
 
     fill_ratio = piece_area_px / float(mw * mh)
 
@@ -2059,8 +2120,16 @@ def _infer_knob_counts(
                 + 0.5 * abs(est_scale_h - est_scale_area)
             )
             scored.append((float(diff), kx, ky))
-
     scored.sort(key=lambda item: item[0])
+    return scored, fill_ratio
+
+
+def _choose_knobs_from_candidates(
+    scored: List[Tuple[float, int, int]],
+    fill_ratio: float,
+) -> Tuple[int, int, List[Tuple[float, int, int]]]:
+    if not scored:
+        return 0, 0, []
     best_diff = scored[0][0]
     candidates = [item for item in scored if item[0] <= best_diff + INFER_KNOBS_TIE_EPS]
     if fill_ratio <= INFER_KNOBS_LOW_FILL:
@@ -2068,7 +2137,7 @@ def _infer_knob_counts(
     elif fill_ratio >= INFER_KNOBS_HIGH_FILL:
         candidates.sort(key=lambda item: ((item[1] + item[2]), item[0]))
     chosen = candidates[0]
-    return chosen[1], chosen[2]
+    return chosen[1], chosen[2], candidates
 
 
 def _rotate_knob_counts(
@@ -4212,38 +4281,38 @@ def _render_zoom_image(
     return cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
 
 
-def find_piece_in_template(
-    piece_image_path: str,
-    template_image_path: str,
-    knobs_x: Optional[int],
-    knobs_y: Optional[int],
-    auto_align: bool = False,
-    infer_knobs: Optional[bool] = None,
-    template_rotation: Optional[int] = None,
-    matcher_config: Optional[MatcherConfig] = None,
-) -> MatchPayload:
-    piece_bgr = _load_image(piece_image_path)
-    return find_piece_in_template_bgr(
-        piece_bgr,
-        template_image_path,
-        knobs_x=knobs_x,
-        knobs_y=knobs_y,
-        auto_align=auto_align,
-        infer_knobs=infer_knobs,
-        template_rotation=template_rotation,
-        matcher_config=matcher_config,
-    )
+def _top_match_score_raw(matches: List[Dict]) -> float:
+    if not matches:
+        return float("-inf")
+    match = matches[0]
+    score_raw = match.get("score_raw")
+    if score_raw is None:
+        return float(match.get("score", 0.0))
+    return float(score_raw)
 
 
-def find_piece_in_template_bgr(
+def _top_match_grid_score(matches: List[Dict]) -> float:
+    if not matches:
+        return float("-inf")
+    match = matches[0]
+    return float(match.get("grid_score", 0.0))
+
+
+def _match_piece_bgr_against_template(
     piece_bgr: np.ndarray,
-    template_image_path: str,
+    template_rgb: np.ndarray,
+    template_bin: np.ndarray,
+    config: MatcherConfig,
+    *,
     knobs_x: Optional[int],
     knobs_y: Optional[int],
-    auto_align: bool = False,
-    infer_knobs: Optional[bool] = None,
-    template_rotation: Optional[int] = None,
-    matcher_config: Optional[MatcherConfig] = None,
+    auto_align: bool,
+    infer_knobs: Optional[bool],
+    template_blur_cache: Optional[Dict[Optional[Tuple[int, int]], np.ndarray]] = None,
+    template_blur_f32: Optional[np.ndarray] = None,
+    scale_window: Optional[List[float]] = None,
+    mask_edge_frac: float = 0.0,
+    profile: bool = False,
 ) -> MatchPayload:
     """Like find_piece_in_template, but accepts a BGR numpy array for the piece.
 
@@ -4259,35 +4328,13 @@ def find_piece_in_template_bgr(
         piece = cv2.cvtColor(piece_bgr, cv2.COLOR_BGRA2BGR)
     else:
         piece = piece_bgr
-
-    config = matcher_config or build_matcher_config()
-    profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
-    profile = profile_value not in ("", "0", "false", "no")
     if profile:
         t0 = time.perf_counter()
         marks: List[Tuple[str, float]] = []
 
-    template_entry = _load_template_cached(
-        template_image_path,
-        config.binarize_blur_ksz,
-        crop_x=config.crop_x,
-        crop_y=config.crop_y,
-    )
-    if profile:
-        marks.append(("template", time.perf_counter()))
-
     piece = _pad_piece_image(piece)
     if profile:
         marks.append(("piece", time.perf_counter()))
-
-    template_rgb = template_entry.template_rgb
-    template_bin = template_entry.template_bin
-    rotation = _normalize_template_rotation(template_rotation)
-    template_blur_cache = template_entry.blur_cache
-    if rotation:
-        template_rgb = _rotate_template_quadrant(template_rgb, rotation)
-        template_bin = _rotate_template_quadrant(template_bin, rotation)
-        template_blur_cache = {}
 
     template_bgr = cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
     template_mask01 = (template_bin > 0).astype(np.uint8)
@@ -4300,6 +4347,7 @@ def find_piece_in_template_bgr(
     knob_mask: Optional[np.ndarray] = None
     if (config.mask_mode or "blue").lower() in ("hsv", "hsv_ranges"):
         knob_mask = compute_piece_mask(piece, config)
+    mask_mode = (config.mask_mode or "blue").lower()
     if profile:
         marks.append(("mask", time.perf_counter()))
 
@@ -4327,9 +4375,8 @@ def find_piece_in_template_bgr(
     if isinstance(knobs_y, (int, float)) and knobs_y < 0:
         infer_knobs_enabled = True
 
-    auto_align_enabled = auto_align
     auto_align_deg = 0.0
-    if auto_align_enabled:
+    if auto_align:
         align_mask = _compute_piece_mask_for_alignment(piece, config)
         correction = _estimate_alignment_from_mask(align_mask)
         if abs(correction) >= AUTO_ALIGN_MIN_DEG:
@@ -4368,27 +4415,73 @@ def find_piece_in_template_bgr(
         if knob_mask is not None:
             ky0, ky1, kx0, kx1 = _mask_bbox(knob_mask)
             knob_mask_crop = knob_mask[ky0:ky1, kx0:kx1].copy()
-        knobs_x, knobs_y = _infer_knob_counts(
+        scored, fill_ratio = _infer_knob_candidates(
             knob_mask_crop,
             template_bin.shape,
             config,
         )
+        knobs_x, knobs_y, _tied = _choose_knobs_from_candidates(scored, fill_ratio)
+        match_knobs_x, match_knobs_y = knobs_x, knobs_y
+
+        if mask_mode in ("hsv", "hsv_ranges"):
+            # For HSV-based masks, we can refine our understanding of the fill
+            # using a hole-filled mask. We store the original fill_ratio from
+            # candidate inference to ensure consistency.
+            original_fill_ratio = fill_ratio
+            fill_mask = _fill_mask_holes(knob_mask_crop)
+            hole_filled_ratio = float(fill_mask.sum()) / float(
+                knob_mask_crop.shape[0] * knob_mask_crop.shape[1]
+            )
+            # Only adjust knobs when both the original and HSV-refined
+            # fill ratios agree about being in the "high" or "low" regime.
+            if (
+                original_fill_ratio >= INFER_KNOBS_HIGH_FILL
+                and hole_filled_ratio >= INFER_KNOBS_HIGH_FILL
+            ):
+                knobs_x = min(knobs_x, 1)
+                knobs_y = min(knobs_y, 1)
+            elif (
+                original_fill_ratio <= INFER_KNOBS_LOW_FILL
+                and hole_filled_ratio <= INFER_KNOBS_LOW_FILL
+            ):
+                knobs_x = max(knobs_x, 1)
+                knobs_y = max(knobs_y, 1)
+            # Update match knobs to reflect any adjustments
+            match_knobs_x, match_knobs_y = knobs_x, knobs_y
         knobs_inferred = True
         if profile:
             marks.append(("knob_infer", time.perf_counter()))
     else:
         knobs_x = int(knobs_x)
         knobs_y = int(knobs_y)
+        match_knobs_x, match_knobs_y = knobs_x, knobs_y
+
+    # Apply mask edge erosion after knob inference so that the eroded mask
+    # is used for scale estimation and matching, but knob count inference uses
+    # the full mask. This ordering ensures knobs are inferred from the complete
+    # piece shape before any edge effects are removed.
+    mask_edge_frac = max(0.0, float(mask_edge_frac))
+    if mask_mode == "ai":
+        mask_edge_frac = max(mask_edge_frac, 0.02)
+    if mask_edge_frac > 0:
+        piece_mask_crop = _erode_mask_edges(piece_mask_crop, mask_edge_frac)
+        piece_bin = piece_bin * piece_mask_crop
 
     _, scales = _estimate_scales(
-        template_bin.shape, piece_mask_crop, knobs_x, knobs_y, config
+        template_bin.shape,
+        piece_mask_crop,
+        match_knobs_x,
+        match_knobs_y,
+        config,
+        scale_window=scale_window,
     )
     if profile:
         marks.append(("scale", time.perf_counter()))
 
-    template_blur_f32 = _get_template_blur_f32(
-        template_bin, config.match_blur_ksz, template_blur_cache
-    )
+    if template_blur_f32 is None:
+        template_blur_f32 = _get_template_blur_f32(
+            template_bin, config.match_blur_ksz, template_blur_cache or {}
+        )
     _, top_matches = _match_template_multiscale_binary(
         template_bin,
         piece_bin,
@@ -4398,8 +4491,8 @@ def find_piece_in_template_bgr(
         scales,
         config.rotations,
         config,
-        knobs_x=knobs_x,
-        knobs_y=knobs_y,
+        knobs_x=match_knobs_x,
+        knobs_y=match_knobs_y,
         blur_ksz=config.match_blur_ksz,
         corr_method=cv2.TM_CCORR_NORMED,
         template_blur_f32=template_blur_f32,
@@ -4445,6 +4538,170 @@ def find_piece_in_template_bgr(
         resize_rethreshold=config.resize_rethreshold,
         render_full_res=config.render_full_res,
     )
+
+
+def find_piece_in_template(
+    piece_image_path: str,
+    template_image_path: str,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    auto_align: bool = False,
+    infer_knobs: Optional[bool] = None,
+    template_rotation: Optional[int] = None,
+    matcher_config: Optional[MatcherConfig] = None,
+) -> MatchPayload:
+    piece_bgr = _load_image(piece_image_path)
+    return find_piece_in_template_bgr(
+        piece_bgr,
+        template_image_path,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
+        auto_align=auto_align,
+        infer_knobs=infer_knobs,
+        template_rotation=template_rotation,
+        matcher_config=matcher_config,
+    )
+
+
+def find_piece_in_template_bgr(
+    piece_bgr: np.ndarray,
+    template_image_path: str,
+    knobs_x: Optional[int],
+    knobs_y: Optional[int],
+    auto_align: bool = False,
+    infer_knobs: Optional[bool] = None,
+    template_rotation: Optional[int] = None,
+    matcher_config: Optional[MatcherConfig] = None,
+) -> MatchPayload:
+    """Like find_piece_in_template, but accepts a BGR numpy array for the piece.
+
+    This avoids repeated disk I/O when solving multi-piece images.
+    """
+
+    if piece_bgr is None:
+        raise ValueError("piece_bgr must be a numpy array")
+    if piece_bgr.ndim == 2:
+        piece = cv2.cvtColor(piece_bgr, cv2.COLOR_GRAY2BGR)
+    elif piece_bgr.ndim == 3 and piece_bgr.shape[2] == 4:
+        piece = cv2.cvtColor(piece_bgr, cv2.COLOR_BGRA2BGR)
+    else:
+        piece = piece_bgr
+
+    config = matcher_config or build_matcher_config()
+    profile_value = os.getenv(PROFILE_ENV, "").strip().lower()
+    profile = profile_value not in ("", "0", "false", "no")
+
+    template_entry = _load_template_cached(
+        template_image_path,
+        config.binarize_blur_ksz,
+        crop_x=config.crop_x,
+        crop_y=config.crop_y,
+    )
+
+    template_rgb = template_entry.template_rgb
+    template_bin = template_entry.template_bin
+    rotation = _normalize_template_rotation(template_rotation)
+    template_blur_cache = template_entry.blur_cache
+    if rotation:
+        template_rgb = _rotate_template_quadrant(template_rgb, rotation)
+        template_bin = _rotate_template_quadrant(template_bin, rotation)
+        template_blur_cache = {}
+    template_blur_f32 = _get_template_blur_f32(
+        template_bin, config.match_blur_ksz, template_blur_cache
+    )
+    payload = _match_piece_bgr_against_template(
+        piece,
+        template_rgb,
+        template_bin,
+        config,
+        knobs_x=knobs_x,
+        knobs_y=knobs_y,
+        auto_align=auto_align,
+        infer_knobs=infer_knobs,
+        template_blur_cache=template_blur_cache,
+        template_blur_f32=template_blur_f32,
+        profile=profile,
+    )
+
+    low_score_threshold = config.low_score_threshold
+    low_grid_score_threshold = config.low_grid_score_threshold
+    base_score = _top_match_score_raw(payload.matches)
+    grid_score = _top_match_grid_score(payload.matches)
+
+    # Trigger low score behavior if either raw score or grid score is below threshold
+    if (
+        low_score_threshold is not None
+        and float(low_score_threshold) > 0
+        and base_score < float(low_score_threshold)
+    ) or (
+        low_grid_score_threshold is not None
+        and float(low_grid_score_threshold) > 0
+        and grid_score < float(low_grid_score_threshold)
+    ):
+        scale_window = _dense_scale_window(
+            config.est_scale_window, config.low_score_scale_samples
+        )
+        mask_edge_frac = max(0.0, float(config.low_score_mask_edge_frac))
+        candidates = [payload]
+
+        # Parallelize low_score rotation sweeps
+        low_score_rots = [
+            r for r in (config.low_score_rotations or []) if abs(r) >= 1e-6
+        ]
+        if low_score_rots:
+            cpu_count = os.cpu_count() or 1
+            max_workers = min(len(low_score_rots), cpu_count)
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                for rot in low_score_rots:
+                    # Apply the low-score sweep rotation on top of any previously
+                    # computed auto-align correction.
+                    # NOTE: _rotate_img uses clockwise-positive angles, which matches
+                    # the auto-align convention used elsewhere in this module.
+                    combined_rot = float(rot) + float(payload.auto_align_deg)
+                    piece_rot = _rotate_img(
+                        piece,
+                        combined_rot,
+                        interpolation=cv2.INTER_LINEAR,
+                        border_value=_background_bgr(piece),
+                    )
+                    future = executor.submit(
+                        _match_piece_bgr_against_template,
+                        piece_rot,
+                        template_rgb,
+                        template_bin,
+                        config,
+                        knobs_x=knobs_x,
+                        knobs_y=knobs_y,
+                        auto_align=False,
+                        infer_knobs=infer_knobs,
+                        template_blur_cache=template_blur_cache,
+                        template_blur_f32=template_blur_f32,
+                        scale_window=scale_window,
+                        mask_edge_frac=mask_edge_frac,
+                        profile=False,
+                    )
+                    # Store rotation with future so we can restore it later
+                    futures.append((future, combined_rot))
+
+                for future, applied_rot in futures:
+                    try:
+                        result = future.result()
+                        # Since auto_align=False was passed, result.auto_align_deg is expected
+                        # to be 0.0. To avoid clobbering any future behavior where the matcher
+                        # might still set a non-zero auto_align_deg even when auto-align is
+                        # disabled, only overwrite it when it is effectively zero.
+                        if abs(float(getattr(result, "auto_align_deg", 0.0))) <= 1e-6:
+                            result = replace(result, auto_align_deg=applied_rot)
+                        candidates.append(result)
+                    except Exception as e:
+                        logger.warning("Low score rotation match failed: %s", e)
+                        continue
+
+        payload = max(candidates, key=lambda item: _top_match_score_raw(item.matches))
+
+    return payload
 
 
 def _static_views(payload: MatchPayload) -> Dict[str, np.ndarray]:
