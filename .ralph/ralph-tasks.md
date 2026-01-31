@@ -7,7 +7,7 @@ unknown locations (marked with a ? in the file). The test should assert that all
 known pieces are matched correctly. This test is expected to fail currently.
 The goal is to have this test pass eventually, but for now it is just to help
 track progress.
-- [ ] Look into the matching score with/without grid centre weight, as well as the grid
+- [x] Look into the matching score with/without grid centre weight, as well as the grid
 centre score component, for the difficult_multipiece.jpg test as well as the existing
 test_multipiece_many_pieces_batch() test. By comparing between pieces known to currently
 be placed correctly and incorrectly, consider whether there is a signal in any of these scores indicating a high likelihood of a failed match. Based on this, consider
