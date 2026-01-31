@@ -13,7 +13,7 @@ test_multipiece_many_pieces_batch() test. By comparing between pieces known to c
 be placed correctly and incorrectly, consider whether there is a signal in any of these scores indicating a high likelihood of a failed match. Based on this, consider
 modifying LOW_SCORE_THRESHOLD in matcher.py and/or adding an additional threshold
 based on grid centre score.
-- [ ] Evaluate whether we can improve the number of correct matches on the new test,
+- [x] Evaluate whether we can improve the number of correct matches on the new test,
 as well as the existing test test_multipiece_many_pieces_batch(), by adjusting
 some/all of LOW_SCORE_ROTATIONS, LOW_SCORE_MASK_EDGE_FRAC and LOW_SCORE_SCALE_SAMPLES in matcher.py. Ideally we would make the new test pass, but this is not strictly required
 at this stage (other tests must still pass). Report any improvements in number of
