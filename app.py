@@ -745,7 +745,12 @@ def _change_match(
 
 
 def solve_puzzle(
-    piece_path, template_id, auto_align, template_rotation, show_grid=False
+    piece_path,
+    template_id,
+    auto_align,
+    template_rotation,
+    show_grid=False,
+    segmentation_mode="default",
 ):
     """Run the high-performance matcher and return visualization slices"""
     template_spec = TEMPLATE_REGISTRY.get(template_id)
@@ -763,7 +768,13 @@ def solve_puzzle(
         piece_bgr = cv2.imread(piece_path)
         if piece_bgr is None:
             raise ValueError(f"Could not load piece image: {piece_path}")
-        matcher_config = build_matcher_config_for_template(template_spec)
+        # Apply segmentation mode override if not "default"
+        extra_overrides = {}
+        if segmentation_mode and segmentation_mode != "default":
+            extra_overrides["mask_mode"] = segmentation_mode
+        matcher_config = build_matcher_config_for_template(
+            template_spec, extra_overrides
+        )
         payload = solve_piece_payload_from_bgr(
             piece_bgr,
             template_spec,
@@ -777,7 +788,12 @@ def solve_puzzle(
 
 
 def solve_puzzle_multipiece(
-    piece_path, template_id, auto_align, template_rotation, show_grid=False
+    piece_path,
+    template_id,
+    auto_align,
+    template_rotation,
+    show_grid=False,
+    segmentation_mode="default",
 ):
     """Detect multiple pieces in an image and stream match results."""
     template_spec = TEMPLATE_REGISTRY.get(template_id)
@@ -805,7 +821,11 @@ def solve_puzzle_multipiece(
         return
 
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
-    matcher_config = build_matcher_config_for_template(template_spec)
+    # Apply segmentation mode override if not "default"
+    extra_overrides = {}
+    if segmentation_mode and segmentation_mode != "default":
+        extra_overrides["mask_mode"] = segmentation_mode
+    matcher_config = build_matcher_config_for_template(template_spec, extra_overrides)
     template_rgb = TEMPLATE_IMAGES.get(template_id)
     if template_rgb is None and template_spec is not None:
         template_rgb = get_template_image(
@@ -910,16 +930,32 @@ def solve_puzzle_multipiece(
 
 
 def solve_single_or_batch(
-    piece_path, template_id, auto_align, template_rotation, batch_mode, show_grid=False
+    piece_path,
+    template_id,
+    auto_align,
+    template_rotation,
+    batch_mode,
+    show_grid=False,
+    segmentation_mode="default",
 ):
     """Dispatch to single-piece solve or streamed multipiece mode."""
     if batch_mode:
         yield from solve_puzzle_multipiece(
-            piece_path, template_id, auto_align, template_rotation, show_grid
+            piece_path,
+            template_id,
+            auto_align,
+            template_rotation,
+            show_grid,
+            segmentation_mode,
         )
     else:
         result = solve_puzzle(
-            piece_path, template_id, auto_align, template_rotation, show_grid
+            piece_path,
+            template_id,
+            auto_align,
+            template_rotation,
+            show_grid,
+            segmentation_mode,
         )
         yield result
 
@@ -1114,6 +1150,15 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
                     label="Show grid on template",
                     value=True,
                     info="Display grid lines with row/column numbers on the template.",
+                )
+                segmentation_mode = gr.Dropdown(
+                    label="Segmentation mode",
+                    choices=["default", "ai"],
+                    value="default",
+                    info=(
+                        "default: Use template-configured HSV segmentation. "
+                        "ai: Neural network (slow but accurate)."
+                    ),
                 )
             solve_button = gr.Button(
                 "🔍 Find Piece Location", variant="primary", size="lg"
@@ -1405,6 +1450,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
         idx,
         batch_state,
         show_grid,
+        segmentation_mode,
     ):
         if not piece_path:
             yield _no_update_outputs(state, idx, batch_state)
@@ -1416,6 +1462,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             template_rotation,
             batch_mode,
             show_grid,
+            segmentation_mode,
         )
         yield from result
 
@@ -1432,6 +1479,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             match_index,
             batch_state,
             show_grid_checkbox,
+            segmentation_mode,
         ],
         outputs=[
             *ordered_components,
@@ -1454,6 +1502,7 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             template_rotation,
             batch_grid_checkbox,
             show_grid_checkbox,
+            segmentation_mode,
         ],
         outputs=[
             *ordered_components,

@@ -26,10 +26,15 @@ from wcmbot.template_settings import TemplateSpec
 
 def build_matcher_config_for_template(
     template_spec: TemplateSpec,
+    extra_overrides: Optional[dict[str, object]] = None,
 ) -> MatcherConfig:
     """Create a MatcherConfig from a TemplateSpec.
 
     Centralizes how template-specific overrides are applied.
+
+    Args:
+        template_spec: Template configuration.
+        extra_overrides: Additional overrides to apply (e.g., mask_mode from UI).
     """
 
     overrides: dict[str, object] = {
@@ -38,6 +43,7 @@ def build_matcher_config_for_template(
         "crop_x": template_spec.crop_x,
         "crop_y": template_spec.crop_y,
         **(template_spec.matcher_overrides or {}),
+        **(extra_overrides or {}),
     }
     return build_matcher_config(overrides)
 
@@ -120,12 +126,13 @@ def iter_multipiece_payloads_from_bgr(
         y0 = max(0, y - pad)
         x1 = min(grid_bgr.shape[1], x + w + pad)
         y1 = min(grid_bgr.shape[0], y + h + pad)
-        crop_bgr = grid_bgr[y0:y1, x0:x1].copy()
+
+        crop_img = grid_bgr[y0:y1, x0:x1].copy()
 
         payload = None
         try:
             payload = solve_piece_payload_from_bgr(
-                crop_bgr,
+                crop_img,
                 template_spec,
                 auto_align=auto_align,
                 template_rotation=template_rotation,
@@ -136,6 +143,6 @@ def iter_multipiece_payloads_from_bgr(
         yield MultipieceSolveItem(
             index=idx,
             region=region,
-            piece_bgr=crop_bgr,
+            piece_bgr=crop_img,
             payload=payload,
         )

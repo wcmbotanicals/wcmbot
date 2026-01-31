@@ -6,7 +6,7 @@ by the UI layer (app.py) and by benchmarks/scripts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional, Tuple
 
 import cv2
@@ -59,6 +59,21 @@ def _compute_piece_mask_keep_all(
             return compute_piece_mask_fn(image_bgr, matcher_config)
 
 
+def _get_multipiece_config(matcher_config):
+    """Get config for multipiece mask computation.
+
+    If multipiece_mask_mode is set, returns a modified config that uses that
+    mode for the initial splitting. Otherwise returns the original config.
+    """
+    if (
+        hasattr(matcher_config, "multipiece_mask_mode")
+        and matcher_config.multipiece_mask_mode
+    ):
+        # Create a new config with the multipiece mask mode using replace()
+        return replace(matcher_config, mask_mode=matcher_config.multipiece_mask_mode)
+    return matcher_config
+
+
 def compute_multipiece_mask(
     image_bgr: np.ndarray,
     matcher_config,
@@ -72,11 +87,16 @@ def compute_multipiece_mask(
 
     If the mask selects mostly background, it is optionally inverted. Template
     imagery can be supplied to support template-aware segmentation.
+
+    Uses multipiece_mask_mode if set in config, otherwise uses mask_mode.
     """
+    # Use multipiece-specific mask mode if configured
+    multipiece_config = _get_multipiece_config(matcher_config)
+
     mask01 = _compute_piece_mask_keep_all(
         compute_piece_mask_fn,
         image_bgr,
-        matcher_config,
+        multipiece_config,
         template_bgr=template_bgr,
         template_mask=template_mask,
     )
@@ -181,7 +201,6 @@ def find_multipiece_region_dicts(
 
     Prefer using find_multipiece_regions() for typed access.
     """
-
     regions, mask01 = find_multipiece_regions(
         image_bgr,
         matcher_config,
@@ -190,7 +209,13 @@ def find_multipiece_region_dicts(
         template_mask=template_mask,
         min_area_frac=min_area_frac,
     )
+
     region_dicts = [
-        {"bbox": r.bbox, "contour": r.contour, "area": r.area} for r in regions
+        {
+            "bbox": r.bbox,
+            "contour": r.contour,
+            "area": r.area,
+        }
+        for r in regions
     ]
     return region_dicts, mask01

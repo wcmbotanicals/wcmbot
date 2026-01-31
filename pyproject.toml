@@ -18,6 +18,7 @@ space = "https://huggingface.co/spaces/wcmbotanicals/wcmbot"
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest", "playwright", "pytest-playwright", "versioneer[toml]"]
+ai = ["rembg[cpu]"]  # For AI-based background removal (mask_mode="ai")
 
 [tool.versioneer]
 VCS = "git"
