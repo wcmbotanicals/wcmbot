@@ -48,7 +48,7 @@ CROP_X_PX = 0
 CROP_Y_PX = 0
 MATCH_DILATE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 LOW_SCORE_THRESHOLD = 0.5
-LOW_SCORE_ROTATIONS = [-5.0, -2.5, 2.5, 5.0]
+LOW_SCORE_ROTATIONS = [-5, -2.5, 2.5, 5]
 LOW_SCORE_MASK_EDGE_FRAC = 0.0
 LOW_SCORE_SCALE_SAMPLES = 17
 
@@ -4626,6 +4626,9 @@ def find_piece_in_template_bgr(
             config.est_scale_window, config.low_score_scale_samples
         )
         mask_edge_frac = max(0.0, float(config.low_score_mask_edge_frac))
+        # For AI mask mode, use higher edge fraction to remove edge artifacts
+        if config.mask_mode == "ai":
+            mask_edge_frac = max(mask_edge_frac, 0.01)
         candidates = [payload]
 
         if mask_edge_frac > 0 or scale_window != config.est_scale_window:
