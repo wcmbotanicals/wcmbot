@@ -1,13 +1,13 @@
 {
   "active": true,
-  "iteration": 2,
+  "iteration": 1,
   "minIterations": 1,
   "maxIterations": 20,
   "completionPromise": "COMPLETE",
   "tasksMode": true,
   "taskPromise": "READY_FOR_NEXT_TASK",
   "prompt": "Improve matching performance",
-  "startedAt": "2026-01-31T14:33:38.664Z",
-  "model": "OpenAI GPT-5.2",
+  "startedAt": "2026-01-31T14:33:55.647Z",
+  "model": "OpenAI",
   "agent": "opencode"
 }
