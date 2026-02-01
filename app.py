@@ -20,8 +20,10 @@ from PIL import Image
 from wcmbot import __version__
 from wcmbot.matcher import (
     assert_torch_accel_available,
+    can_rembg_use_gpu,
     format_match_summary,
     preload_template_cache,
+    remove_background_ai,
     render_primary_views,
 )
 from wcmbot.multipiece import find_multipiece_region_dicts
@@ -868,15 +870,39 @@ def solve_puzzle_multipiece(
         return
 
     grid_bgr = cv2.cvtColor(np.array(grid_img), cv2.COLOR_RGB2BGR)
-    # Segmentation behavior in multipiece mode:
-    # - Initial split (finding multiple piece regions) should use the template default.
-    # - Per-piece matching may use an override selected in the UI (e.g. AI segmentation).
-    split_config = build_matcher_config_for_template(template_spec)
 
-    match_overrides = {}
-    if segmentation_mode and segmentation_mode != "default":
-        match_overrides["mask_mode"] = segmentation_mode
-    match_config = build_matcher_config_for_template(template_spec, match_overrides)
+    # Segmentation behavior in multipiece mode:
+    # - If GPU is available and AI segmentation is requested:
+    #   * Use AI masking for initial piece separation
+    #   * Remove background from individual pieces before saving (flag for later)
+    #   * Use template default (non-AI) for matching individual pieces
+    # - If only CPU is available and AI segmentation is requested:
+    #   * Use template default for initial piece separation
+    #   * Use AI masking for matching individual pieces
+    # - Otherwise use template default for both
+
+    use_gpu_ai_workflow = False
+    if segmentation_mode == "ai":
+        try:
+            use_gpu_ai_workflow = can_rembg_use_gpu()
+        except Exception:
+            # If we can't determine GPU availability, assume CPU workflow
+            use_gpu_ai_workflow = False
+
+    if use_gpu_ai_workflow:
+        # GPU workflow: AI for split, template default for matching
+        split_config = build_matcher_config_for_template(
+            template_spec, {"mask_mode": "ai"}
+        )
+        match_config = build_matcher_config_for_template(template_spec)
+    else:
+        # CPU workflow or no AI: template default for split, AI for matching if requested
+        split_config = build_matcher_config_for_template(template_spec)
+        match_overrides = {}
+        if segmentation_mode and segmentation_mode != "default":
+            match_overrides["mask_mode"] = segmentation_mode
+        match_config = build_matcher_config_for_template(template_spec, match_overrides)
+
     template_rgb = _ensure_template_image_loaded(template_id)
     template_bgr = (
         cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
@@ -912,55 +938,137 @@ def solve_puzzle_multipiece(
 
     processed = 0
     last_result = None
-    for item in iter_multipiece_payloads_from_bgr(
-        grid_bgr,
-        template_spec,
-        auto_align=bool(auto_align),
-        template_rotation=rotation,
-        matcher_config=match_config,
-        regions=regions,
-        template_bgr=template_bgr,
-    ):
-        idx = item.index
-        crop_bgr = item.piece_bgr
-        payload = item.payload
 
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp_path = tmp.name
-            cv2.imwrite(tmp_path, crop_bgr)
+    # Choose workflow based on GPU availability
+    if use_gpu_ai_workflow:
+        # GPU workflow: crop pieces, remove backgrounds, then match
+        for idx, region in enumerate(regions):
+            x, y, w, h = region["bbox"]
+            pad_frac = 0.06
+            pad = max(4, int(min(w, h) * float(pad_frac)))
+            x0 = max(0, x - pad)
+            y0 = max(0, y - pad)
+            x1 = min(grid_bgr.shape[1], x + w + pad)
+            y1 = min(grid_bgr.shape[0], y + h + pad)
 
-        state = {
-            "payload": payload,
-            "match_index": 0,
-            "piece_path": tmp_path,
-            "manual_rotation": 0.0,
-        }
-        if payload is None:
-            state["error"] = True
-        piece_states[idx] = state
+            crop_bgr = grid_bgr[y0:y1, x0:x1].copy()
 
-        processed += 1
-        last_result = payload
+            # Apply AI background removal to the cropped piece
+            try:
+                crop_bgra = remove_background_ai(crop_bgr)
+                # Composite onto white background
+                bgr = crop_bgra[:, :, :3]
+                alpha = crop_bgra[:, :, 3].astype(np.float32) / 255.0
+                alpha_3ch = np.stack([alpha] * 3, axis=-1)
+                white_bg = np.full_like(bgr, 255, dtype=np.uint8)
+                crop_bgr = (bgr * alpha_3ch + white_bg * (1 - alpha_3ch)).astype(
+                    np.uint8
+                )
+            except Exception:
+                # If background removal fails, use the original crop
+                pass
 
-        coord_markdown = _format_multipiece_table(piece_states, total)
+            # Now match with template default (no AI remasking)
+            payload = None
+            try:
+                payload = solve_piece_payload_from_bgr(
+                    crop_bgr,
+                    template_spec,
+                    auto_align=bool(auto_align),
+                    template_rotation=rotation,
+                    matcher_config=match_config,
+                )
+            except Exception:
+                payload = None
 
-        streamed_views = _build_multipiece_views_from_state(
-            batch_state, last_result=last_result
-        )
-        last_summary = ""
-        if last_result is not None:
-            last_summary = format_match_summary(last_result, 0)
-        yield _views_to_outputs(
-            streamed_views,
-            coord_markdown,
-            (
-                f"Processed {processed}/{total} pieces."
-                + (f"\n\n{last_summary}" if last_summary else "")
-            ),
-            None,
-            0,
-            batch_state,
-        )
+            # Save the background-removed piece
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp_path = tmp.name
+                cv2.imwrite(tmp_path, crop_bgr)
+
+            state = {
+                "payload": payload,
+                "match_index": 0,
+                "piece_path": tmp_path,
+                "manual_rotation": 0.0,
+            }
+            if payload is None:
+                state["error"] = True
+            piece_states[idx] = state
+
+            processed += 1
+            last_result = payload
+
+            coord_markdown = _format_multipiece_table(piece_states, total)
+
+            streamed_views = _build_multipiece_views_from_state(
+                batch_state, last_result=last_result
+            )
+            last_summary = ""
+            if last_result is not None:
+                last_summary = format_match_summary(last_result, 0)
+            yield _views_to_outputs(
+                streamed_views,
+                coord_markdown,
+                (
+                    f"Processed {processed}/{total} pieces."
+                    + (f"\n\n{last_summary}" if last_summary else "")
+                ),
+                None,
+                0,
+                batch_state,
+            )
+    else:
+        # CPU workflow: use the standard iterator
+        for item in iter_multipiece_payloads_from_bgr(
+            grid_bgr,
+            template_spec,
+            auto_align=bool(auto_align),
+            template_rotation=rotation,
+            matcher_config=match_config,
+            regions=regions,
+            template_bgr=template_bgr,
+        ):
+            idx = item.index
+            crop_bgr = item.piece_bgr
+            payload = item.payload
+
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp_path = tmp.name
+                cv2.imwrite(tmp_path, crop_bgr)
+
+            state = {
+                "payload": payload,
+                "match_index": 0,
+                "piece_path": tmp_path,
+                "manual_rotation": 0.0,
+            }
+            if payload is None:
+                state["error"] = True
+            piece_states[idx] = state
+
+            processed += 1
+            last_result = payload
+
+            coord_markdown = _format_multipiece_table(piece_states, total)
+
+            streamed_views = _build_multipiece_views_from_state(
+                batch_state, last_result=last_result
+            )
+            last_summary = ""
+            if last_result is not None:
+                last_summary = format_match_summary(last_result, 0)
+            yield _views_to_outputs(
+                streamed_views,
+                coord_markdown,
+                (
+                    f"Processed {processed}/{total} pieces."
+                    + (f"\n\n{last_summary}" if last_summary else "")
+                ),
+                None,
+                0,
+                batch_state,
+            )
 
     combined_location = _format_multipiece_table(piece_states, total)
 

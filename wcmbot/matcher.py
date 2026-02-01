@@ -1519,6 +1519,16 @@ def _detect_rembg_device_and_providers() -> tuple[str, list[str]]:
     return ("cpu", ["CPUExecutionProvider"])
 
 
+def can_rembg_use_gpu() -> bool:
+    """Check if rembg can run on GPU.
+
+    Returns True if a GPU execution provider is available for onnxruntime,
+    False otherwise. This function is safe to call before initializing rembg.
+    """
+    device, _ = _detect_rembg_device_and_providers()
+    return device == "gpu"
+
+
 def _get_rembg_session():
     """Get or create the rembg session (lazy initialization with thread safety)."""
     global _REMBG_SESSION, _REMBG_SESSION_INFO
