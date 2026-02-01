@@ -95,6 +95,29 @@ uv run python app.py --accessible
 uv run python app.py --gpu
 ```
 
+### Running with Docker
+
+The project includes a Dockerfile configured for GPU support. To build and run the Docker image:
+
+1. **Build the Docker image**:
+```bash
+docker build -t wcmbot .
+```
+
+2. **Run the Docker container with GPU support**:
+```bash
+docker run --gpus all -p 7860:7860 wcmbot
+```
+
+This will:
+- Enable all available GPUs with `--gpus all`
+- Map port 7860 from the container to your host machine (access the app at `http://localhost:7860`)
+- Run the app in accessible mode by default
+
+**Prerequisites for Docker GPU support:**
+- Docker with NVIDIA Container Toolkit installed ([installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html))
+- NVIDIA GPU with CUDA support
+
 ### Using the Interface
 
 1. **View the template** - The puzzle template is displayed on the right side with a grid overlay showing row and column numbers

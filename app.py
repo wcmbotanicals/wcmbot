@@ -5,6 +5,7 @@ import base64
 import os
 import random
 import tempfile
+import textwrap
 from functools import partial
 from pathlib import Path
 from typing import Dict, Optional
@@ -250,8 +251,13 @@ def prepare_template_display(
     template_id: str, rotation: int, show_grid: bool = False
 ) -> Optional[np.ndarray]:
     """Prepare template for display with optional rotation and grid overlay."""
-    template_spec = TEMPLATE_REGISTRY.get(template_id)
-    template_img = TEMPLATE_IMAGES.get(template_id)
+    template_img = None
+    if TEMPLATE_IMAGES is not None:
+        template_img = TEMPLATE_IMAGES.get(template_id)
+
+    # Lazily load the image if needed (keeps imports cheap, avoids requiring main()).
+    if template_img is None:
+        template_img = _ensure_template_image_loaded(template_id)
 
     if template_img is None:
         return None
@@ -264,12 +270,14 @@ def prepare_template_display(
 
     # Apply grid if requested
     if show_grid:
-        rotated = draw_grid_on_template(
-            rotated,
-            template_spec.rows,
-            template_spec.cols,
-            rotation=rotation,
-        )
+        template_spec = _ensure_template_spec_loaded(template_id)
+        if template_spec is not None:
+            rotated = draw_grid_on_template(
+                rotated,
+                template_spec.rows,
+                template_spec.cols,
+                rotation=rotation,
+            )
 
     return rotated
 
@@ -400,7 +408,7 @@ def _build_multipiece_views_from_state(batch_state, last_result=None):
         template_for_marking = template_rgb
         margin = 0  # Track margin offset for coordinate adjustments
         if show_grid:
-            template_spec = TEMPLATE_REGISTRY.get(template_id)
+            template_spec = _ensure_template_spec_loaded(template_id)
             if template_spec:
                 margin = DEFAULT_GRID_MARGIN
                 template_for_marking = draw_grid_on_template(
@@ -688,7 +696,18 @@ def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_st
     total_rotation = auto_align_deg + new_manual_rotation
 
     # Get template spec and run matcher with forced rotation (no auto-align)
-    template_spec = TEMPLATE_REGISTRY.get(template_id)
+    template_spec = _ensure_template_spec_loaded(template_id)
+    if template_spec is None:
+        views = _build_multipiece_views_from_state(batch_state)
+        coord_markdown = _format_multipiece_table(piece_states, total)
+        return _views_to_outputs(
+            views,
+            coord_markdown,
+            f"Template '{template_id}' is not available.",
+            None,
+            0,
+            batch_state,
+        )
     try:
         matcher_config = build_matcher_config_for_template(template_spec)
 
@@ -780,7 +799,7 @@ def solve_puzzle(
     segmentation_mode="default",
 ):
     """Run the high-performance matcher and return visualization slices"""
-    template_spec = TEMPLATE_REGISTRY.get(template_id)
+    template_spec = _ensure_template_spec_loaded(template_id)
     rotation = (
         int(template_rotation)
         if template_rotation is not None
@@ -823,7 +842,7 @@ def solve_puzzle_multipiece(
     segmentation_mode="default",
 ):
     """Detect multiple pieces in an image and stream match results."""
-    template_spec = TEMPLATE_REGISTRY.get(template_id)
+    template_spec = _ensure_template_spec_loaded(template_id)
     rotation = (
         int(template_rotation)
         if template_rotation is not None
@@ -857,13 +876,7 @@ def solve_puzzle_multipiece(
     if segmentation_mode and segmentation_mode != "default":
         match_overrides["mask_mode"] = segmentation_mode
     match_config = build_matcher_config_for_template(template_spec, match_overrides)
-    template_rgb = TEMPLATE_IMAGES.get(template_id)
-    if template_rgb is None and template_spec is not None:
-        template_rgb = get_template_image(
-            template_spec.template_path,
-            crop_x=template_spec.crop_x,
-            crop_y=template_spec.crop_y,
-        )
+    template_rgb = _ensure_template_image_loaded(template_id)
     template_bgr = (
         cv2.cvtColor(template_rgb, cv2.COLOR_RGB2BGR)
         if template_rgb is not None
@@ -1017,581 +1030,668 @@ def goto_next_match(
     )
 
 
-TEMPLATE_REGISTRY = load_template_registry()
-DEFAULT_TEMPLATE_ID = TEMPLATE_REGISTRY.default_template_id
-DEFAULT_TEMPLATE_SPEC = TEMPLATE_REGISTRY.get(DEFAULT_TEMPLATE_ID)
+# Module-level globals (initialized by _preload_templates)
+TEMPLATE_REGISTRY = None
+DEFAULT_TEMPLATE_ID = None
+DEFAULT_TEMPLATE_SPEC = None
+TEMPLATE_IMAGES = None
+DEFAULT_TEMPLATE_PREVIEW = None
+DEFAULT_TEMPLATE_PLOT = None
 
-for spec in TEMPLATE_REGISTRY.templates.values():
-    check_template_exists(spec.template_path)
-    try:
-        overrides = spec.matcher_overrides
-        if "binarize_blur_ksz" in overrides or "match_blur_ksz" in overrides:
-            preload_template_cache(
-                str(spec.template_path),
-                blur_ksz=overrides.get("match_blur_ksz"),
-                binarize_blur_ksz=overrides.get("binarize_blur_ksz"),
-                crop_x=spec.crop_x,
-                crop_y=spec.crop_y,
-            )
-        else:
-            preload_template_cache(
-                str(spec.template_path),
-                crop_x=spec.crop_x,
-                crop_y=spec.crop_y,
-            )
-    except Exception:
-        # Preloading is an optimization; if it fails, templates will load on-demand
-        pass
 
-TEMPLATE_IMAGES = {
-    spec.template_id: get_template_image(
-        spec.template_path, crop_x=spec.crop_x, crop_y=spec.crop_y
+def _ensure_template_registry_loaded():
+    global TEMPLATE_REGISTRY, DEFAULT_TEMPLATE_ID, DEFAULT_TEMPLATE_SPEC
+    if TEMPLATE_REGISTRY is not None:
+        return
+    TEMPLATE_REGISTRY = load_template_registry()
+    DEFAULT_TEMPLATE_ID = TEMPLATE_REGISTRY.default_template_id
+    DEFAULT_TEMPLATE_SPEC = TEMPLATE_REGISTRY.get(DEFAULT_TEMPLATE_ID)
+
+
+def _ensure_template_spec_loaded(template_id: str):
+    _ensure_template_registry_loaded()
+    if TEMPLATE_REGISTRY is None:
+        return None
+    return TEMPLATE_REGISTRY.get(template_id)
+
+
+def _ensure_template_image_loaded(template_id: str) -> Optional[np.ndarray]:
+    global TEMPLATE_IMAGES
+
+    if TEMPLATE_IMAGES is None:
+        TEMPLATE_IMAGES = {}
+
+    if template_id in TEMPLATE_IMAGES and TEMPLATE_IMAGES[template_id] is not None:
+        return TEMPLATE_IMAGES[template_id]
+
+    template_spec = _ensure_template_spec_loaded(template_id)
+    if template_spec is None:
+        return TEMPLATE_IMAGES.get(template_id)
+
+    check_template_exists(template_spec.template_path)
+    TEMPLATE_IMAGES[template_id] = get_template_image(
+        template_spec.template_path,
+        crop_x=template_spec.crop_x,
+        crop_y=template_spec.crop_y,
     )
-    for spec in TEMPLATE_REGISTRY.templates.values()
-}
-# Create default template display with grid (matches checkbox default of True)
-# Use prepare_template_display for consistency with the proper rotation flow
-DEFAULT_TEMPLATE_PREVIEW = prepare_template_display(
-    DEFAULT_TEMPLATE_ID, DEFAULT_TEMPLATE_SPEC.default_rotation, show_grid=True
-)
-DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
+    return TEMPLATE_IMAGES[template_id]
 
-# Create Gradio interface
-app_theme = gr.themes.Soft()
-with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
-    gr.Markdown(
-        f"""
-    # 🧩 WCMBot v{__version__}
 
-    Upload a photo of a jigsaw puzzle piece (or multiple pieces) and let WCMBot
-    infer its location in the full puzzle template. Tab/knob counts are inferred
-    automatically.
-
-    **Features:**
-    - **Grid overlay** enabled by default to show row and column numbers (toggle in Settings)
-    - **Template rotation** in 90° increments for different puzzle orientations
-    - **Multipiece mode (batch)** to detect and solve multiple pieces in one upload
-    - **Export templates** as high-quality PNG with grid using `export_template_grid.py`
-
-    **Usage notes:**
-        - Use a plain background (avoid blue/green where possible).
-        - For best results, ensure good lighting and minimal shadows.
-        - Optional auto-align (experimental) can correct small tilts.
-        - Matching runs automatically after upload; the button is there if you want to re-run.
-    
-    This app is almost entirely vibe-coded. If you and/or your AI agents would like to
-    contribute to its development, proposals and PRs are very welcome at
-    https://github.com/wcmbotanicals/wcmbot.
-    """
+def _no_update_outputs(state, idx, batch_state):
+    num_spacers = (
+        MAX_DYNAMIC_BUTTONS + 1
+    )  # One top spacer, MAX_DYNAMIC_BUTTONS-1 between button groups, and one bottom spacer
+    return (
+        *([gr.update()] * len(VIEW_KEYS)),
+        gr.update(),
+        gr.update(),
+        state,
+        idx,
+        batch_state,
+        *([gr.update()] * MAX_DYNAMIC_BUTTONS),  # Button visibility updates
+        *([gr.update()] * num_spacers),  # Spacer updates (including top and bottom)
     )
 
-    # Display random advertisement banner per session
-    ad_banner = gr.HTML()
-    demo.load(fn=get_random_ad, outputs=ad_banner)
 
-    gr.HTML(
-        """
-    <style>
-    #primary-template-view img {
-        cursor: zoom-in;
-    }
-    .batch-button-group {
-        width: 100%;
-        padding: 12px 8px;
-        border: 1px solid #e0e0e0;
-        border-radius: 4px;
-        background: #f9f9f9;
-        margin-bottom: 0px;
-        box-sizing: border-box;
-    }
-    .batch-button-group button {
-        width: 100%;
-        margin: 3px 0;
-    }
-    /* Ensure title alignment */
-    h3 {
-        margin-top: 0 !important;
-        padding-top: 0 !important;
-    }
-    </style>
-    """
-    )
-
-    with gr.Row():
-        with gr.Column(scale=1):
-            gr.Markdown("### Upload Puzzle Piece")
-            piece_input = gr.Image(
-                label="Puzzle Piece",
-                type="filepath",
-                sources=["upload", "clipboard"],
-                height=300,
-                elem_id="piece-upload",
-            )
-            grid_overview_header = gr.Markdown(
-                "### Multipiece overview (numbered)", visible=MULTIPIECE_DEFAULT
-            )
-            image_components = {}
-            image_components["grid_overview"] = gr.Image(
-                label="Numbered multipiece overview",
-                type="numpy",
-                interactive=False,
-                height=300,
-                visible=MULTIPIECE_DEFAULT,
-            )
-            with gr.Accordion("Settings", open=False):
-                template_selector = gr.Dropdown(
-                    label="Template",
-                    choices=TEMPLATE_REGISTRY.choices(),
-                    value=DEFAULT_TEMPLATE_ID,
-                )
-                auto_align_checkbox = gr.Checkbox(
-                    label="Auto-align (experimental)",
-                    value=DEFAULT_TEMPLATE_SPEC.auto_align_default,
-                )
-                batch_grid_checkbox = gr.Checkbox(
-                    label="Multipiece mode (batch)",
-                    value=MULTIPIECE_DEFAULT,
-                    info=(
-                        "If checked, detect multiple pieces in the upload and solve "
-                        "each in sequence."
-                    ),
-                )
-                show_batch_buttons_checkbox = gr.Checkbox(
-                    label="Show per-piece candidate buttons",
-                    value=True,
-                    info=(
-                        "Show a Next-candidate button for each detected piece when "
-                        "multipiece mode is enabled."
-                    ),
-                )
-                diagnostic_mode_checkbox = gr.Checkbox(
-                    label="Show diagnostic visualizations",
-                    value=False,
-                    info=(
-                        "Show detailed mask, binary, and processing steps for single pieces. "
-                        "Has no effect when 'Multipiece mode (batch)' is enabled."
-                    ),
-                )
-                template_rotation = gr.Dropdown(
-                    label="Template rotation (degrees)",
-                    choices=TEMPLATE_ROTATION_OPTIONS,
-                    value=DEFAULT_TEMPLATE_SPEC.default_rotation,
-                )
-                show_grid_checkbox = gr.Checkbox(
-                    label="Show grid on template",
-                    value=True,
-                    info="Display grid lines with row/column numbers on the template.",
-                )
-                segmentation_mode = gr.Dropdown(
-                    label="Segmentation mode",
-                    choices=["default", "ai"],
-                    value=DEFAULT_SEGMENTATION_MODE,
-                    info=(
-                        "default: Use template-configured segmentation (HSV/blue/green/etc.). "
-                        "ai: Neural network (slow but accurate)."
-                    ),
-                )
-            solve_button = gr.Button(
-                "🔍 Find Piece Location", variant="primary", size="lg"
-            )
-        with gr.Column(scale=1):
-            gr.Markdown("### Inferred row/column")
-            match_location = gr.Markdown(
-                "Run the matcher to infer a row and column.",
-                elem_id="match-location",
-            )
-            match_summary = gr.Markdown(
-                "Run the matcher to view detailed plots.",
-                elem_id="match-summary",
-            )
-            gr.Markdown("### Best match (template view)")
-            image_components["zoom_template"] = gr.Plot(
-                value=DEFAULT_TEMPLATE_PLOT,
-                elem_id="primary-template-view",
-            )
-            gr.Markdown("Use the controls to zoom and pan the image.")
-
-    with gr.Row():
-        with gr.Column(scale=3):
-            gr.Markdown("### Best match (side-by-side)")
-            image_components["zoom_pair"] = gr.Image(
-                label="Piece + template match (outline)",
-                type="numpy",
-                interactive=False,
-            )
-        batch_buttons_column = gr.Column(scale=1, visible=MULTIPIECE_DEFAULT)
-        with batch_buttons_column:
-            gr.Markdown("### Per-piece controls")
-            # Add top spacer (half height)
-            top_spacer = gr.HTML("", visible=False)
-
-            batch_button_groups = []
-            batch_button_containers = []
-            batch_spacers = [top_spacer]  # Start with top spacer
-            batch_rotation_inputs = []
-            for i in range(MAX_DYNAMIC_BUTTONS):
-                container = gr.Group(elem_classes=["batch-button-group"], visible=False)
-                batch_button_containers.append(container)
-                with container:
-                    gr.Markdown(f"**Piece {i + 1}**")
-                    next_btn = gr.Button("Next candidate", size="sm")
-                    gr.HTML(
-                        '<div style="font-size: 13px; margin-top: 8px; margin-bottom: 4px;">Rotate:</div>'
-                    )
-                    with gr.Row():
-                        rotation_input = gr.Number(
-                            value=2.5,
-                            minimum=0,
-                            maximum=10,
-                            step=0.1,
-                            show_label=False,
-                            container=False,
-                            scale=2,
-                            min_width=60,
-                        )
-                        gr.HTML(
-                            '<div style="font-size: 14px; padding: 8px 4px;">°</div>',
-                            scale=0,
-                            min_width=20,
-                        )
-                        rotate_ccw_btn = gr.Button(
-                            "↺ CCW", size="sm", scale=3, min_width=70
-                        )
-                        rotate_cw_btn = gr.Button(
-                            "↻ CW", size="sm", scale=3, min_width=70
-                        )
-                    batch_button_groups.append(
-                        {
-                            "next": next_btn,
-                            "rotate_cw": rotate_cw_btn,
-                            "rotate_ccw": rotate_ccw_btn,
-                            "rotation_input": rotation_input,
-                        }
-                    )
-                    batch_rotation_inputs.append(rotation_input)
-                # Add spacer after each group (except last)
-                if i < MAX_DYNAMIC_BUTTONS - 1:
-                    spacer = gr.HTML("", visible=False)
-                    batch_spacers.append(spacer)
-
-            # Add bottom spacer (half height)
-            bottom_spacer = gr.HTML("", visible=False)
-            batch_spacers.append(bottom_spacer)
-    with gr.Row(visible=False):
-        image_components["zoom_piece"] = gr.Image(
-            label="Piece (masked + rotated)",
-            type="numpy",
-            interactive=False,
-        )
-        image_components["zoom_focus"] = gr.Image(
-            label="Template match (outline)",
-            type="numpy",
-            interactive=False,
-        )
-    # Diagnostic outputs - hidden by default, shown when diagnostic mode enabled
-    diagnostic_header = gr.Markdown(
-        "### Match visualizations/diagnostics", visible=False
-    )
-
-    other_keys = [
-        key
-        for key in VIEW_KEYS
-        if key
-        not in (
-            "zoom_template",
-            "zoom_focus",
-            "zoom_piece",
-            "zoom_pair",
-            "grid_overview",
-        )
-    ]
-
-    diagnostic_row1 = gr.Row(visible=False)
-    with diagnostic_row1:
-        for key in other_keys[:4]:
-            comp = gr.Image(
-                label=VIEW_LABELS[key],
-                type="numpy",
-                value=DEFAULT_TEMPLATE_PREVIEW if key == "template_color" else None,
-                interactive=False,
-                height=260,
-            )
-            image_components[key] = comp
-
-    diagnostic_row2 = gr.Row(visible=False)
-    with diagnostic_row2:
-        for key in other_keys[4:]:
-            comp = gr.Image(
-                label=VIEW_LABELS[key],
-                type="numpy",
-                interactive=False,
-                height=260,
-            )
-            image_components[key] = comp
-
-    diagnostic_controls = gr.Row(visible=False)
-    with diagnostic_controls:
-        prev_button = gr.Button("⬅️ Previous match")
-        next_button = gr.Button("Next match ➡️")
-
-    match_state = gr.State()
-    match_index = gr.State(0)
-    batch_state = gr.State()
-
-    ordered_components = [image_components[key] for key in VIEW_KEYS]
-
-    def _toggle_diagnostics(show_diag):
-        """Toggle visibility of diagnostic outputs."""
-        return {
-            diagnostic_header: gr.update(visible=show_diag),
-            diagnostic_row1: gr.update(visible=show_diag),
-            diagnostic_row2: gr.update(visible=show_diag),
-            diagnostic_controls: gr.update(visible=show_diag),
-        }
-
-    diagnostic_mode_checkbox.change(
-        fn=_toggle_diagnostics,
-        inputs=[diagnostic_mode_checkbox],
-        outputs=[
-            diagnostic_header,
-            diagnostic_row1,
-            diagnostic_row2,
-            diagnostic_controls,
-        ],
-    )
-
-    def _toggle_grid_overview(show_grid, show_buttons):
-        show_buttons = bool(show_grid) and bool(show_buttons)
-        return {
-            grid_overview_header: gr.update(visible=show_grid),
-            image_components["grid_overview"]: gr.update(visible=show_grid),
-            batch_buttons_column: gr.update(visible=show_buttons),
-        }
-
-    batch_grid_checkbox.change(
-        fn=_toggle_grid_overview,
-        inputs=[batch_grid_checkbox, show_batch_buttons_checkbox],
-        outputs=[
-            grid_overview_header,
-            image_components["grid_overview"],
-            batch_buttons_column,
-        ],
-    )
-    show_batch_buttons_checkbox.change(
-        fn=_toggle_grid_overview,
-        inputs=[batch_grid_checkbox, show_batch_buttons_checkbox],
-        outputs=[
-            grid_overview_header,
-            image_components["grid_overview"],
-            batch_buttons_column,
-        ],
-    )
-
-    def _on_template_change(selected_template, show_grid):
-        spec = TEMPLATE_REGISTRY.get(selected_template)
-        defaults = _blank_outputs(
-            "Run the matcher once a piece is uploaded.",
-            selected_template,
-            spec.default_rotation,
-            show_grid,  # use current checkbox state
-        )
-        return (
-            spec.default_rotation,
-            spec.auto_align_default,
-            *defaults,
-        )
-
-    template_selector.change(
-        fn=_on_template_change,
-        inputs=[template_selector, show_grid_checkbox],
-        outputs=[
-            template_rotation,
-            auto_align_checkbox,
-            *ordered_components,
-            match_location,
-            match_summary,
-            match_state,
-            match_index,
-            batch_state,
-            *batch_button_containers,
-            *batch_spacers,
-        ],
-    )
-
-    def _update_template_display(template_id, rotation, show_grid, state, batch_state):
-        """Update just the template display when grid or rotation changes."""
-        template_preview = prepare_template_display(template_id, rotation, show_grid)
-        template_plot = make_zoomable_plot(template_preview)
-
-        # If we have batch state, update its show_grid setting and rebuild views
-        if batch_state and "piece_states" in batch_state:
-            batch_state["show_grid"] = show_grid
-            batch_state["rotation"] = rotation
-            views = _build_multipiece_views_from_state(batch_state)
-            return (
-                views.get("template_color"),
-                views.get("zoom_template"),
-                state,
-                batch_state,
-            )
-
-        return (template_preview, template_plot, state, batch_state)
-
-    # Update template display when grid checkbox or rotation changes
-    for control in [show_grid_checkbox, template_rotation]:
-        control.change(
-            fn=_update_template_display,
-            inputs=[
-                template_selector,
-                template_rotation,
-                show_grid_checkbox,
-                match_state,
-                batch_state,
-            ],
-            outputs=[
-                image_components["template_color"],
-                image_components["zoom_template"],
-                match_state,
-                batch_state,
-            ],
-        )
-
-    def _no_update_outputs(state, idx, batch_state):
-        num_spacers = (
-            MAX_DYNAMIC_BUTTONS + 1
-        )  # One top spacer, MAX_DYNAMIC_BUTTONS-1 between button groups, and one bottom spacer
-        return (
-            *([gr.update()] * len(VIEW_KEYS)),
-            gr.update(),
-            gr.update(),
-            state,
-            idx,
-            batch_state,
-            *([gr.update()] * MAX_DYNAMIC_BUTTONS),  # Button visibility updates
-            *([gr.update()] * num_spacers),  # Spacer updates (including top and bottom)
-        )
-
-    def _on_piece_change(
+def _on_piece_change(
+    piece_path,
+    template_id,
+    auto_align,
+    template_rotation,
+    batch_mode,
+    state,
+    idx,
+    batch_state,
+    show_grid,
+    segmentation_mode,
+):
+    if not piece_path:
+        yield _no_update_outputs(state, idx, batch_state)
+        return
+    result = solve_single_or_batch(
         piece_path,
         template_id,
         auto_align,
         template_rotation,
         batch_mode,
-        state,
-        idx,
-        batch_state,
         show_grid,
         segmentation_mode,
-    ):
-        if not piece_path:
-            yield _no_update_outputs(state, idx, batch_state)
-            return
-        result = solve_single_or_batch(
-            piece_path,
-            template_id,
-            auto_align,
-            template_rotation,
-            batch_mode,
-            show_grid,
-            segmentation_mode,
+    )
+    yield from result
+
+
+def _preload_templates():
+    """Load and cache all template resources."""
+    global TEMPLATE_REGISTRY, DEFAULT_TEMPLATE_ID, DEFAULT_TEMPLATE_SPEC
+    global TEMPLATE_IMAGES, DEFAULT_TEMPLATE_PREVIEW, DEFAULT_TEMPLATE_PLOT
+
+    print("🔄 Preloading templates and caches...")
+
+    TEMPLATE_REGISTRY = load_template_registry()
+    DEFAULT_TEMPLATE_ID = TEMPLATE_REGISTRY.default_template_id
+    DEFAULT_TEMPLATE_SPEC = TEMPLATE_REGISTRY.get(DEFAULT_TEMPLATE_ID)
+
+    for spec in TEMPLATE_REGISTRY.templates.values():
+        check_template_exists(spec.template_path)
+        try:
+            overrides = spec.matcher_overrides
+            if "binarize_blur_ksz" in overrides or "match_blur_ksz" in overrides:
+                preload_template_cache(
+                    str(spec.template_path),
+                    blur_ksz=overrides.get("match_blur_ksz"),
+                    binarize_blur_ksz=overrides.get("binarize_blur_ksz"),
+                    crop_x=spec.crop_x,
+                    crop_y=spec.crop_y,
+                )
+            else:
+                preload_template_cache(
+                    str(spec.template_path),
+                    crop_x=spec.crop_x,
+                    crop_y=spec.crop_y,
+                )
+        except Exception:
+            # Preloading is an optimization; if it fails, templates will load on-demand
+            pass
+
+    TEMPLATE_IMAGES = {
+        spec.template_id: get_template_image(
+            spec.template_path, crop_x=spec.crop_x, crop_y=spec.crop_y
         )
-        yield from result
+        for spec in TEMPLATE_REGISTRY.templates.values()
+    }
+    # Create default template display with grid (matches checkbox default of True)
+    # Use prepare_template_display for consistency with the proper rotation flow
+    DEFAULT_TEMPLATE_PREVIEW = prepare_template_display(
+        DEFAULT_TEMPLATE_ID, DEFAULT_TEMPLATE_SPEC.default_rotation, show_grid=True
+    )
+    DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
 
-    # Auto-run matching whenever a new piece is uploaded or pasted
-    piece_input.upload(
-        fn=_on_piece_change,
-        inputs=[
-            piece_input,
-            template_selector,
-            auto_align_checkbox,
-            template_rotation,
-            batch_grid_checkbox,
-            match_state,
-            match_index,
-            batch_state,
-            show_grid_checkbox,
-            segmentation_mode,
-        ],
-        outputs=[
-            *ordered_components,
-            match_location,
-            match_summary,
-            match_state,
-            match_index,
-            batch_state,
-            *batch_button_containers,
-            *batch_spacers,
-        ],
-    )
+    print("✅ Template preloading complete.")
 
-    solve_button.click(
-        fn=solve_single_or_batch,
-        inputs=[
-            piece_input,
-            template_selector,
-            auto_align_checkbox,
-            template_rotation,
-            batch_grid_checkbox,
-            show_grid_checkbox,
-            segmentation_mode,
-        ],
-        outputs=[
-            *ordered_components,
-            match_location,
-            match_summary,
-            match_state,
-            match_index,
-            batch_state,
-            *batch_button_containers,
-            *batch_spacers,
-        ],
-    )
-    prev_button.click(
-        fn=goto_previous_match,
-        inputs=[
-            match_state,
-            match_index,
-            template_selector,
-            template_rotation,
-            batch_state,
-            show_grid_checkbox,
-        ],
-        outputs=[
-            *ordered_components,
-            match_location,
-            match_summary,
-            match_state,
-            match_index,
-            batch_state,
-            *batch_button_containers,
-            *batch_spacers,
-        ],
-    )
-    next_button.click(
-        fn=goto_next_match,
-        inputs=[
-            match_state,
-            match_index,
-            template_selector,
-            template_rotation,
-            batch_state,
-            show_grid_checkbox,
-        ],
-        outputs=[
-            *ordered_components,
-            match_location,
-            match_summary,
-            match_state,
-            match_index,
-            batch_state,
-            *batch_button_containers,
-            *batch_spacers,
-        ],
-    )
 
-    # Hook up batch button handlers
-    for i, button_group in enumerate(batch_button_groups):
-        rotation_input = button_group["rotation_input"]
+def _build_gradio_interface():
+    """Build and return the Gradio interface."""
+    global DEFAULT_TEMPLATE_PREVIEW, DEFAULT_TEMPLATE_PLOT
+    _ensure_template_registry_loaded()
+    if (
+        DEFAULT_TEMPLATE_PREVIEW is None
+        and DEFAULT_TEMPLATE_ID
+        and DEFAULT_TEMPLATE_SPEC
+    ):
+        DEFAULT_TEMPLATE_PREVIEW = prepare_template_display(
+            DEFAULT_TEMPLATE_ID,
+            DEFAULT_TEMPLATE_SPEC.default_rotation,
+            show_grid=True,
+        )
+    if DEFAULT_TEMPLATE_PLOT is None:
+        DEFAULT_TEMPLATE_PLOT = make_zoomable_plot(DEFAULT_TEMPLATE_PREVIEW)
+
+    app_theme = gr.themes.Soft()
+    demo = gr.Blocks(title=f"🧩 WCMBot v{__version__}")
+    with demo:
+        gr.Markdown(
+            textwrap.dedent(
+                f"""\
+                # 🧩 WCMBot v{__version__}
+
+                Upload a photo of a jigsaw puzzle piece (or multiple pieces) and let WCMBot
+                infer its location in the full puzzle template. Tab/knob counts are inferred
+                automatically.
+
+                **Features:**
+                - **Grid overlay** enabled by default to show row and column numbers (toggle in Settings)
+                - **Template rotation** in 90° increments for different puzzle orientations
+                - **Multipiece mode (batch)** to detect and solve multiple pieces in one upload
+                - **Export templates** as high-quality PNG with grid using `export_template_grid.py`
+
+                **Usage notes:**
+                - Use a plain background (avoid blue/green where possible).
+                - For best results, ensure good lighting and minimal shadows.
+                - Optional auto-align (experimental) can correct small tilts.
+                - Matching runs automatically after upload; the button is there if you want to re-run.
+
+                This app is almost entirely vibe-coded. If you and/or your AI agents would like to
+                contribute to its development, proposals and PRs are very welcome at
+                https://github.com/wcmbotanicals/wcmbot.
+                """
+            )
+        )
+
+        # Display random advertisement banner per session
+        ad_banner = gr.HTML()
+        demo.load(fn=get_random_ad, outputs=ad_banner)
+
+        gr.HTML(
+            textwrap.dedent(
+                """\
+                <style>
+                #primary-template-view img {
+                    cursor: zoom-in;
+                }
+                .batch-button-group {
+                    width: 100%;
+                    padding: 12px 8px;
+                    border: 1px solid #e0e0e0;
+                    border-radius: 4px;
+                    background: #f9f9f9;
+                    margin-bottom: 0px;
+                    box-sizing: border-box;
+                }
+                .batch-button-group button {
+                    width: 100%;
+                    margin: 3px 0;
+                }
+                /* Ensure title alignment */
+                h3 {
+                    margin-top: 0 !important;
+                    padding-top: 0 !important;
+                }
+                </style>
+                """
+            )
+        )
+
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.Markdown("### Upload Puzzle Piece")
+                piece_input = gr.Image(
+                    label="Puzzle Piece",
+                    type="filepath",
+                    sources=["upload", "clipboard"],
+                    height=300,
+                    elem_id="piece-upload",
+                )
+                grid_overview_header = gr.Markdown(
+                    "### Multipiece overview (numbered)", visible=MULTIPIECE_DEFAULT
+                )
+                image_components = {}
+                image_components["grid_overview"] = gr.Image(
+                    label="Numbered multipiece overview",
+                    type="numpy",
+                    interactive=False,
+                    height=300,
+                    visible=MULTIPIECE_DEFAULT,
+                )
+                with gr.Accordion("Settings", open=False):
+                    template_selector = gr.Dropdown(
+                        label="Template",
+                        choices=TEMPLATE_REGISTRY.choices(),
+                        value=DEFAULT_TEMPLATE_ID,
+                    )
+                    auto_align_checkbox = gr.Checkbox(
+                        label="Auto-align (experimental)",
+                        value=DEFAULT_TEMPLATE_SPEC.auto_align_default,
+                    )
+                    batch_grid_checkbox = gr.Checkbox(
+                        label="Multipiece mode (batch)",
+                        value=MULTIPIECE_DEFAULT,
+                        info=(
+                            "If checked, detect multiple pieces in the upload and solve "
+                            "each in sequence."
+                        ),
+                    )
+                    show_batch_buttons_checkbox = gr.Checkbox(
+                        label="Show per-piece candidate buttons",
+                        value=True,
+                        info=(
+                            "Show a Next-candidate button for each detected piece when "
+                            "multipiece mode is enabled."
+                        ),
+                    )
+                    diagnostic_mode_checkbox = gr.Checkbox(
+                        label="Show diagnostic visualizations",
+                        value=False,
+                        info=(
+                            "Show detailed mask, binary, and processing steps for single pieces. "
+                            "Has no effect when 'Multipiece mode (batch)' is enabled."
+                        ),
+                    )
+                    template_rotation = gr.Dropdown(
+                        label="Template rotation (degrees)",
+                        choices=TEMPLATE_ROTATION_OPTIONS,
+                        value=DEFAULT_TEMPLATE_SPEC.default_rotation,
+                    )
+                    show_grid_checkbox = gr.Checkbox(
+                        label="Show grid on template",
+                        value=True,
+                        info="Display grid lines with row/column numbers on the template.",
+                    )
+                    segmentation_mode = gr.Dropdown(
+                        label="Segmentation mode",
+                        choices=["default", "ai"],
+                        value=DEFAULT_SEGMENTATION_MODE,
+                        info=(
+                            "default: Use template-configured segmentation (HSV/blue/green/etc.). "
+                            "ai: Neural network (slow but accurate)."
+                        ),
+                    )
+                solve_button = gr.Button(
+                    "🔍 Find Piece Location", variant="primary", size="lg"
+                )
+
+            with gr.Column(scale=1):
+                gr.Markdown("### Inferred row/column")
+                match_location = gr.Markdown(
+                    "Run the matcher to infer a row and column.",
+                    elem_id="match-location",
+                )
+                match_summary = gr.Markdown(
+                    "Run the matcher to view detailed plots.",
+                    elem_id="match-summary",
+                )
+                gr.Markdown("### Best match (template view)")
+                image_components["zoom_template"] = gr.Plot(
+                    value=DEFAULT_TEMPLATE_PLOT,
+                    elem_id="primary-template-view",
+                )
+                gr.Markdown("Use the controls to zoom and pan the image.")
+
+        with gr.Row():
+            with gr.Column(scale=3):
+                gr.Markdown("### Best match (side-by-side)")
+                image_components["zoom_pair"] = gr.Image(
+                    label="Piece + template match (outline)",
+                    type="numpy",
+                    interactive=False,
+                )
+            batch_buttons_column = gr.Column(scale=1, visible=MULTIPIECE_DEFAULT)
+            with batch_buttons_column:
+                gr.Markdown("### Per-piece controls")
+                # Add top spacer (half height)
+                top_spacer = gr.HTML("", visible=False)
+
+                batch_button_groups = []
+                batch_button_containers = []
+                batch_spacers = [top_spacer]  # Start with top spacer
+                batch_rotation_inputs = []
+                for i in range(MAX_DYNAMIC_BUTTONS):
+                    container = gr.Group(
+                        elem_classes=["batch-button-group"], visible=False
+                    )
+                    batch_button_containers.append(container)
+                    with container:
+                        gr.Markdown(f"**Piece {i + 1}**")
+                        next_btn = gr.Button("Next candidate", size="sm")
+                        gr.HTML(
+                            '<div style="font-size: 13px; margin-top: 8px; margin-bottom: 4px;">Rotate:</div>'
+                        )
+                        with gr.Row():
+                            rotation_input = gr.Number(
+                                value=2.5,
+                                minimum=0,
+                                maximum=10,
+                                step=0.1,
+                                show_label=False,
+                                container=False,
+                                scale=2,
+                                min_width=60,
+                            )
+                            gr.HTML(
+                                '<div style="font-size: 14px; padding: 8px 4px;">°</div>',
+                                scale=0,
+                                min_width=20,
+                            )
+                            rotate_ccw_btn = gr.Button(
+                                "↺ CCW", size="sm", scale=3, min_width=70
+                            )
+                            rotate_cw_btn = gr.Button(
+                                "↻ CW", size="sm", scale=3, min_width=70
+                            )
+                        batch_button_groups.append(
+                            {
+                                "next": next_btn,
+                                "rotate_cw": rotate_cw_btn,
+                                "rotate_ccw": rotate_ccw_btn,
+                                "rotation_input": rotation_input,
+                            }
+                        )
+                        batch_rotation_inputs.append(rotation_input)
+                    # Add spacer after each group (except last)
+                    if i < MAX_DYNAMIC_BUTTONS - 1:
+                        spacer = gr.HTML("", visible=False)
+                        batch_spacers.append(spacer)
+
+                # Add bottom spacer (half height)
+                bottom_spacer = gr.HTML("", visible=False)
+                batch_spacers.append(bottom_spacer)
+        with gr.Row(visible=False):
+            image_components["zoom_piece"] = gr.Image(
+                label="Piece (masked + rotated)",
+                type="numpy",
+                interactive=False,
+            )
+            image_components["zoom_focus"] = gr.Image(
+                label="Template match (outline)",
+                type="numpy",
+                interactive=False,
+            )
+        # Diagnostic outputs - hidden by default, shown when diagnostic mode enabled
+        diagnostic_header = gr.Markdown(
+            "### Match visualizations/diagnostics", visible=False
+        )
+
+        other_keys = [
+            key
+            for key in VIEW_KEYS
+            if key
+            not in (
+                "zoom_template",
+                "zoom_focus",
+                "zoom_piece",
+                "zoom_pair",
+                "grid_overview",
+            )
+        ]
+
+        diagnostic_row1 = gr.Row(visible=False)
+        with diagnostic_row1:
+            for key in other_keys[:4]:
+                comp = gr.Image(
+                    label=VIEW_LABELS[key],
+                    type="numpy",
+                    value=DEFAULT_TEMPLATE_PREVIEW if key == "template_color" else None,
+                    interactive=False,
+                    height=260,
+                )
+                image_components[key] = comp
+
+        diagnostic_row2 = gr.Row(visible=False)
+        with diagnostic_row2:
+            for key in other_keys[4:]:
+                comp = gr.Image(
+                    label=VIEW_LABELS[key],
+                    type="numpy",
+                    interactive=False,
+                    height=260,
+                )
+                image_components[key] = comp
+
+        diagnostic_controls = gr.Row(visible=False)
+        with diagnostic_controls:
+            prev_button = gr.Button("⬅️ Previous match")
+            next_button = gr.Button("Next match ➡️")
+
+        match_state = gr.State()
+        match_index = gr.State(0)
+        batch_state = gr.State()
+
+        ordered_components = [image_components[key] for key in VIEW_KEYS]
+
+        def _toggle_diagnostics(show_diag):
+            """Toggle visibility of diagnostic outputs."""
+            return {
+                diagnostic_header: gr.update(visible=show_diag),
+                diagnostic_row1: gr.update(visible=show_diag),
+                diagnostic_row2: gr.update(visible=show_diag),
+                diagnostic_controls: gr.update(visible=show_diag),
+            }
+
+        diagnostic_mode_checkbox.change(
+            fn=_toggle_diagnostics,
+            inputs=[diagnostic_mode_checkbox],
+            outputs=[
+                diagnostic_header,
+                diagnostic_row1,
+                diagnostic_row2,
+                diagnostic_controls,
+            ],
+        )
+
+        def _toggle_grid_overview(show_grid, show_buttons):
+            show_buttons = bool(show_grid) and bool(show_buttons)
+            return {
+                grid_overview_header: gr.update(visible=show_grid),
+                image_components["grid_overview"]: gr.update(visible=show_grid),
+                batch_buttons_column: gr.update(visible=show_buttons),
+            }
+
+        batch_grid_checkbox.change(
+            fn=_toggle_grid_overview,
+            inputs=[batch_grid_checkbox, show_batch_buttons_checkbox],
+            outputs=[
+                grid_overview_header,
+                image_components["grid_overview"],
+                batch_buttons_column,
+            ],
+        )
+        show_batch_buttons_checkbox.change(
+            fn=_toggle_grid_overview,
+            inputs=[batch_grid_checkbox, show_batch_buttons_checkbox],
+            outputs=[
+                grid_overview_header,
+                image_components["grid_overview"],
+                batch_buttons_column,
+            ],
+        )
+
+        def _on_template_change(selected_template, show_grid):
+            spec = _ensure_template_spec_loaded(selected_template)
+            defaults = _blank_outputs(
+                "Run the matcher once a piece is uploaded.",
+                selected_template,
+                spec.default_rotation,
+                show_grid,  # use current checkbox state
+            )
+            return (
+                spec.default_rotation,
+                spec.auto_align_default,
+                *defaults,
+            )
+
+        template_selector.change(
+            fn=_on_template_change,
+            inputs=[template_selector, show_grid_checkbox],
+            outputs=[
+                template_rotation,
+                auto_align_checkbox,
+                *ordered_components,
+                match_location,
+                match_summary,
+                match_state,
+                match_index,
+                batch_state,
+                *batch_button_containers,
+                *batch_spacers,
+            ],
+        )
+
+        def _update_template_display(
+            template_id, rotation, show_grid, state, batch_state
+        ):
+            """Update just the template display when grid or rotation changes."""
+            template_preview = prepare_template_display(
+                template_id, rotation, show_grid
+            )
+            template_plot = make_zoomable_plot(template_preview)
+
+            # If we have batch state, update its show_grid setting and rebuild views
+            if batch_state and "piece_states" in batch_state:
+                batch_state["show_grid"] = show_grid
+                batch_state["rotation"] = rotation
+                views = _build_multipiece_views_from_state(batch_state)
+                return (
+                    views.get("template_color"),
+                    views.get("zoom_template"),
+                    state,
+                    batch_state,
+                )
+
+            return (template_preview, template_plot, state, batch_state)
+
+        # Update template display when grid checkbox or rotation changes
+        for control in [show_grid_checkbox, template_rotation]:
+            control.change(
+                fn=_update_template_display,
+                inputs=[
+                    template_selector,
+                    template_rotation,
+                    show_grid_checkbox,
+                    match_state,
+                    batch_state,
+                ],
+                outputs=[
+                    image_components["template_color"],
+                    image_components["zoom_template"],
+                    match_state,
+                    batch_state,
+                ],
+            )
+
+        # Auto-run matching whenever a new piece is uploaded or pasted
+        piece_input.upload(
+            fn=_on_piece_change,
+            inputs=[
+                piece_input,
+                template_selector,
+                auto_align_checkbox,
+                template_rotation,
+                batch_grid_checkbox,
+                match_state,
+                match_index,
+                batch_state,
+                show_grid_checkbox,
+                segmentation_mode,
+            ],
+            outputs=[
+                *ordered_components,
+                match_location,
+                match_summary,
+                match_state,
+                match_index,
+                batch_state,
+                *batch_button_containers,
+                *batch_spacers,
+            ],
+        )
+
+        solve_button.click(
+            fn=solve_single_or_batch,
+            inputs=[
+                piece_input,
+                template_selector,
+                auto_align_checkbox,
+                template_rotation,
+                batch_grid_checkbox,
+                show_grid_checkbox,
+                segmentation_mode,
+            ],
+            outputs=[
+                *ordered_components,
+                match_location,
+                match_summary,
+                match_state,
+                match_index,
+                batch_state,
+                *batch_button_containers,
+                *batch_spacers,
+            ],
+        )
+        prev_button.click(
+            fn=goto_previous_match,
+            inputs=[
+                match_state,
+                match_index,
+                template_selector,
+                template_rotation,
+                batch_state,
+                show_grid_checkbox,
+            ],
+            outputs=[
+                *ordered_components,
+                match_location,
+                match_summary,
+                match_state,
+                match_index,
+                batch_state,
+                *batch_button_containers,
+                *batch_spacers,
+            ],
+        )
+        next_button.click(
+            fn=goto_next_match,
+            inputs=[
+                match_state,
+                match_index,
+                template_selector,
+                template_rotation,
+                batch_state,
+                show_grid_checkbox,
+            ],
+            outputs=[
+                *ordered_components,
+                match_location,
+                match_summary,
+                match_state,
+                match_index,
+                batch_state,
+                *batch_button_containers,
+                *batch_spacers,
+            ],
+        )
+
+        # Hook up batch button handlers
+        for i, button_group in enumerate(batch_button_groups):
+            rotation_input = button_group["rotation_input"]
 
         # Next candidate button
         button_group["next"].click(
@@ -1655,19 +1755,31 @@ with gr.Blocks(title=f"🧩 WCMBot v{__version__}") as demo:
             ],
         )
 
-    gr.Markdown(
-        """
-    ---
-    ### About
-    Use the navigation buttons to inspect alternative placements when multiple
-    candidates score highly.
-    """
-    )
+        gr.Markdown(
+            textwrap.dedent(
+                """\
+                ---
+                ### About
+                Use the navigation buttons to inspect alternative placements when multiple
+                candidates score highly.
+                """
+            )
+        )
 
-if __name__ == "__main__":
+    return demo, app_theme
+
+
+def main():
     args = _CLI_ARGS
     if args is None:
         args = _build_arg_parser().parse_args()
+
+    # Preload templates and caches before launching
+    _preload_templates()
+
+    # Build the Gradio interface
+    demo, app_theme = _build_gradio_interface()
+
     kwargs = {}
     if args.gpu:
         device = assert_torch_accel_available()
@@ -1675,4 +1787,9 @@ if __name__ == "__main__":
         os.environ["WCMBOT_TORCH_DEVICE"] = device
     if args.accessible:
         kwargs["server_name"] = "0.0.0.0"
+    print(f"Launching WCMBot v{__version__}...")
     demo.launch(theme=app_theme, **kwargs)
+
+
+if __name__ == "__main__":
+    main()

@@ -16,7 +16,6 @@ dependencies = [
     "numpy",
     "gradio",
     "plotly",
-    "torch",
     "rembg[cpu]",
 ]
 
@@ -25,8 +24,8 @@ repository = "https://github.com/wcmbotanicals/wcmbot"
 space = "https://huggingface.co/spaces/wcmbotanicals/wcmbot"
 
 [project.optional-dependencies]
-dev = ["ruff", "pytest", "playwright", "pytest-playwright", "versioneer[toml]"]
-gpu = ["rembg[gpu]"]
+dev = ["ruff", "pytest", "playwright", "pytest-playwright", "versioneer[toml]", "torch"]
+gpu = ["rembg[gpu]", "torch"]
 
 [tool.versioneer]
 VCS = "git"
