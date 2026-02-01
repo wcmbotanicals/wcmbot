@@ -1816,71 +1816,63 @@ def _build_gradio_interface():
             ],
         )
 
-        # Hook up batch button handlers
+        def _rotate_piece_cw(piece_idx: int, batch_state_value, rotation_deg):
+            deg = 1 if rotation_deg is None else rotation_deg
+            return _rotate_multipiece_candidate(piece_idx, -abs(deg), batch_state_value)
+
+        def _rotate_piece_ccw(piece_idx: int, batch_state_value, rotation_deg):
+            deg = 1 if rotation_deg is None else rotation_deg
+            return _rotate_multipiece_candidate(piece_idx, abs(deg), batch_state_value)
+
+        # Hook up batch button handlers (must be inside the loop so each button
+        # group gets its own bound callbacks).
         for i, button_group in enumerate(batch_button_groups):
             rotation_input = button_group["rotation_input"]
 
-        # Next candidate button
-        button_group["next"].click(
-            fn=partial(_advance_multipiece_candidate, i),
-            inputs=[batch_state],
-            outputs=[
-                *ordered_components,
-                match_location,
-                match_summary,
-                match_state,
-                match_index,
-                batch_state,
-                *batch_button_containers,
-                *batch_spacers,
-            ],
-        )
+            button_group["next"].click(
+                fn=partial(_advance_multipiece_candidate, i),
+                inputs=[batch_state],
+                outputs=[
+                    *ordered_components,
+                    match_location,
+                    match_summary,
+                    match_state,
+                    match_index,
+                    batch_state,
+                    *batch_button_containers,
+                    *batch_spacers,
+                ],
+            )
 
-        # Rotate clockwise button (negative angle for CW)
-        def make_rotate_cw_handler(piece_idx):
-            def handler(batch_state, rotation_deg):
-                deg = 1 if rotation_deg is None else rotation_deg
-                return _rotate_multipiece_candidate(piece_idx, -abs(deg), batch_state)
+            button_group["rotate_cw"].click(
+                fn=partial(_rotate_piece_cw, i),
+                inputs=[batch_state, rotation_input],
+                outputs=[
+                    *ordered_components,
+                    match_location,
+                    match_summary,
+                    match_state,
+                    match_index,
+                    batch_state,
+                    *batch_button_containers,
+                    *batch_spacers,
+                ],
+            )
 
-            return handler
-
-        button_group["rotate_cw"].click(
-            fn=make_rotate_cw_handler(i),
-            inputs=[batch_state, rotation_input],
-            outputs=[
-                *ordered_components,
-                match_location,
-                match_summary,
-                match_state,
-                match_index,
-                batch_state,
-                *batch_button_containers,
-                *batch_spacers,
-            ],
-        )
-
-        # Rotate counter-clockwise button (positive angle for CCW)
-        def make_rotate_ccw_handler(piece_idx):
-            def handler(batch_state, rotation_deg):
-                deg = 1 if rotation_deg is None else rotation_deg
-                return _rotate_multipiece_candidate(piece_idx, abs(deg), batch_state)
-
-            return handler
-
-        button_group["rotate_ccw"].click(
-            fn=make_rotate_ccw_handler(i),
-            inputs=[batch_state, rotation_input],
-            outputs=[
-                *ordered_components,
-                match_location,
-                match_summary,
-                match_state,
-                match_index,
-                batch_state,
-                *batch_button_containers,
-                *batch_spacers,
-            ],
-        )
+            button_group["rotate_ccw"].click(
+                fn=partial(_rotate_piece_ccw, i),
+                inputs=[batch_state, rotation_input],
+                outputs=[
+                    *ordered_components,
+                    match_location,
+                    match_summary,
+                    match_state,
+                    match_index,
+                    batch_state,
+                    *batch_button_containers,
+                    *batch_spacers,
+                ],
+            )
 
         gr.Markdown(
             textwrap.dedent(
