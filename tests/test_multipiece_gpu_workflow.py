@@ -122,14 +122,16 @@ class TestMultipieceGPUWorkflow:
 
     def test_background_removal_composite_logic(self):
         """Test the background removal and white background composite logic"""
-        # Create a sample BGRA image
+        # Create a sample BGRA image (simulating remove_background_ai output)
         bgr = np.ones((100, 100, 3), dtype=np.uint8) * 128
         alpha = np.full((100, 100), 255, dtype=np.uint8)
         bgra = np.dstack([bgr, alpha])
 
         # Apply the composite logic from the GPU workflow
+        # This matches the implementation in app.py lines 960-965
         bgr_out = bgra[:, :, :3]
-        alpha_3ch = np.stack([alpha.astype(np.float32) / 255.0] * 3, axis=-1)
+        alpha_extracted = bgra[:, :, 3].astype(np.float32) / 255.0
+        alpha_3ch = np.stack([alpha_extracted] * 3, axis=-1)
         white_bg = np.full_like(bgr_out, 255, dtype=np.uint8)
         result = (bgr_out * alpha_3ch + white_bg * (1 - alpha_3ch)).astype(np.uint8)
 

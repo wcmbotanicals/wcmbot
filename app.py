@@ -936,6 +936,10 @@ def solve_puzzle_multipiece(
         "show_grid": show_grid,
     }
 
+    # Constants for piece cropping
+    MIN_PAD_PIXELS = 4
+    PAD_FRACTION = 0.06
+
     processed = 0
     last_result = None
 
@@ -944,8 +948,7 @@ def solve_puzzle_multipiece(
         # GPU workflow: crop pieces, remove backgrounds, then match
         for idx, region in enumerate(regions):
             x, y, w, h = region["bbox"]
-            pad_frac = 0.06
-            pad = max(4, int(min(w, h) * float(pad_frac)))
+            pad = max(MIN_PAD_PIXELS, int(min(w, h) * PAD_FRACTION))
             x0 = max(0, x - pad)
             y0 = max(0, y - pad)
             x1 = min(grid_bgr.shape[1], x + w + pad)
