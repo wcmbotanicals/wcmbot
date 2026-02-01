@@ -16,6 +16,7 @@ dependencies = [
     "numpy",
     "gradio",
     "plotly",
+    "onnxruntime",
     "rembg[cpu]",
 ]
 

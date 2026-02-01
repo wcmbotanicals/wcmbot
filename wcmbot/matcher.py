@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import inspect
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1476,11 +1477,51 @@ def _mask_by_gradient(
 # Global rembg session (lazy initialized with thread safety)
 _REMBG_SESSION = None
 _REMBG_LOCK = threading.Lock()
+_REMBG_SESSION_INFO = None  # (model_name, device, providers)
+
+
+def _detect_rembg_device_and_providers() -> tuple[str, list[str]]:
+    """Detect whether onnxruntime has a GPU execution provider.
+
+    Returns:
+        (device, providers):
+            device is "gpu" or "cpu".
+            providers is an ordered list suitable for onnxruntime / rembg.
+
+    Notes:
+        This is intentionally conservative: we only claim GPU if a known GPU
+        provider is present in ``onnxruntime.get_available_providers()``.
+    """
+
+    try:
+        import onnxruntime as ort
+    except Exception:
+        return ("cpu", ["CPUExecutionProvider"])
+
+    available = set(ort.get_available_providers() or [])
+
+    gpu_provider_priority = [
+        "TensorrtExecutionProvider",
+        "CUDAExecutionProvider",
+        "ROCMExecutionProvider",
+        "DmlExecutionProvider",
+        "CoreMLExecutionProvider",
+    ]
+
+    for gpu_provider in gpu_provider_priority:
+        if gpu_provider in available:
+            # Include CPU as a fallback provider.
+            providers = [gpu_provider]
+            if "CPUExecutionProvider" in available:
+                providers.append("CPUExecutionProvider")
+            return ("gpu", providers)
+
+    return ("cpu", ["CPUExecutionProvider"])
 
 
 def _get_rembg_session():
     """Get or create the rembg session (lazy initialization with thread safety)."""
-    global _REMBG_SESSION
+    global _REMBG_SESSION, _REMBG_SESSION_INFO
     if _REMBG_SESSION is None:
         with _REMBG_LOCK:
             # Double-check pattern: another thread might have initialized while waiting
@@ -1488,10 +1529,78 @@ def _get_rembg_session():
                 try:
                     from rembg import new_session
 
-                    _REMBG_SESSION = new_session("isnet-general-use")
+                    device, providers = _detect_rembg_device_and_providers()
+                    preferred_model = (
+                        "birefnet-dis" if device == "gpu" else "isnet-general-use"
+                    )
+
+                    session_kwargs = {}
+                    try:
+                        if "providers" in inspect.signature(new_session).parameters:
+                            session_kwargs["providers"] = providers
+                    except Exception:
+                        # If signature inspection fails, just call new_session(model).
+                        session_kwargs = {}
+
+                    try:
+                        _REMBG_SESSION = new_session(preferred_model, **session_kwargs)
+                        _REMBG_SESSION_INFO = (preferred_model, device, providers)
+                    except Exception as exc:
+                        # If the preferred model isn't available (or providers mismatch),
+                        # fall back to the known-good CPU model.
+                        fallback_model = "isnet-general-use"
+                        try:
+                            _REMBG_SESSION = new_session(
+                                fallback_model,
+                                **(
+                                    {"providers": ["CPUExecutionProvider"]}
+                                    if session_kwargs.get("providers")
+                                    else {}
+                                ),
+                            )
+                            _REMBG_SESSION_INFO = (
+                                fallback_model,
+                                "cpu",
+                                ["CPUExecutionProvider"],
+                            )
+                            logger.warning(
+                                "rembg: failed to init model=%s device=%s providers=%s; "
+                                "fell back to model=%s on CPU (%s)",
+                                preferred_model,
+                                device,
+                                providers,
+                                fallback_model,
+                                exc,
+                            )
+                        except Exception:
+                            raise
+
+                    if _REMBG_SESSION_INFO is not None:
+                        model_name, chosen_device, chosen_providers = (
+                            _REMBG_SESSION_INFO
+                        )
+                        msg = (
+                            f"rembg: model={model_name} device={chosen_device} "
+                            f"providers={chosen_providers}"
+                        )
+                        logger.info(msg)
+                        # Ensure the info is visible even without logging configured.
+                        print(msg)
+                except ModuleNotFoundError as e:
+                    if getattr(e, "name", None) == "onnxruntime":
+                        raise RuntimeError(
+                            "AI segmentation requires onnxruntime. Install with: "
+                            "pip install onnxruntime (CPU) or pip install 'wcmbot[gpu]' "
+                            "for GPU support."
+                        ) from e
+                    raise RuntimeError(
+                        "AI segmentation requires rembg and its runtime deps. Install with: "
+                        "pip install rembg (or pip install 'wcmbot[gpu]')."
+                    ) from e
                 except ImportError as e:
                     raise RuntimeError(
-                        "rembg package not installed. Install with: pip install rembg"
+                        "AI segmentation requires rembg. Install with: pip install rembg "
+                        "(or pip install 'wcmbot[gpu]')."
                     ) from e
     return _REMBG_SESSION
 
@@ -1505,9 +1614,9 @@ def _mask_by_ai(
 ) -> np.ndarray:
     """Segment piece using AI-based background removal (rembg).
 
-    Uses the ISNet-general-use model via rembg for high-quality background
-    removal. This produces excellent masks but is slower (~1s per piece) than
-    color-based methods.
+    Uses rembg for high-quality background removal. If a GPU execution provider
+    is available via onnxruntime, prefers the "birefnet-dis" model; otherwise
+    falls back to "isnet-general-use".
 
     Args:
         piece_bgr: BGR image of the piece.
