@@ -648,6 +648,9 @@ def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_st
     total = int(batch_state.get("total") or len(piece_states))
     template_id = batch_state.get("template_id")
     template_rotation = batch_state.get("rotation", 0)
+    match_mask_mode = batch_state.get(
+        "match_mask_mode"
+    )  # Retrieve match mask mode from batch state
 
     if piece_index < 0 or piece_index >= len(piece_states):
         views = _build_multipiece_views_from_state(batch_state)
@@ -711,7 +714,14 @@ def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_st
             batch_state,
         )
     try:
-        matcher_config = build_matcher_config_for_template(template_spec)
+        matcher_overrides = {}
+        if match_mask_mode:
+            matcher_overrides["mask_mode"] = (
+                match_mask_mode  # Add mask mode to matcher overrides
+            )
+        matcher_config = build_matcher_config_for_template(
+            template_spec, matcher_overrides or None
+        )
 
         # Load the original piece and apply total rotation
         piece_bgr = cv2.imread(cached_piece_path)
@@ -723,7 +733,16 @@ def _rotate_multipiece_candidate(piece_index: int, rotation_deg: float, batch_st
             h, w = piece_bgr.shape[:2]
             center = (w // 2, h // 2)
             rot_matrix = cv2.getRotationMatrix2D(center, total_rotation, 1.0)
-            piece_bgr = cv2.warpAffine(piece_bgr, rot_matrix, (w, h))
+            warp_kwargs = {}
+            if isinstance(match_mask_mode, str) and match_mask_mode.lower() in (
+                "white_bg",
+                "whitebg",
+                "white",
+            ):
+                # Preserve the white background when rotating; otherwise corners become
+                # black and the white-bg mask will incorrectly treat them as foreground.
+                warp_kwargs["borderValue"] = (255, 255, 255)
+            piece_bgr = cv2.warpAffine(piece_bgr, rot_matrix, (w, h), **warp_kwargs)
 
         # Run matcher without auto-align (manual rotation only)
         payload = solve_piece_payload_from_bgr(
@@ -893,7 +912,11 @@ def solve_puzzle_multipiece(
         split_config = build_matcher_config_for_template(
             template_spec, {"mask_mode": "ai"}
         )
-        match_config = build_matcher_config_for_template(template_spec)
+        # Matching on GPU workflow crops should NOT re-run template HSV masking.
+        # The crops come from a pre-masked (white background) image.
+        match_config = build_matcher_config_for_template(
+            template_spec, {"mask_mode": "white_bg"}
+        )
     else:
         # CPU workflow or no AI: template default for split, AI for matching if requested
         split_config = build_matcher_config_for_template(template_spec)
@@ -960,6 +983,7 @@ def solve_puzzle_multipiece(
         "piece_states": piece_states,
         "total": total,
         "show_grid": show_grid,
+        "match_mask_mode": getattr(match_config, "mask_mode", None),
     }
 
     # Constants for piece cropping

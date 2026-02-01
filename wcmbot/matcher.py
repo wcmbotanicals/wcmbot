@@ -1474,6 +1474,43 @@ def _mask_by_gradient(
     return mask01
 
 
+def _mask_by_white_bg(
+    piece_bgr: np.ndarray,
+    kernel_size: int,
+    open_iters: int,
+    close_iters: int,
+    keep_largest_component: bool = True,
+    *,
+    white_thresh: int = 250,
+) -> np.ndarray:
+    """Segment a piece on a near-white background.
+
+    Intended for workflows that have already composited the background to
+    white (e.g. reusing an AI-derived split mask once at grid level).
+
+    Background is defined as pixels where all channels are >= ``white_thresh``.
+    """
+
+    thr = int(white_thresh)
+    thr = max(0, min(255, thr))
+
+    bg = (
+        (piece_bgr[:, :, 0] >= thr)
+        & (piece_bgr[:, :, 1] >= thr)
+        & (piece_bgr[:, :, 2] >= thr)
+    )
+    mask = (~bg).astype(np.uint8) * 255
+    mask = _cleanup_mask(mask, kernel_size, open_iters, close_iters)
+    mask01 = (mask > 0).astype(np.uint8)
+    if keep_largest_component:
+        mask01 = _keep_largest_component(mask01)
+    if mask01.sum() == 0:
+        raise RuntimeError(
+            "White-bg segmentation produced empty mask - is the background actually white?"
+        )
+    return mask01
+
+
 # Global rembg session (lazy initialized with thread safety)
 _REMBG_SESSION = None
 _REMBG_LOCK = threading.Lock()
@@ -1727,7 +1764,7 @@ def compute_piece_mask(
 ) -> np.ndarray:
     """Compute a binary mask for a puzzle piece based on color mode.
 
-    Supports "blue", "green", "hsv"/"hsv_ranges", "gradient", or "ai" modes.
+    Supports "blue", "green", "hsv"/"hsv_ranges", "gradient", "white_bg", or "ai" modes.
     Returns a binary mask (0 or 1) with the piece foreground isolated at the
     input image size.
 
@@ -1767,6 +1804,10 @@ def compute_piece_mask(
         )
     elif mask_mode == "gradient":
         mask01 = _mask_by_gradient(
+            piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
+        )
+    elif mask_mode in ("white_bg", "whitebg", "white"):
+        mask01 = _mask_by_white_bg(
             piece_bgr, kernel_size, open_iters, close_iters, keep_largest_component
         )
     elif mask_mode == "ai":

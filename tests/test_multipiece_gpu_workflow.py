@@ -73,7 +73,7 @@ class TestMultipieceGPUWorkflow:
         assert match_config.mask_mode == "ai"
 
     def test_gpu_workflow_logic(self, sample_regions, mock_template_spec):
-        """Test GPU workflow uses AI for split, default for matching"""
+        """Test GPU workflow uses AI for split, white-bg masking for matching"""
         from wcmbot.solving import build_matcher_config_for_template
 
         # Simulate GPU workflow logic
@@ -81,13 +81,15 @@ class TestMultipieceGPUWorkflow:
         split_config = build_matcher_config_for_template(
             mock_template_spec, {"mask_mode": "ai"}
         )
-        match_config = build_matcher_config_for_template(mock_template_spec)
+        match_config = build_matcher_config_for_template(
+            mock_template_spec, {"mask_mode": "white_bg"}
+        )
 
         # Verify split uses AI
         assert split_config.mask_mode == "ai"
 
-        # Verify match uses default (no AI)
-        assert match_config.mask_mode != "ai" or match_config.mask_mode is None
+        # Verify match is non-AI and uses white-bg masking
+        assert match_config.mask_mode == "white_bg"
 
     def test_can_rembg_use_gpu_returns_bool(self):
         """Test that can_rembg_use_gpu returns a boolean"""
@@ -121,23 +123,26 @@ class TestMultipieceGPUWorkflow:
             assert result is True
 
     def test_background_removal_composite_logic(self):
-        """Test the background removal and white background composite logic"""
-        # Create a sample BGRA image (simulating remove_background_ai output)
-        bgr = np.ones((100, 100, 3), dtype=np.uint8) * 128
-        alpha = np.full((100, 100), 255, dtype=np.uint8)
-        bgra = np.dstack([bgr, alpha])
+        """Test the split-mask-based white background composite logic"""
 
-        # Apply the composite logic from the GPU workflow
-        # This matches the implementation in app.py lines 960-965
-        bgr_out = bgra[:, :, :3]
-        alpha_extracted = bgra[:, :, 3].astype(np.float32) / 255.0
-        alpha_3ch = np.stack([alpha_extracted] * 3, axis=-1)
-        white_bg = np.full_like(bgr_out, 255, dtype=np.uint8)
-        result = (bgr_out * alpha_3ch + white_bg * (1 - alpha_3ch)).astype(np.uint8)
+        grid_bgr = np.ones((100, 100, 3), dtype=np.uint8) * 128
+        split_mask01 = np.zeros((100, 100), dtype=np.uint8)
+        split_mask01[10:90, 20:80] = 1
 
-        # Result should be approximately the original BGR (since alpha is 255)
-        assert result.shape == bgr.shape
-        assert np.allclose(result, bgr, atol=1)
+        mask01 = (split_mask01 > 0).astype(np.uint8)
+        alpha = mask01.astype(np.float32)
+        alpha_3ch = np.stack([alpha] * 3, axis=-1)
+        white_bg = np.full_like(grid_bgr, 255, dtype=np.uint8)
+        result = (
+            grid_bgr.astype(np.float32) * alpha_3ch
+            + white_bg.astype(np.float32) * (1 - alpha_3ch)
+        ).astype(np.uint8)
+
+        assert result.shape == grid_bgr.shape
+        # Foreground region should be preserved.
+        assert np.all(result[10:90, 20:80] == 128)
+        # Background region should be white.
+        assert np.all(result[0:10, :, :] == 255)
 
     def test_default_mode_uses_default_configs(self, mock_template_spec):
         """Test that default segmentation mode doesn't add AI overrides"""
