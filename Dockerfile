@@ -19,4 +19,4 @@ COPY . .
 RUN uv pip install -e .
 
 ENTRYPOINT ["/app/.venv/bin/python", "-u", "app.py"]
-CMD ["--ai", "--accessible"]
+CMD ["--ai-seg", "--accessible"]
