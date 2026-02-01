@@ -6,6 +6,7 @@ import os
 import random
 import tempfile
 import textwrap
+import threading
 from functools import partial
 from pathlib import Path
 from typing import Dict, Optional
@@ -1037,15 +1038,20 @@ DEFAULT_TEMPLATE_SPEC = None
 TEMPLATE_IMAGES = None
 DEFAULT_TEMPLATE_PREVIEW = None
 DEFAULT_TEMPLATE_PLOT = None
+_TEMPLATE_LOCK = threading.Lock()  # Thread safety for lazy template loading
 
 
 def _ensure_template_registry_loaded():
     global TEMPLATE_REGISTRY, DEFAULT_TEMPLATE_ID, DEFAULT_TEMPLATE_SPEC
     if TEMPLATE_REGISTRY is not None:
         return
-    TEMPLATE_REGISTRY = load_template_registry()
-    DEFAULT_TEMPLATE_ID = TEMPLATE_REGISTRY.default_template_id
-    DEFAULT_TEMPLATE_SPEC = TEMPLATE_REGISTRY.get(DEFAULT_TEMPLATE_ID)
+    with _TEMPLATE_LOCK:
+        # Double-check pattern: another thread might have initialized while waiting
+        if TEMPLATE_REGISTRY is not None:
+            return
+        TEMPLATE_REGISTRY = load_template_registry()
+        DEFAULT_TEMPLATE_ID = TEMPLATE_REGISTRY.default_template_id
+        DEFAULT_TEMPLATE_SPEC = TEMPLATE_REGISTRY.get(DEFAULT_TEMPLATE_ID)
 
 
 def _ensure_template_spec_loaded(template_id: str):
@@ -1059,22 +1065,32 @@ def _ensure_template_image_loaded(template_id: str) -> Optional[np.ndarray]:
     global TEMPLATE_IMAGES
 
     if TEMPLATE_IMAGES is None:
-        TEMPLATE_IMAGES = {}
+        with _TEMPLATE_LOCK:
+            # Double-check: another thread might have initialized while waiting
+            if TEMPLATE_IMAGES is None:
+                TEMPLATE_IMAGES = {}
 
+    # Check if already loaded (fast path, no lock needed for read)
     if template_id in TEMPLATE_IMAGES and TEMPLATE_IMAGES[template_id] is not None:
         return TEMPLATE_IMAGES[template_id]
 
-    template_spec = _ensure_template_spec_loaded(template_id)
-    if template_spec is None:
-        return TEMPLATE_IMAGES.get(template_id)
+    # Need to load the template image
+    with _TEMPLATE_LOCK:
+        # Double-check: another thread might have loaded this template while waiting
+        if template_id in TEMPLATE_IMAGES and TEMPLATE_IMAGES[template_id] is not None:
+            return TEMPLATE_IMAGES[template_id]
 
-    check_template_exists(template_spec.template_path)
-    TEMPLATE_IMAGES[template_id] = get_template_image(
-        template_spec.template_path,
-        crop_x=template_spec.crop_x,
-        crop_y=template_spec.crop_y,
-    )
-    return TEMPLATE_IMAGES[template_id]
+        template_spec = _ensure_template_spec_loaded(template_id)
+        if template_spec is None:
+            return TEMPLATE_IMAGES.get(template_id)
+
+        check_template_exists(template_spec.template_path)
+        TEMPLATE_IMAGES[template_id] = get_template_image(
+            template_spec.template_path,
+            crop_x=template_spec.crop_x,
+            crop_y=template_spec.crop_y,
+        )
+        return TEMPLATE_IMAGES[template_id]
 
 
 def _no_update_outputs(state, idx, batch_state):
