@@ -950,17 +950,25 @@ def solve_puzzle_multipiece(
     grid_bgr_bg_removed = grid_bgr
     if use_gpu_ai_workflow:
         if split_mask01 is None:
-            raise RuntimeError(
-                "GPU AI workflow expected a split mask, but none was returned."
+            yield _blank_outputs(
+                "GPU AI workflow expected a split mask, but none was returned.",
+                template_id,
+                rotation,
+                show_grid,
             )
+            return
         mask01 = (split_mask01 > 0).astype(np.uint8)
         fg_frac = float(mask01.mean())
         # If this trips, something is fundamentally wrong upstream.
         if not (0.01 <= fg_frac <= 0.99):
-            raise RuntimeError(
-                "GPU AI workflow produced a degenerate split mask: "
-                f"foreground fraction={fg_frac:.4f}."
+            yield _blank_outputs(
+                f"GPU AI workflow produced a degenerate split mask: "
+                f"foreground fraction={fg_frac:.4f}.",
+                template_id,
+                rotation,
+                show_grid,
             )
+            return
 
         alpha = mask01.astype(np.float32)
         alpha_3ch = np.stack([alpha] * 3, axis=-1)
