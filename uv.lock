@@ -2681,11 +2681,11 @@ source = { editable = "." }
 dependencies = [
     { name = "gradio" },
     { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "opencv-python-headless" },
     { name = "pillow" },
     { name = "plotly" },
     { name = "rembg", extra = ["cpu"] },
-    { name = "torch" },
 ]
 
 [package.optional-dependencies]
@@ -2694,16 +2694,19 @@ dev = [
     { name = "pytest" },
     { name = "pytest-playwright" },
     { name = "ruff" },
+    { name = "torch" },
     { name = "versioneer", extra = ["toml"] },
 ]
 gpu = [
     { name = "rembg", extra = ["gpu"] },
+    { name = "torch" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "gradio" },
     { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "opencv-python-headless" },
     { name = "pillow" },
     { name = "playwright", marker = "extra == 'dev'" },
@@ -2713,7 +2716,8 @@ requires-dist = [
     { name = "rembg", extras = ["cpu"] },
     { name = "rembg", extras = ["gpu"], marker = "extra == 'gpu'" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "torch" },
+    { name = "torch", marker = "extra == 'dev'" },
+    { name = "torch", marker = "extra == 'gpu'" },
     { name = "versioneer", extras = ["toml"], marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev", "gpu"]

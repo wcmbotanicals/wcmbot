@@ -3,4 +3,5 @@ numpy
 opencv-python
 Pillow
 plotly
-torch
+onnxruntime
+rembg
