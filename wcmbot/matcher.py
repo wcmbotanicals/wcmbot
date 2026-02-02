@@ -4621,7 +4621,7 @@ def _match_piece_bgr_against_template(
     # the full mask. This ordering ensures knobs are inferred from the complete
     # piece shape before any edge effects are removed.
     mask_edge_frac = max(0.0, float(mask_edge_frac))
-    if mask_mode == "ai":
+    if mask_mode in ("ai", "white_bg", "whitebg", "white"):
         mask_edge_frac = max(mask_edge_frac, 0.02)
     if mask_edge_frac > 0:
         piece_mask_crop = _erode_mask_edges(piece_mask_crop, mask_edge_frac)
