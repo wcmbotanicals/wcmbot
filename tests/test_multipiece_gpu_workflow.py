@@ -11,15 +11,18 @@ import pytest
 @pytest.fixture
 def sample_multipiece_image_path():
     """Create a simple test image file"""
+    tmp_path = None
     try:
         from PIL import Image
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
             img = Image.new("RGB", (400, 200), (255, 255, 255))
-            img.save(tmp.name)
-            yield tmp.name
+            img.save(tmp_path)
+        yield tmp_path
     finally:
-        Path(tmp.name).unlink(missing_ok=True)
+        if tmp_path is not None:
+            Path(tmp_path).unlink(missing_ok=True)
 
 
 @pytest.fixture
